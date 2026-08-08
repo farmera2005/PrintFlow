@@ -1,0 +1,45 @@
+# PrintFlow — two services, one published port. Designed to sit on a NAS
+# alongside the existing Bambuddy container.
+#
+# Before the first `docker compose up -d`, set SECRET_KEY below to a long
+# random string and never change it afterwards: integration credentials are
+# encrypted with a key derived from it.
+#
+#   Generate one with:  openssl rand -base64 48
+#
+# Everything else — Etsy, QuickBooks, Bambuddy and ShipStation credentials,
+# poll intervals, the admin login — is configured in the app's setup wizard on
+# first launch. There are no other environment variables to set.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: printflow
+      POSTGRES_PASSWORD: printflow
+      POSTGRES_DB: printflow
+    volumes:
+      - printflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U printflow -d printflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://printflow:printflow@postgres:5432/printflow
+      SECRET_KEY: "CHANGE-ME-to-a-long-random-string"
+    ports:
+      - "8420:8000"
+
+volumes:
+  printflow-db:

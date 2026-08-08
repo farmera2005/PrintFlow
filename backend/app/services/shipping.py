@@ -1,0 +1,166 @@
+"""ShipStation order matching and label creation (§4.4)."""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..integrations import shipstation as ss_api
+from ..integrations.base import IntegrationError
+from ..models import (
+    ORDER_CANCELLED,
+    ORDER_SHIPPED,
+    Order,
+)
+from ..services import credentials
+from ..services.state import recompute_order
+
+log = logging.getLogger("printflow.shipping")
+
+# ShipStation's Etsy import can lag by up to an hour, so back off rather than
+# hammering: minutes to wait before attempt N.
+BACKOFF_MINUTES = (0, 5, 10, 20, 30, 45, 60)
+MAX_MATCH_ATTEMPTS = 48
+
+
+def next_attempt_due(
+    attempts: int, last_attempt_at: datetime | None, now: datetime | None = None
+) -> bool:
+    if attempts >= MAX_MATCH_ATTEMPTS:
+        return False
+    if last_attempt_at is None or attempts == 0:
+        return True
+    wait = BACKOFF_MINUTES[min(attempts, len(BACKOFF_MINUTES) - 1)]
+    now = now or datetime.now(timezone.utc)
+    reference = last_attempt_at
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return now - reference >= timedelta(minutes=wait)
+
+
+class LabelError(RuntimeError):
+    pass
+
+
+async def match_orders(session: AsyncSession, *, limit: int = 50) -> dict[str, int]:
+    """Find each unmatched order in ShipStation by its Etsy receipt id."""
+    candidates = (
+        (
+            await session.execute(
+                select(Order)
+                .where(
+                    Order.shipstation_order_id.is_(None),
+                    Order.status.notin_((ORDER_SHIPPED, ORDER_CANCELLED)),
+                )
+                .order_by(Order.placed_at.desc().nullslast())
+                .limit(limit * 4)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    due = [
+        order
+        for order in candidates
+        if next_attempt_due(order.shipstation_attempts, order.shipstation_last_attempt_at)
+    ][:limit]
+
+    stats = {"checked": len(due), "matched": 0, "not_found": 0}
+    if not due:
+        return stats
+
+    client = await ss_api.client_for(session)
+    now = datetime.now(timezone.utc)
+    for order in due:
+        order.shipstation_attempts += 1
+        order.shipstation_last_attempt_at = now
+        try:
+            found = await client.find_order_by_number(order.order_number)
+        except IntegrationError as exc:
+            log.warning("ShipStation lookup failed for %s: %s", order.order_number, exc)
+            raise
+        if found and found.get("orderId"):
+            order.shipstation_order_id = int(found["orderId"])
+            stats["matched"] += 1
+        else:
+            stats["not_found"] += 1
+    await session.flush()
+    return stats
+
+
+async def label_context(session: AsyncSession, order: Order) -> dict[str, Any]:
+    """Everything the label dialog needs, pre-populated from ShipStation."""
+    if order.shipstation_order_id is None:
+        return {"available": False, "reason": "Not matched in ShipStation yet."}
+    client = await ss_api.client_for(session)
+    remote = await client.get_order(order.shipstation_order_id)
+    defaults = ss_api.order_defaults(remote)
+    carriers = await client.list_carriers()
+    return {
+        "available": True,
+        "shipstation_order_id": order.shipstation_order_id,
+        "defaults": defaults,
+        "carriers": [
+            {"code": c.get("code"), "name": c.get("name")}
+            for c in carriers
+            if isinstance(c, dict)
+        ],
+    }
+
+
+async def create_label(
+    session: AsyncSession,
+    order: Order,
+    *,
+    carrier_code: str,
+    service_code: str,
+    package_code: str,
+    weight_value: float,
+    weight_units: str = "ounces",
+    confirmation: str | None = None,
+    test_label: bool = False,
+) -> dict[str, Any]:
+    """Buy a label. Always explicitly user-triggered — labels cost money (§4.4)."""
+    if order.shipstation_order_id is None:
+        raise LabelError("This order has not been matched in ShipStation yet.")
+    if order.label_created_at is not None:
+        raise LabelError("A label has already been created for this order.")
+    if weight_value is None or float(weight_value) <= 0:
+        raise LabelError("Enter a shipping weight greater than zero.")
+
+    client = await ss_api.client_for(session)
+    response = await client.create_label_for_order(
+        order_id=order.shipstation_order_id,
+        carrier_code=carrier_code,
+        service_code=service_code,
+        package_code=package_code or "package",
+        weight={"value": float(weight_value), "units": weight_units},
+        confirmation=confirmation,
+        test_label=test_label,
+    )
+
+    tracking = response.get("trackingNumber")
+    if not tracking:
+        raise LabelError(f"ShipStation did not return a tracking number: {response}")
+
+    order.tracking_number = str(tracking)
+    order.carrier_code = carrier_code
+    order.service_code = service_code
+    order.label_created_at = datetime.now(timezone.utc)
+    order.label_pdf = ss_api.decode_label_pdf(response)
+    await session.flush()
+    await credentials.mark_ok(session, "shipstation")
+    # Tracking flows back to Etsy through ShipStation's own store connection —
+    # this platform never writes to Etsy.
+    await recompute_order(session, order)
+    return {
+        "tracking_number": order.tracking_number,
+        "carrier_code": carrier_code,
+        "service_code": service_code,
+        "shipment_cost": response.get("shipmentCost"),
+        "has_pdf": order.label_pdf is not None,
+    }
