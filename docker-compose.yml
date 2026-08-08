@@ -1,15 +1,19 @@
-# PrintFlow — two services, one published port. Designed to sit on a NAS
-# alongside the existing Bambuddy container.
+# PrintFlow — two services, nothing to edit.
 #
-# Before the first `docker compose up -d`, set SECRET_KEY below to a long
-# random string and never change it afterwards: integration credentials are
-# encrypted with a key derived from it.
+#   docker compose up -d
 #
-#   Generate one with:  openssl rand -base64 48
+# Then open https://<this-host>:8443 and work through the setup wizard. The
+# certificate is self-signed and generated on first boot, so your browser will
+# warn once; the wizard lets you re-issue it for your real hostname and download
+# it for your trust store.
 #
-# Everything else — Etsy, QuickBooks, Bambuddy and ShipStation credentials,
-# poll intervals, the admin login — is configured in the app's setup wizard on
-# first launch. There are no other environment variables to set.
+# Everything else — the admin login, Etsy, QuickBooks, Bambuddy and ShipStation
+# credentials, poll intervals — is configured in the app. There are no config
+# files and no secrets to invent.
+#
+# The `printflow-data` volume holds the generated encryption key that stored
+# credentials are encrypted with. Back it up, and do not delete it unless you
+# intend to reconnect every integration.
 
 services:
   postgres:
@@ -37,9 +41,17 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://printflow:printflow@postgres:5432/printflow
-      SECRET_KEY: "CHANGE-ME-to-a-long-random-string"
+      # SECRET_KEY is optional. Left unset, PrintFlow generates one on first
+      # boot and keeps it in the data volume. Set it here only if you would
+      # rather manage the key yourself — changing it later makes already-stored
+      # credentials undecryptable.
+      # SECRET_KEY: ""
+    volumes:
+      - printflow-data:/data
     ports:
-      - "8420:8000"
+      - "8443:8443" # HTTPS — use this one
+      - "8420:8000" # HTTP — fallback, and handy if the certificate goes wrong
 
 volumes:
   printflow-db:
+  printflow-data:

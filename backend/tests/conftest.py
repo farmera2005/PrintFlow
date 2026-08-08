@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 # Configuration must be in place before anything imports app.config.
 os.environ.setdefault(
@@ -12,6 +13,10 @@ os.environ.setdefault(
     ),
 )
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-printflow-suite")
+# Keep the suite off the real /data volume.
+os.environ.setdefault(
+    "PRINTFLOW_DATA_DIR", tempfile.mkdtemp(prefix="printflow-test-data-")
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

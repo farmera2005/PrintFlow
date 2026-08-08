@@ -12,6 +12,7 @@ from ..models import AppSetting
 KEY_SETUP_COMPLETE = "setup_complete"
 KEY_POLL_INTERVALS = "poll_intervals"
 KEY_PUBLIC_BASE_URL = "public_base_url"
+KEY_HTTPS_REDIRECT = "https_redirect"
 
 # Defaults from §6 of the build spec.
 DEFAULT_POLL_INTERVALS: dict[str, int] = {
@@ -30,6 +31,9 @@ _DEFAULTS: dict[str, Any] = {
     KEY_SETUP_COMPLETE: False,
     KEY_POLL_INTERVALS: DEFAULT_POLL_INTERVALS,
     KEY_PUBLIC_BASE_URL: None,
+    # Off by default: a redirect that outlives a broken certificate would lock
+    # the operator out of the only UI that can fix it.
+    KEY_HTTPS_REDIRECT: False,
 }
 
 

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import hash_password, issue_session, require_user
 from ..db import get_session
 from ..models import PROVIDERS, User
-from ..services import credentials
+from ..services import credentials, tls
 from ..services.settings_store import (
     KEY_POLL_INTERVALS,
     KEY_PUBLIC_BASE_URL,
@@ -30,8 +30,14 @@ async def setup_status(session: AsyncSession = Depends(get_session)) -> dict:
     """Drives the wizard: which steps are done, which is next."""
     statuses = {row["provider"]: row for row in await credentials.status_summary(session)}
     admin_exists = await has_admin_user(session)
+    certificate = await tls.active_certificate(session)
     steps = [
         {"key": "admin", "label": "Admin account", "complete": admin_exists},
+        {
+            "key": "security",
+            "label": "Access & security",
+            "complete": certificate is not None,
+        },
         *[
             {
                 "key": provider,
@@ -89,7 +95,6 @@ class IntervalsRequest(BaseModel):
     etsy_minutes: int | None = None
     bambuddy_minutes: int | None = None
     shipstation_minutes: int | None = None
-    public_base_url: str | None = None
 
 
 @router.post("/intervals")
@@ -100,10 +105,6 @@ async def save_intervals(
 ) -> dict:
     intervals = clamp_poll_intervals(body.model_dump(exclude_none=True))
     await set_setting(session, KEY_POLL_INTERVALS, intervals)
-    if body.public_base_url is not None:
-        await set_setting(
-            session, KEY_PUBLIC_BASE_URL, body.public_base_url.strip().rstrip("/") or None
-        )
     await session.commit()
 
     from ..scheduler import reschedule

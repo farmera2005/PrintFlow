@@ -32,49 +32,78 @@ automatically — they cost money, so they are always an explicit click.
 
 ## Running it
 
-Two services, one published port, designed to sit on a NAS next to the
-existing Bambuddy container.
+Two services, nothing to edit. Designed to sit on a NAS next to the existing
+Bambuddy container.
 
 ```bash
-# 1. Set a long random SECRET_KEY in docker-compose.yml and never change it:
-openssl rand -base64 48
-
-# 2. Start
-docker compose up -d --build
+git clone <this repo> && cd PrintFlow
+docker compose up -d
 ```
 
-Then open `http://<your-nas>:8420` and work through the setup wizard.
+Then open **`https://<your-nas>:8443`** and work through the setup wizard.
 
-`DATABASE_URL` and `SECRET_KEY` are the only environment variables. There are
-no config files and no seed scripts — **every** integration credential, the
-admin login and the poll intervals are entered in the app.
+That is the whole install. There is no file to edit, no secret to invent and no
+certificate to generate by hand:
 
-> `SECRET_KEY` is the encryption key for stored credentials. If you change it,
-> the saved credentials become undecryptable; the app says so plainly and asks
-> you to reconnect each integration rather than failing obscurely.
+- **The encryption key** is generated on first boot and kept in the
+  `printflow-data` volume. Set `SECRET_KEY` yourself only if you would rather
+  manage it — but do not change it later, because stored credentials are
+  encrypted with it. (If it ever does change, the app says so plainly and asks
+  you to reconnect each integration rather than failing obscurely.)
+- **The HTTPS certificate** is generated on first boot too, so the wizard is
+  already on https. It is self-signed, so your browser warns once — the wizard
+  re-issues it for your real hostname and offers it for download so you can
+  trust it.
+- **Port 8000** (published as 8420) stays open on plain HTTP as a way back in
+  if a certificate ever goes wrong.
+
+`DATABASE_URL` and `SECRET_KEY` are the only environment variables that mean
+anything, and both are optional in the compose file. There are no config files
+and no seed scripts — **every** setting is entered in the app.
 
 ### First-run setup wizard
 
 1. **Admin account** — username + password (bcrypt, session cookie).
-2. **Etsy** — paste your app's keystring and shared secret; the app runs the
+2. **Access & security** — the address you reach PrintFlow on, and the HTTPS
+   certificate: re-issue it for your hostnames and IPs, download it for your
+   trust store, or upload your own certificate and key. Optionally redirect
+   plain HTTP to HTTPS. This step comes before the OAuth steps because Etsy and
+   Intuit both reject an `http://` redirect URI.
+3. **Etsy** — paste your app's keystring and shared secret; the app runs the
    OAuth 2.0 PKCE flow and you pick the shop. Refresh tokens rotate and the new
    one is persisted on every refresh.
-3. **QuickBooks Online** — paste your Intuit app's client ID and secret; the
+4. **QuickBooks Online** — paste your Intuit app's client ID and secret; the
    app runs the OAuth flow and stores the realm ID. Access tokens refresh
    silently.
-4. **Bambuddy** — base URL + API key. Validated by fetching the instance's
+5. **Bambuddy** — base URL + API key. Validated by fetching the instance's
    OpenAPI document (version is logged) and listing the printers it finds.
-5. **ShipStation** — API key + secret. Validated by listing stores; you pick
+6. **ShipStation** — API key + secret. Validated by listing stores; you pick
    the one that receives your Etsy orders.
-6. **Poll intervals** — defaults pre-filled (Etsy 5 min, Bambuddy 2 min,
+7. **Poll intervals** — defaults pre-filled (Etsy 5 min, Bambuddy 2 min,
    ShipStation 10 min).
 
-The wizard shows the exact OAuth redirect URI to register with Etsy and Intuit.
-If PrintFlow sits behind a reverse proxy, set **Public base URL** first so the
-redirect URIs are built from the address the browser actually uses.
+The Etsy and QuickBooks steps show the exact redirect URI to register, built
+from the address set in step 2 — so set that first if you reach PrintFlow
+through a reverse proxy or a hostname other than the one it guesses.
 
 Every integration is reconfigurable later from **Settings**, including full
 re-auth, and the wizard can be re-opened at any time.
+
+### About the certificate
+
+Re-issuing applies immediately: the HTTPS listener restarts on the new
+certificate without a container restart. The swap is deferred until just after
+the response is sent, because that response is being served over the listener
+being replaced. Your browser will ask you to trust the new certificate.
+
+If you would rather terminate TLS at a reverse proxy, point it at port 8000,
+set **Public base URL** to the proxy's address and ignore 8443.
+
+### Backups
+
+Two volumes matter: `printflow-db` (all the data) and `printflow-data` (the
+encryption key and the certificate). Without the key, stored credentials cannot
+be decrypted — back it up alongside the database.
 
 ## The board
 
@@ -159,27 +188,33 @@ queue request as-is.
 # Backend (needs a PostgreSQL 16 on hand)
 python -m venv .venv && .venv/bin/pip install -r backend/requirements-dev.txt
 export DATABASE_URL=postgresql+asyncpg://printflow@localhost:5432/printflow
-export SECRET_KEY=dev-secret
+export PRINTFLOW_DATA_DIR=./.printflow-data   # optional; this is the default
 cd backend && alembic upgrade head
-uvicorn app.main:app --reload
+
+python -m app.server        # HTTP on 8000 + HTTPS on 8443, as in production
+uvicorn app.main:app --reload   # or HTTP only, with reload
 
 # Frontend (proxies /api to :8000)
 cd frontend && npm install && npm run dev
 ```
 
+Under plain `uvicorn` there is no TLS supervisor, so saving a certificate says
+"restart to apply" rather than pretending it hot-swapped.
+
 ### Tests
 
 ```bash
 createdb printflow_test
-cd backend && pytest              # 144 tests
+cd backend && pytest              # 186 tests
 ```
 
 The suite covers the state machine and decisioning maths as pure functions, the
 full intake pipeline against a real PostgreSQL (bundle explosion, soft
 reservations, plate planning, dispatch, reconcile, assembly gate, failure and
-re-queue), the HTTP API including the setup wizard and label purchase, and the
+re-queue), the HTTP API including the setup wizard and label purchase, the
 integration clients (credential encryption, PKCE, retry/backoff, rate limiting,
-response parsing).
+response parsing), and the security bootstrap (secret-key generation and
+persistence, certificate generation and validation, the security endpoints).
 
 `TEST_DATABASE_URL` overrides the test database.
 
@@ -187,8 +222,11 @@ response parsing).
 
 ```
 backend/app/
+  config.py            data dir + secret key bootstrap
+  server.py            HTTP + HTTPS listeners, hot certificate reload
   models.py            schema, state vocabularies
   services/
+    tls.py             certificate generation, validation, storage
     intake.py          receipt → lines → bundle explosion
     allocation.py      QBO print-or-pull decisioning
     printing.py        plate maths, dispatch, reconcile

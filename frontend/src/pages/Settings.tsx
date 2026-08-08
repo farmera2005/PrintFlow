@@ -3,6 +3,7 @@ import { api, errorMessage } from '../lib/api'
 import { PROVIDER_LABELS, formatDateTime } from '../lib/format'
 import type { IntegrationStatus } from '../lib/types'
 import { PANELS } from '../components/IntegrationPanels'
+import SecurityPanel from '../components/SecurityPanel'
 import { Alert, Badge, Button, Card, Field, inputClass } from '../components/ui'
 
 interface SettingsResponse {
@@ -76,6 +77,11 @@ export default function Settings({ onChange }: { onChange: () => Promise<void> }
           <Alert tone={banner.tone === 'success' ? 'success' : 'error'}>{banner.text}</Alert>
         ) : null}
         {error ? <Alert tone="error">{error}</Alert> : null}
+
+        <Card className="p-4">
+          <h2 className="mb-3 text-sm font-semibold text-ink-900">Access &amp; security</h2>
+          <SecurityPanel compact onChanged={load} />
+        </Card>
 
         {data.integrations.map((integration) => {
           const Panel = PANELS[integration.provider]
@@ -153,14 +159,13 @@ function IntervalsCard({
   onSaved: () => Promise<void>
 }) {
   const [values, setValues] = useState(data.poll_intervals)
-  const [baseUrl, setBaseUrl] = useState(data.public_base_url ?? '')
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const save = async () => {
     setError(null)
     try {
-      await api.post('/api/setup/intervals', { ...values, public_base_url: baseUrl })
+      await api.post('/api/setup/intervals', values)
       setSaved(true)
       await onSaved()
     } catch (err) {
@@ -190,18 +195,6 @@ function IntervalsCard({
             />
           </Field>
         ))}
-      </div>
-      <div className="mt-3">
-        <Field
-          label="Public base URL"
-          hint="Used to build OAuth redirect URIs when PrintFlow sits behind a reverse proxy."
-        >
-          <input
-            className={inputClass}
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-        </Field>
       </div>
       {error ? (
         <div className="mt-3">

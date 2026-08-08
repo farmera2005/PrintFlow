@@ -389,6 +389,35 @@ class IntegrationCredential(Base):
     updated_at: Mapped[datetime] = _updated_at()
 
 
+class TlsCertificate(Base):
+    """The HTTPS certificate, generated or uploaded during setup.
+
+    The private key is encrypted with the same key-derivation as integration
+    credentials. Keeping the pair in the database (rather than only on disk)
+    means a rebuilt container comes back up on the same certificate.
+    """
+
+    __tablename__ = "tls_certificates"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    cert_pem: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    fingerprint_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    common_name: Mapped[str | None] = mapped_column(Text)
+    sans: Mapped[list[str] | None] = mapped_column(JsonType)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    not_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    self_signed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="generated")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("source in ('generated','uploaded')", name="ck_tls_source"),
+        Index("ix_tls_certificates_active", "active"),
+    )
+
+
 class SyncLog(Base):
     __tablename__ = "sync_log"
 

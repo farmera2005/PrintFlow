@@ -26,5 +26,7 @@ PY
 echo "PrintFlow: applying database migrations..."
 alembic upgrade head
 
+# app.server runs both listeners and generates the secret key and a self-signed
+# certificate on first boot, so there is nothing to prepare before this point.
 echo "PrintFlow: starting."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
+exec python -m app.server

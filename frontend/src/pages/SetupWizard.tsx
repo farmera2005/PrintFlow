@@ -3,18 +3,40 @@ import { api, errorMessage } from '../lib/api'
 import { PROVIDER_LABELS } from '../lib/format'
 import type { SetupStatus } from '../lib/types'
 import { PANELS } from '../components/IntegrationPanels'
+import SecurityPanel from '../components/SecurityPanel'
 import { Alert, Button, Card, Field, cx, inputClass } from '../components/ui'
 
-const STEP_ORDER = ['admin', 'etsy', 'qbo', 'bambuddy', 'shipstation', 'intervals'] as const
+// Security comes before the OAuth steps: Etsy and Intuit need an https redirect
+// URI, and that URI is built from the address configured there.
+const STEP_ORDER = [
+  'admin',
+  'security',
+  'etsy',
+  'qbo',
+  'bambuddy',
+  'shipstation',
+  'intervals',
+] as const
 type StepKey = (typeof STEP_ORDER)[number]
 
 const STEP_TITLES: Record<StepKey, string> = {
   admin: 'Create your admin account',
+  security: 'Access & security',
   etsy: 'Connect Etsy',
   qbo: 'Connect QuickBooks Online',
   bambuddy: 'Connect Bambuddy',
   shipstation: 'Connect ShipStation',
   intervals: 'Poll intervals',
+}
+
+const STEP_CHIPS: Record<StepKey, string> = {
+  admin: 'Admin',
+  security: 'Security',
+  etsy: 'Etsy',
+  qbo: 'QuickBooks',
+  bambuddy: 'Bambuddy',
+  shipstation: 'ShipStation',
+  intervals: 'Intervals',
 }
 
 export default function SetupWizard({
@@ -95,7 +117,7 @@ export default function SetupWizard({
                 )}
               >
                 {completion[key] ? '✓ ' : `${i + 1}. `}
-                {STEP_TITLES[key].replace('Connect ', '')}
+                {STEP_CHIPS[key]}
               </button>
             </li>
           ))}
@@ -114,6 +136,8 @@ export default function SetupWizard({
           <div className="mt-4">
             {step === 'admin' ? (
               <AdminStep onDone={onChange} existing={status.admin_exists} />
+            ) : step === 'security' ? (
+              <SecurityPanel onChanged={onChange} />
             ) : step === 'intervals' ? (
               <IntervalsStep status={status} onDone={onChange} />
             ) : (
@@ -249,14 +273,13 @@ function IntervalsStep({
   onDone: () => Promise<void>
 }) {
   const [values, setValues] = useState(status.poll_intervals)
-  const [baseUrl, setBaseUrl] = useState(status.public_base_url ?? '')
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const save = async () => {
     setError(null)
     try {
-      await api.post('/api/setup/intervals', { ...values, public_base_url: baseUrl })
+      await api.post('/api/setup/intervals', values)
       setSaved(true)
       await onDone()
     } catch (err) {
@@ -288,17 +311,6 @@ function IntervalsStep({
           />
         </Field>
       ))}
-      <Field
-        label="Public base URL (optional)"
-        hint="Set this if you reach PrintFlow through a reverse proxy — OAuth redirect URIs are built from it."
-      >
-        <input
-          className={inputClass}
-          placeholder="https://printflow.mynas.local"
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-        />
-      </Field>
       {error ? <Alert tone="error">{error}</Alert> : null}
       {saved ? <Alert tone="success">Saved.</Alert> : null}
       <Button variant="primary" onClick={save}>

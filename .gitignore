@@ -10,3 +10,6 @@ backend/app/static/*
 .pytest_cache/
 .DS_Store
 *.log
+# Local dev data directory: holds the generated secret key and TLS private key.
+.printflow-data/
+*.pem

@@ -13,7 +13,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PRINTFLOW_DATA_DIR=/data
 
 WORKDIR /app
 
@@ -28,10 +29,14 @@ COPY --from=frontend /build/dist ./app/static
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && useradd --create-home --uid 10001 printflow \
-    && chown -R printflow /app
+    && mkdir -p /data \
+    && chown -R printflow /app /data
+# An empty named volume mounted at /data inherits this ownership, so the
+# generated secret key and TLS files are writable without running as root.
 USER printflow
 
-EXPOSE 8000
+# 8000 HTTP, 8443 HTTPS. Both are served by the same process.
+EXPOSE 8000 8443
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status==200 else 1)"
 
