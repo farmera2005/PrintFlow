@@ -7,7 +7,6 @@ from sqlalchemy import select
 
 from app.models import (
     BomLine,
-    Order,
     OrderLine,
     PrintJob,
     PrintMapping,
