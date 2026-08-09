@@ -97,6 +97,15 @@ async def _https_redirect_enabled() -> bool:
 
 
 @app.middleware("http")
+async def no_store_api_responses(request: Request, call_next):
+    """API responses are live state — never let a browser or proxy reuse them."""
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.middleware("http")
 async def https_redirect(request: Request, call_next):
     if request.url.scheme == "https" or request.url.path == "/api/health":
         return await call_next(request)
@@ -151,10 +160,29 @@ async def _credential_error(
 _static_dir = get_config().static_dir
 _index = os.path.join(_static_dir, "index.html")
 
+# index.html must be revalidated on every load. Without an explicit
+# Cache-Control browsers fall back to heuristic caching, which can serve a
+# stale index.html for hours after an update — and a stale index.html points at
+# the *previous* content-hashed bundle, so the app silently keeps running the
+# old code even though the container was rebuilt correctly.
+NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+# Asset filenames contain a content hash, so a given URL's bytes never change.
+IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+class ImmutableStaticFiles(StaticFiles):
+    """Static assets whose URLs are content-hashed, so caching them is safe."""
+
+    def file_response(self, *args, **kwargs):  # type: ignore[override]
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(IMMUTABLE)
+        return response
+
+
 if os.path.isdir(os.path.join(_static_dir, "assets")):
     app.mount(
         "/assets",
-        StaticFiles(directory=os.path.join(_static_dir, "assets")),
+        ImmutableStaticFiles(directory=os.path.join(_static_dir, "assets")),
         name="assets",
     )
 
@@ -170,9 +198,9 @@ async def spa(full_path: str):
         and candidate.startswith(os.path.abspath(_static_dir))
         and os.path.isfile(candidate)
     ):
-        return FileResponse(candidate)
+        return FileResponse(candidate, headers=NO_CACHE)
     if os.path.isfile(_index):
-        return FileResponse(_index)
+        return FileResponse(_index, headers=NO_CACHE)
     return JSONResponse(
         status_code=503,
         content={

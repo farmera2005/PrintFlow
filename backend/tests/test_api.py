@@ -508,3 +508,29 @@ class TestSyncAndAudit:
     async def test_unknown_api_route_is_404_not_the_spa(self, signed_in):
         response = await signed_in.get("/api/does-not-exist")
         assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestCacheHeaders:
+    """A stale index.html points at the previous content-hashed bundle, so the
+    app silently keeps running old code after a correct rebuild."""
+
+    async def test_index_html_must_be_revalidated(self, client):
+        response = await client.get("/")
+        assert response.status_code in (200, 503)
+        if response.status_code == 200:
+            assert "no-cache" in response.headers.get("cache-control", "")
+
+    async def test_client_side_routes_are_also_no_cache(self, client):
+        response = await client.get("/settings")
+        if response.status_code == 200:
+            assert "no-cache" in response.headers.get("cache-control", "")
+
+    async def test_api_responses_are_never_stored(self, client):
+        response = await client.get("/api/health")
+        assert response.headers.get("cache-control") == "no-store"
+
+    async def test_api_no_store_survives_auth_failures(self, client):
+        response = await client.get("/api/board")
+        assert response.status_code == 401
+        assert response.headers.get("cache-control") == "no-store"
