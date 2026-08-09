@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -29,7 +30,7 @@ from ..models import (
     OAuthState,
     User,
 )
-from ..services import credentials, public_url
+from ..services import audit, credentials, public_url
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.integrations")
@@ -236,6 +237,7 @@ async def etsy_shops(
         "shops": [],
         "selected_shop_id": payload.get("shop_id"),
         "selected_shop_name": payload.get("shop_name"),
+        "orders_since": payload.get("orders_since"),
         "error": None,
     }
 
@@ -414,14 +416,44 @@ async def etsy_select_shop(
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    await credentials.merge(
-        session,
-        PROVIDER_ETSY,
-        {"shop_id": body.shop_id, "shop_name": body.shop_name},
-    )
+    payload = await credentials.load(session, PROVIDER_ETSY)
+    updates: dict[str, Any] = {"shop_id": body.shop_id, "shop_name": body.shop_name}
+    if not payload.get("orders_since"):
+        # An established shop can have hundreds of open receipts. Without a
+        # cutoff the first poll would import the lot, fill the board with
+        # historical orders and plan prints for all of them. Start from now;
+        # the operator can move it back deliberately to backfill.
+        updates["orders_since"] = int(time.time())
+    await credentials.merge(session, PROVIDER_ETSY, updates)
     await credentials.mark_ok(session, PROVIDER_ETSY)
     await session.commit()
-    return {"shop_id": body.shop_id}
+    return {"shop_id": body.shop_id, "orders_since": updates.get("orders_since")}
+
+
+class EtsyOrdersSinceRequest(BaseModel):
+    # Epoch seconds; null means "import everything Etsy still lists as open".
+    orders_since: int | None = None
+
+
+@router.post("/etsy/orders-since")
+async def etsy_set_orders_since(
+    body: EtsyOrdersSinceRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    await credentials.merge(
+        session, PROVIDER_ETSY, {"orders_since": body.orders_since}
+    )
+    await audit.record(
+        session,
+        entity_type="settings",
+        entity_id=None,
+        action="etsy_orders_since_changed",
+        detail={"orders_since": body.orders_since},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"orders_since": body.orders_since}
 
 
 async def _try_preselect_etsy_shop(session: AsyncSession, payload: dict) -> None:
@@ -439,6 +471,8 @@ async def _try_preselect_etsy_shop(session: AsyncSession, payload: dict) -> None
         if len(shops) == 1:
             payload["shop_id"] = shops[0].get("shop_id")
             payload["shop_name"] = shops[0].get("shop_name")
+            if not payload.get("orders_since"):
+                payload["orders_since"] = int(time.time())
         await credentials.save(session, PROVIDER_ETSY, payload)
         await session.commit()
     except (IntegrationError, Exception) as exc:  # noqa: B014 - never fail the connect

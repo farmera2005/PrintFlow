@@ -7,6 +7,8 @@ token exchange had already succeeded — reported to the operator as
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -205,6 +207,7 @@ class TestApiHeaders:
             PROVIDER_ETSY,
             {
                 "keystring": "my-keystring",
+                "shared_secret": "my-secret",
                 "access_token": "1.token",
                 "refresh_token": "r",
                 "expires_at": 9_999_999_999,
@@ -213,7 +216,7 @@ class TestApiHeaders:
         await db.commit()
         client = await etsy_api.client_for(db)
         headers = await client._headers()
-        assert headers["x-api-key"] == "my-keystring"
+        assert headers["x-api-key"] == "my-keystring:my-secret"
         assert headers["Authorization"] == "Bearer 1.token"
 
     async def test_scopes_cover_receipts_and_shops(self):
@@ -242,25 +245,14 @@ class TestRetryBehaviour:
         assert "insufficient_scope" in str(excinfo.value)
 
 
-class TestSharedSecretErrorIsExplained:
-    """Etsy answers some endpoints with:
+class TestTheApiKeyIsKeystringAndSecret:
+    """Etsy's docs say x-api-key is the keystring. Against the live API it is not.
 
-        {"error":"Shared secret is required in x-api-key header."}
-
-    Sending the shared secret instead was tried against the live API and Etsy
-    rejected *that* with "API key not found or not active", so the secret is
-    not an API key and swapping it only produces a more misleading error. Keep
-    the keystring and explain what the error usually means.
+    The keystring alone answers 403 "Shared secret is required in x-api-key
+    header"; the shared secret alone answers 403 "API key not found or not
+    active". Both, colon-separated, answer 200 — confirmed on receipts, shop,
+    shops-list and users/me against a real shop.
     """
-
-    async def test_the_error_is_recognised(self):
-        assert etsy_api.wants_shared_secret(
-            '{"error":"Shared secret is required in x-api-key header."}'
-        )
-
-    async def test_unrelated_errors_are_not(self):
-        assert not etsy_api.wants_shared_secret('{"error":"insufficient_scope"}')
-        assert not etsy_api.wants_shared_secret(None)
 
     async def _connected(self, db):
         await credentials.save(
@@ -277,24 +269,52 @@ class TestSharedSecretErrorIsExplained:
         await db.commit()
         return await etsy_api.client_for(db)
 
-    async def test_the_keystring_is_always_what_is_sent(self, db, monkeypatch):
+    async def test_both_halves_are_sent_colon_separated(self, db, monkeypatch):
         client = await self._connected(db)
         seen: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(request.headers["x-api-key"])
-            return httpx.Response(
-                403, json={"error": "Shared secret is required in x-api-key header."}
-            )
+            return httpx.Response(200, json={"results": []})
 
         _patch_transport(monkeypatch, handler)
-        with pytest.raises(AuthExpiredError):
-            await client.shops_for_user(42)
-        # Exactly one attempt, with the keystring. No credential shuffling.
-        assert seen == ["the-keystring"]
+        await client.shops_for_user(42)
+        # Exactly one attempt, with both halves. No credential shuffling.
+        assert seen == ["the-keystring:the-shared-secret"]
 
-    async def test_the_message_explains_the_likely_cause(self, db, monkeypatch):
-        client = await self._connected(db)
+    async def test_the_keystring_alone_is_sent_when_no_secret_is_stored(self, db):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "my-keystring",
+                "access_token": "1.token",
+                "expires_at": 9_999_999_999,
+            },
+        )
+        await db.commit()
+        client = await etsy_api.client_for(db)
+        # No trailing colon: a half-key that at least matches the documented form.
+        assert (await client._headers())["x-api-key"] == "my-keystring"
+
+    async def test_the_error_is_recognised(self):
+        assert etsy_api.wants_shared_secret(
+            '{"error":"Shared secret is required in x-api-key header."}'
+        )
+
+    async def test_unrelated_errors_are_not(self):
+        assert not etsy_api.wants_shared_secret('{"error":"insufficient_scope"}')
+        assert not etsy_api.wants_shared_secret(None)
+
+    async def test_a_missing_secret_is_named_as_the_cause(self, db, monkeypatch):
+        """The one reading of this 403 we can state with confidence."""
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {"keystring": "k", "access_token": "42.token", "expires_at": 9_999_999_999},
+        )
+        await db.commit()
+        client = await etsy_api.client_for(db)
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -305,9 +325,26 @@ class TestSharedSecretErrorIsExplained:
         with pytest.raises(AuthExpiredError) as excinfo:
             await client.shops_for_user(42)
         text = str(excinfo.value)
-        assert "not approved" in text
+        assert "shared secret" in text and "none is stored" in text
         # Etsy's own words are still carried through.
         assert "Shared secret is required" in text
+
+    async def test_the_same_403_with_a_secret_stored_is_not_reinterpreted(
+        self, db, monkeypatch
+    ):
+        """With both halves sent, this error means something we cannot name."""
+        client = await self._connected(db)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403, json={"error": "Shared secret is required in x-api-key header."}
+            )
+
+        _patch_transport(monkeypatch, handler)
+        with pytest.raises(AuthExpiredError) as excinfo:
+            await client.shops_for_user(42)
+        assert "none is stored" not in str(excinfo.value)
+        assert "Shared secret is required" in str(excinfo.value)
 
     async def test_other_403s_pass_through_unchanged(self, db, monkeypatch):
         client = await self._connected(db)
@@ -319,7 +356,7 @@ class TestSharedSecretErrorIsExplained:
         with pytest.raises(AuthExpiredError) as excinfo:
             await client.shops_for_user(42)
         assert "insufficient_scope" in str(excinfo.value)
-        assert "not approved" not in str(excinfo.value)
+        assert "none is stored" not in str(excinfo.value)
 
 
 class TestShopSelectionNeverDeadEnds:
@@ -364,6 +401,64 @@ class TestShopSelectionNeverDeadEnds:
         assert response.status_code == 200
         stored = await credentials.load(db, PROVIDER_ETSY)
         assert stored["shop_id"] == 12345678
+
+    async def test_choosing_a_shop_sets_an_import_cutoff(self, signed_in, db):
+        """A live shop can have hundreds of open receipts.
+
+        Without a cutoff the first poll imports the lot, fills the board with
+        history and plans prints for all of it.
+        """
+        await credentials.save(
+            db, PROVIDER_ETSY, {"keystring": "k", "access_token": "42.t", "expires_at": 9e9}
+        )
+        await db.commit()
+        before = int(time.time())
+        response = await signed_in.post(
+            "/api/integrations/etsy/shop", json={"shop_id": 4242, "shop_name": None}
+        )
+        assert response.status_code == 200
+        cutoff = response.json()["orders_since"]
+        assert before <= cutoff <= int(time.time())
+        assert (await credentials.load(db, PROVIDER_ETSY))["orders_since"] == cutoff
+
+    async def test_an_existing_cutoff_is_not_moved_by_switching_shops(self, signed_in, db):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "access_token": "42.t",
+                "expires_at": 9e9,
+                "orders_since": 1_700_000_000,
+            },
+        )
+        await db.commit()
+        await signed_in.post(
+            "/api/integrations/etsy/shop", json={"shop_id": 4242, "shop_name": None}
+        )
+        assert (await credentials.load(db, PROVIDER_ETSY))["orders_since"] == 1_700_000_000
+
+    async def test_the_cutoff_can_be_moved_or_cleared(self, signed_in, db):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "access_token": "42.t",
+                "expires_at": 9e9,
+                "orders_since": 1_700_000_000,
+            },
+        )
+        await db.commit()
+
+        await signed_in.post(
+            "/api/integrations/etsy/orders-since", json={"orders_since": 1_600_000_000}
+        )
+        assert (await credentials.load(db, PROVIDER_ETSY))["orders_since"] == 1_600_000_000
+
+        # null means "import everything Etsy still lists as open".
+        await signed_in.post("/api/integrations/etsy/orders-since", json={"orders_since": None})
+        assert (await credentials.load(db, PROVIDER_ETSY))["orders_since"] is None
 
     async def test_lookup_failure_does_not_block_the_choice(self, signed_in, db, monkeypatch):
         await credentials.save(
@@ -438,6 +533,80 @@ class TestConnectionTest:
 
         record = await credentials.get_record(db, PROVIDER_ETSY)
         assert "insufficient_scope" in record.last_error
+
+
+class TestPollingRespectsTheImportCutoff:
+    async def test_min_created_is_sent_to_etsy(self, db, monkeypatch):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "shared_secret": "s",
+                "access_token": "42.token",
+                "expires_at": 9_999_999_999,
+            },
+        )
+        await db.commit()
+        client = await etsy_api.client_for(db)
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.params.get("min_created"))
+            return httpx.Response(200, json={"results": []})
+
+        _patch_transport(monkeypatch, handler)
+        await client.iter_receipts(shop_id=4242, min_created=1_700_000_000)
+        assert seen == ["1700000000"]
+
+    async def test_no_cutoff_means_no_filter(self, db, monkeypatch):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {"keystring": "k", "access_token": "42.token", "expires_at": 9_999_999_999},
+        )
+        await db.commit()
+        client = await etsy_api.client_for(db)
+        seen: list[httpx.QueryParams] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        _patch_transport(monkeypatch, handler)
+        await client.iter_receipts(shop_id=4242, min_created=None)
+        assert "min_created" not in seen[0]
+
+    async def test_the_poller_uses_the_stored_cutoff(self, db, monkeypatch):
+        """The value set when the shop was chosen must reach the receipt call."""
+        from app import scheduler
+        from app.services import settings_store
+
+        await settings_store.set_setting(db, settings_store.KEY_SETUP_COMPLETE, True)
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "shared_secret": "s",
+                "access_token": "42.token",
+                "expires_at": 9_999_999_999,
+                "shop_id": 4242,
+                "orders_since": 1_700_000_000,
+            },
+        )
+        await db.commit()
+
+        seen: dict[str, object] = {}
+
+        async def receipts(self, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(etsy_api.EtsyClient, "iter_receipts", receipts)
+        await scheduler.poll_etsy()
+        assert seen["shop_id"] == 4242
+        assert seen["min_created"] == 1_700_000_000
 
 
 class TestDiagnostics:

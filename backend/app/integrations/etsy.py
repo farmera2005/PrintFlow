@@ -32,10 +32,20 @@ REFRESH_MARGIN_SECONDS = 300
 
 USER_AGENT = "PrintFlow/1.0"
 
-# Which credential goes in the x-api-key header. Etsy documents the keystring
-# and that is what we send. The override exists only so an instance that stored
-# a different choice under an earlier build keeps behaving predictably.
+# What goes in the x-api-key header.
+#
+# Etsy's docs describe the keystring alone, and that is what every example
+# shows. Against the live API it returns 403 "Shared secret is required in
+# x-api-key header", while the shared secret alone returns 403 "API key not
+# found or not active". Etsy wants BOTH, colon-separated:
+#
+#     x-api-key: <keystring>:<shared_secret>
+#
+# Verified against a real shop across the receipts, shop, shops-list and
+# users/me endpoints — 200 on all four. The single-value modes are kept only
+# for the diagnostics screen.
 KEY_MODE_FIELD = "x_api_key_mode"
+MODE_COMBINED = "combined"
 MODE_KEYSTRING = "keystring"
 MODE_SHARED_SECRET = "shared_secret"
 
@@ -170,10 +180,14 @@ class EtsyClient:
         )
 
     def _api_key(self, mode: str | None = None) -> str:
-        mode = mode or self.payload.get(KEY_MODE_FIELD) or MODE_KEYSTRING
+        mode = mode or self.payload.get(KEY_MODE_FIELD) or MODE_COMBINED
+        keystring = str(self.payload.get("keystring") or "")
+        secret = str(self.payload.get("shared_secret") or "")
         if mode == MODE_SHARED_SECRET:
-            return str(self.payload.get("shared_secret", ""))
-        return str(self.payload.get("keystring", ""))
+            return secret
+        if mode == MODE_KEYSTRING:
+            return keystring
+        return f"{keystring}:{secret}" if secret else keystring
 
     async def _headers(self, mode: str | None = None) -> dict[str, str]:
         return {
@@ -187,20 +201,15 @@ class EtsyClient:
         try:
             return await self._get_with(None, path, params)
         except AuthExpiredError as exc:
-            if wants_shared_secret(exc.body):
-                # Etsy says "Shared secret is required in x-api-key header" here.
-                # Sending the shared secret instead was tried and Etsy rejected
-                # *that* with "API key not found or not active", so the secret
-                # is plainly not an API key and swapping it only produces a more
-                # misleading error. Keep the keystring, and say what this
-                # actually tends to mean.
+            if wants_shared_secret(exc.body) and not self.payload.get("shared_secret"):
+                # x-api-key needs "<keystring>:<shared_secret>", and we only
+                # have half of it — which is the one cause of this error we can
+                # name with confidence.
                 raise AuthExpiredError(
                     PROVIDER_ETSY,
                     (
-                        "Etsy rejected the app credentials on this endpoint. This "
-                        "usually means the app is not approved for API access yet, "
-                        "or the keystring belongs to a different app than the one "
-                        "you authorised"
+                        "Etsy needs your app's shared secret as well as the keystring, "
+                        "and none is stored. Reconnect Etsy and enter both"
                     ),
                     status_code=exc.status_code,
                     body=exc.body,

@@ -75,8 +75,12 @@ and no seed scripts — **every** setting is entered in the app.
    redirect URI, and Intuit will not accept a private address at all for a
    production app.
 3. **Etsy** — paste your app's keystring and shared secret; the app runs the
-   OAuth 2.0 PKCE flow and you pick the shop. Refresh tokens rotate and the new
-   one is persisted on every refresh.
+   OAuth 2.0 PKCE flow and you pick the shop. Both halves of the credential are
+   required: Etsy's API wants `x-api-key: <keystring>:<shared_secret>`, and
+   answers 403 to either one on its own. Refresh tokens rotate and the new one
+   is persisted on every refresh. Picking the shop sets an import cutoff of
+   "now", so an established shop's open back catalogue does not land on the
+   board; move it back on the Etsy panel to backfill.
 4. **QuickBooks Online** — paste your Intuit app's client ID and secret; the
    app runs the OAuth flow and stores the realm ID. Access tokens refresh
    silently.

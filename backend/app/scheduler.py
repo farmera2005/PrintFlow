@@ -71,7 +71,12 @@ async def poll_etsy() -> dict[str, Any]:
                 await session.commit()
                 return {"skipped": "no shop"}
             try:
-                receipts = await client.iter_receipts(shop_id=client.shop_id)
+                receipts = await client.iter_receipts(
+                    shop_id=client.shop_id,
+                    # Set when the shop is chosen, so connecting an
+                    # established shop does not import its whole history.
+                    min_created=client.payload.get("orders_since"),
+                )
             except IntegrationError as exc:
                 await credentials.mark_error(session, PROVIDER_ETSY, str(exc))
                 await session.commit()

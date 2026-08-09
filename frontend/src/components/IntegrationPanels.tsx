@@ -79,6 +79,21 @@ function RedirectUriHint({ uri }: { uri?: string }) {
 // Etsy
 // --------------------------------------------------------------------------
 
+/** Epoch seconds -> the YYYY-MM-DD an <input type="date"> wants, in local time. */
+function toDateInput(epoch: number | null): string {
+  if (!epoch) return ''
+  const d = new Date(epoch * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** YYYY-MM-DD -> epoch seconds at local midnight, so the day the operator
+ *  picked is included in full. */
+function fromDateInput(value: string): number | null {
+  const ms = new Date(`${value}T00:00:00`).getTime()
+  return Number.isNaN(ms) ? null : Math.floor(ms / 1000)
+}
+
 export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   const [keystring, setKeystring] = useState('')
   const [sharedSecret, setSharedSecret] = useState('')
@@ -89,6 +104,7 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   const [shopName, setShopName] = useState<string | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [manualShop, setManualShop] = useState('')
+  const [ordersSince, setOrdersSince] = useState<number | null>(null)
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(
     null,
   )
@@ -101,12 +117,15 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
       .get<{
         shops: any[]
         selected_shop_id: number | null
+        selected_shop_name: string | null
+        orders_since: number | null
         error: string | null
       }>('/api/integrations/etsy/shops')
       .then((data) => {
         setShops(data.shops.filter((s) => s.shop_id))
         setSelectedShop(data.selected_shop_id)
-        setShopName((data as any).selected_shop_name ?? null)
+        setShopName(data.selected_shop_name ?? null)
+        setOrdersSince(data.orders_since ?? null)
         setListError(data.error)
       })
       .catch((err) => setListError(errorMessage(err)))
@@ -143,13 +162,27 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
           .catch(() => null)
         name = check?.shop_name ?? null
       }
-      await api.post('/api/integrations/etsy/shop', {
-        shop_id: shopId,
-        shop_name: name,
-      })
+      const saved = await api.post<{ orders_since: number | null }>(
+        '/api/integrations/etsy/shop',
+        { shop_id: shopId, shop_name: name },
+      )
       setSelectedShop(shopId)
       setShopName(name)
+      if (saved.orders_since) setOrdersSince(saved.orders_since)
       await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveOrdersSince = async (value: number | null) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/integrations/etsy/orders-since', { orders_since: value })
+      setOrdersSince(value)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -222,6 +255,41 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
         ) : (
           <Alert tone="warning">Pick a shop — polling stays idle until you do.</Alert>
         )}
+
+        {selectedShop ? (
+          <Field
+            label="Import orders placed since"
+            hint="Set to the day you picked the shop, so an established shop's back catalogue does not land on the board. Move it back to backfill older orders."
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              {/* inputClass carries w-full, so the width has to live on a wrapper. */}
+              <div className="w-44">
+                <input
+                  className={inputClass}
+                  type="date"
+                  value={toDateInput(ordersSince)}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const next = fromDateInput(e.target.value)
+                    if (next !== null) void saveOrdersSince(next)
+                  }}
+                />
+              </div>
+              <Button
+                size="sm"
+                disabled={busy || ordersSince === null}
+                onClick={() => saveOrdersSince(null)}
+              >
+                Import everything open
+              </Button>
+              {ordersSince === null ? (
+                <span className="text-xs text-amber-700">
+                  No cutoff — every open receipt will be imported.
+                </span>
+              ) : null}
+            </div>
+          </Field>
+        ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -339,7 +407,10 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
           onChange={(e) => setKeystring(e.target.value)}
         />
       </Field>
-      <Field label="Shared secret">
+      <Field
+        label="Shared secret"
+        hint="Required. Etsy's API rejects the keystring on its own."
+      >
         <input
           className={inputClass}
           type="password"
