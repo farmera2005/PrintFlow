@@ -35,16 +35,15 @@ function ProductPicker({
   const [query, setQuery] = useState(skuHint ?? '')
   const [products, setProducts] = useState<Product[]>([])
   const [busy, setBusy] = useState(false)
-  // A listing with no SKU has nothing else to match on, so remembering is the
-  // only way it ever matches by itself — default it on. When Etsy did send a
-  // SKU, the SKU is the better key and the operator has to opt in.
+  // Remembering is the whole point: the listing id is what future orders match
+  // on, so a link made once fixes the listing rather than this one order.
   const [remember, setRemember] = useState(false)
   const [scope, setScope] = useState<'listing' | 'variant'>('listing')
 
   useEffect(() => {
     if (!open) return
     setQuery(skuHint ?? '')
-    setRemember(Boolean(listingId) && !skuHint)
+    setRemember(Boolean(listingId))
     setScope('listing')
   }, [open, skuHint, listingId])
 
@@ -59,25 +58,25 @@ function ProductPicker({
 
   return (
     <Modal open={open} title="Link a product to this line" onClose={onClose}>
-      {skuHint ? (
-        <p className="mb-3 text-sm text-ink-600">
-          Etsy sent SKU <code className="font-mono">{skuHint}</code>. Pick the product it
-          should map to — intake re-runs for this line immediately.
-        </p>
-      ) : (
-        <p className="mb-3 text-sm text-ink-600">
-          Etsy sent no SKU for this line
-          {listingId ? (
-            <>
-              , only listing <code className="font-mono">{listingId}</code>
-            </>
-          ) : null}
-          . Pick the product it should map to — intake re-runs for this line immediately.
-        </p>
-      )}
+      <p className="mb-3 text-sm text-ink-600">
+        {listingId ? (
+          <>
+            This line came from Etsy listing{' '}
+            <code className="font-mono">{listingId}</code>
+            {variantId ? (
+              <>
+                , variation <code className="font-mono">{variantId}</code>
+              </>
+            ) : null}
+            .{' '}
+          </>
+        ) : null}
+        Pick the product it should map to — intake re-runs for this line
+        immediately.
+      </p>
       <input
         className={inputClass}
-        placeholder="Search by SKU or name…"
+        placeholder="Search products…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
@@ -186,10 +185,14 @@ function LineRow({
             </button>
           ) : null}
           <span className="text-sm text-ink-500">{line.quantity}×</span>
-          <span className="font-mono text-sm font-medium text-ink-900">
-            {line.sku ?? line.sku_raw ?? '(no SKU)'}
+          {/* The name is what the operator recognises; the code is a handle,
+              and plenty of products no longer have one worth showing. */}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-900">
+            {line.name ?? line.sku ?? 'Unnamed item'}
           </span>
-          <span className="min-w-0 flex-1 truncate text-sm text-ink-600">{line.name}</span>
+          {line.sku ? (
+            <span className="font-mono text-xs text-ink-500">{line.sku}</span>
+          ) : null}
           <Badge className={LINE_STATE_CLASSES[line.state]}>
             {LINE_STATE_LABELS[line.state]}
           </Badge>
@@ -302,7 +305,7 @@ function LineRow({
                   Mark printed
                 </Button>
               )}
-              {/* Only a printed SKU has a print path to fall back on. */}
+              {/* Only a printed product has a print path to fall back on. */}
               {line.fulfillment === 'printed' && !line.force_print && line.qty_from_stock > 0 ? (
                 <Button size="sm" onClick={() => run('force-print', true)} disabled={busy}>
                   Skip stock, print anyway

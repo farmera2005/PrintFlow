@@ -65,7 +65,7 @@ function OrderCard({ order, onOpen }: { order: Order; onOpen: () => void }) {
       <div className="mt-2 flex flex-wrap gap-1">
         {order.summary.unmatched_count > 0 ? (
           <Badge className="bg-red-100 text-red-800 ring-red-300">
-            {order.summary.unmatched_count} unmatched SKU
+            {order.summary.unmatched_count} without a product
           </Badge>
         ) : null}
         {order.summary.failed_job_count > 0 ? (
@@ -99,19 +99,12 @@ function OrderCard({ order, onOpen }: { order: Order; onOpen: () => void }) {
               ) : null}
               <div className="flex items-center gap-1.5 text-xs">
                 <span className="shrink-0 text-ink-400">{leaf.line.quantity}×</span>
-                {/* A listing with no SKU in Etsy has nothing to match on, and
-                    a bare dash tells the operator nothing about which order
-                    this is. Fall back to the title, unstyled — it is a name,
-                    not a code. */}
-                {leaf.line.sku ?? leaf.line.sku_raw ? (
-                  <span className="min-w-0 flex-1 truncate font-mono text-ink-700">
-                    {leaf.line.sku ?? leaf.line.sku_raw}
-                  </span>
-                ) : (
-                  <span className="min-w-0 flex-1 truncate text-ink-700">
-                    {leaf.line.name ?? '—'}
-                  </span>
-                )}
+                {/* The listing's own name, because that is what the operator
+                    recognises and what Etsy always sends. Codes are optional
+                    now, so leading with one would leave rows blank. */}
+                <span className="min-w-0 flex-1 truncate text-ink-700">
+                  {leaf.line.name ?? leaf.line.sku ?? '—'}
+                </span>
                 <Badge className={LINE_STATE_CLASSES[leaf.line.state]}>
                   {LINE_STATE_LABELS[leaf.line.state]}
                 </Badge>

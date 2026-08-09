@@ -427,7 +427,7 @@ function SheetEditor({
               <table className="w-full text-left text-sm">
                 <thead className="text-xs uppercase tracking-wide text-ink-500">
                   <tr>
-                    <th className="py-1 pr-3 font-medium">SKU</th>
+                    <th className="py-1 pr-3 font-medium">Code</th>
                     <th className="py-1 pr-3 font-medium">Quantity</th>
                     <th className="py-1 pr-3 font-medium">Unit cost</th>
                     <th className="py-1 pr-3 text-right font-medium">Amount</th>

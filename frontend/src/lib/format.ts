@@ -10,7 +10,7 @@ export const COLUMN_LABELS: Record<OrderStatus, string> = {
 }
 
 export const LINE_STATE_LABELS: Record<LineState, string> = {
-  unmatched: 'Unmatched SKU',
+  unmatched: 'No product',
   new: 'New',
   exploded: 'Bundle',
   allocated: 'From stock',

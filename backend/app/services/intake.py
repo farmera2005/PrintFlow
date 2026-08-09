@@ -402,13 +402,15 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
     line itself otherwise).
     """
     if line.product_id is None:
-        product = await match_product(session, line.sku_raw)
+        # The Etsy identity comes first. It is on every receipt, it is what the
+        # operator linked deliberately, and it does not depend on the shop
+        # having filled in a field Etsy never required. A product code is only
+        # consulted when the listing itself is not linked to anything.
+        product, _how = await match_by_etsy_ids(
+            session, line.etsy_listing_id, line.etsy_product_id
+        )
         if product is None:
-            # No SKU, or a SKU nobody has a product for. Etsy does not require
-            # one, so fall back to the listing the order came from.
-            product, _how = await match_by_etsy_ids(
-                session, line.etsy_listing_id, line.etsy_product_id
-            )
+            product = await match_product(session, line.sku_raw)
         if product is None:
             line.state = LINE_UNMATCHED
             await session.flush()

@@ -60,7 +60,7 @@ export default function Products() {
           <h1 className="text-lg font-semibold text-ink-900">Products</h1>
           <input
             className={`${inputClass} max-w-xs`}
-            placeholder="Search SKU or name…"
+            placeholder="Search products…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -81,7 +81,7 @@ export default function Products() {
         ) : products.length === 0 ? (
           <EmptyState
             title={query ? 'No products match that search' : 'No products yet'}
-            description="Products map Etsy SKUs to what actually gets made: a printed part, a stocked item, or a bundle with a bill of materials."
+            description="Products map Etsy listings to what actually gets made: a printed part, a stocked item, or a bundle with a bill of materials."
             action={
               <Button variant="primary" onClick={() => setEditing('new')}>
                 Create the first product
@@ -215,7 +215,7 @@ function ProductEditor({
 
   const remove = async () => {
     if (!product) return
-    if (!window.confirm(`Delete ${product.sku}? This cannot be undone.`)) return
+    if (!window.confirm(`Delete ${product.name}? This cannot be undone.`)) return
     setBusy(true)
     try {
       await api.del(`/api/products/${product.id}`)
@@ -231,14 +231,18 @@ function ProductEditor({
     <Modal
       open
       wide
-      title={product ? `Edit ${product.sku}` : 'New product'}
+      title={product ? `Edit ${product.name}` : 'New product'}
       onClose={onClose}
     >
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="SKU" hint="Matched against the Etsy SKU, ignoring case and spaces.">
+          <Field
+            label="Code"
+            hint="Optional. Orders match on the Etsy listing, not on this — leave it blank and one is generated."
+          >
             <input
               className={inputClass}
+              placeholder="generated from the Etsy listing"
               value={sku}
               onChange={(e) => setSku(e.target.value)}
             />
@@ -272,7 +276,7 @@ function ProductEditor({
         {fulfillment !== 'bundle' ? (
           <Field
             label="QuickBooks item"
-            hint="Quantity on hand comes from here. A printed SKU with no item linked always prints in full."
+            hint="Quantity on hand comes from here. A printed product with no item linked always prints in full."
           >
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-ink-700">
@@ -302,7 +306,7 @@ function ProductEditor({
         {error ? <Alert tone="error">{error}</Alert> : null}
 
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" onClick={save} disabled={busy || !sku || !name}>
+          <Button variant="primary" onClick={save} disabled={busy || !name}>
             {busy ? 'Saving…' : 'Save'}
           </Button>
           {product ? (
@@ -553,7 +557,7 @@ function PrintMappingEditor({
       {!mapping ? (
         <div className="mt-2 space-y-2">
           <p className="text-sm text-red-800">
-            No archive attached — orders needing this SKU cannot be queued.
+            No archive attached — orders needing this product cannot be queued.
           </p>
           <Button variant="primary" size="sm" onClick={onOpenPicker}>
             Browse Bambuddy archives
@@ -583,7 +587,7 @@ function PrintMappingEditor({
                 onChange={(e) => setPlate(Number(e.target.value))}
               />
             </Field>
-            <Field label="Units per plate" hint="How many of this SKU one plate yields.">
+            <Field label="Units per plate" hint="How many of this product one plate yields.">
               <input
                 className={inputClass}
                 type="number"
@@ -1035,10 +1039,10 @@ function OptionRulesEditor({
   )
 }
 
-/** Etsy listings that resolve to this product without a SKU.
+/** The Etsy listings that resolve to this product.
  *
- * Etsy does not require sellers to set a SKU, and a listing without one has
- * nothing for intake to match on. Naming the listing here is the substitute.
+ * This is how orders find their way here: a receipt carries the listing and
+ * variation ids, and these links say what those ids mean.
  */
 function EtsyLinksEditor({
   product,
@@ -1096,15 +1100,17 @@ function EtsyLinksEditor({
       <div>
         <h3 className="text-sm font-semibold text-ink-800">Etsy listings</h3>
         <p className="text-xs text-ink-500">
-          For listings with no SKU. The listing id is the number at the end of its
-          Etsy URL. Links are also created from the order drawer when you match a
-          line and tick “remember this listing”.
+          Orders match on these. The listing id is the number at the end of its
+          Etsy URL. Links are also made for you by <em>Check against Etsy</em>, and
+          from the order drawer when you match a line and tick “remember this
+          listing”.
         </p>
       </div>
 
       {product.etsy_links.length === 0 ? (
         <p className="text-sm text-ink-500">
-          No listings linked — orders reach this product by SKU.
+          No listings linked — no Etsy order can reach this product. Use
+          <em>Check against Etsy</em>, or paste a listing id below.
         </p>
       ) : (
         <ul className="space-y-1 text-sm">
@@ -1172,12 +1178,12 @@ const CATALOG_STATUS: Record<
   matched: { label: 'matched', className: 'bg-emerald-100 text-emerald-800 ring-emerald-300' },
   linked: { label: 'linked listing', className: 'bg-sky-100 text-sky-800 ring-sky-300' },
   missing: { label: 'no product', className: 'bg-red-100 text-red-800 ring-red-300' },
-  no_sku: { label: 'no SKU on Etsy', className: 'bg-amber-100 text-amber-800 ring-amber-300' },
+  no_sku: { label: 'no product', className: 'bg-amber-100 text-amber-800 ring-amber-300' },
 }
 
 /** What Etsy sells, lined up against what PrintFlow can make.
  *
- * Intake already reports an unmatched SKU, but only once a real order has
+ * Intake already reports a line with no product, but only once a real order has
  * arrived and stalled on it. This is the same comparison up front, while there
  * is still time to fix it.
  */
@@ -1194,6 +1200,7 @@ function CatalogCheck({
   const [filter, setFilter] = useState<'all' | 'missing'>('missing')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setCatalog(null)
@@ -1208,20 +1215,35 @@ function CatalogCheck({
     load()
   }, [load])
 
-  /** Create the product Etsy is already selling, so its orders stop stalling. */
-  const create = async (row: CatalogRow, fulfillment: Fulfillment) => {
-    if (!row.sku) return
-    setBusy(row.sku)
+  /** Build products from Etsy's own listings, each one linked as it is created.
+   *
+   * One product per listing, not per variation — Etsy reissues a variation's
+   * product id whenever the listing's options are edited, and what differs
+   * between variations belongs in option rules. */
+  const create = async (listingIds: number[], fulfillment: Fulfillment) => {
+    if (!listingIds.length) return
+    setBusy(listingIds.length === 1 ? String(listingIds[0]) : 'all')
     setError(null)
+    setNotice(null)
     try {
-      await api.post<Product>('/api/products', {
-        sku: row.sku,
-        name: row.title ?? row.sku,
+      const result = await api.post<{
+        created: unknown[]
+        skipped: unknown[]
+        also_fixed: number
+      }>('/api/integrations/etsy/catalog/import', {
+        listing_ids: listingIds,
         fulfillment,
-        qbo_item_id: null,
-        qbo_item_name: null,
-        active: true,
       })
+      const made = result.created.length
+      const fixed = result.also_fixed
+      setNotice(
+        `Created ${made} product${made === 1 ? '' : 's'} from Etsy` +
+          (fixed
+            ? fixed === 1
+              ? ', and one order line that was waiting now matches.'
+              : `, and ${fixed} order lines that were waiting now match.`
+            : '.'),
+      )
       await onChanged()
       await load()
     } catch (err) {
@@ -1231,11 +1253,12 @@ function CatalogCheck({
     }
   }
 
-  /** Point a SKU-less listing at an existing product, so its orders match. */
+  /** Point a listing at a product that already exists, so its orders match. */
   const link = async (row: CatalogRow, productId: string) => {
     if (!row.listing_id || !productId) return
     setBusy(String(row.listing_id))
     setError(null)
+    setNotice(null)
     try {
       await api.post<Product>(`/api/products/${productId}/etsy-links`, {
         etsy_listing_id: row.listing_id,
@@ -1253,6 +1276,17 @@ function CatalogCheck({
   const rows = (catalog?.rows ?? []).filter(
     (row) => filter === 'all' || !(row.status === 'matched' || row.status === 'linked'),
   )
+
+  // Listings with no product yet, deduplicated — several variations of one
+  // listing are one product.
+  const needProducts = [
+    ...new Set(
+      (catalog?.rows ?? [])
+        .filter((row) => row.status === 'missing' || row.status === 'no_sku')
+        .map((row) => row.listing_id)
+        .filter((id): id is number => typeof id === 'number'),
+    ),
+  ]
 
   return (
     <Modal open wide title="Check products against Etsy" onClose={onClose}>
@@ -1299,7 +1333,7 @@ function CatalogCheck({
               ) : null}
               {catalog.counts.no_sku ? (
                 <Badge className={CATALOG_STATUS.no_sku.className}>
-                  {catalog.counts.no_sku} with no SKU
+                  {catalog.counts.no_sku} not set up
                 </Badge>
               ) : null}
               <div className="ml-auto flex gap-1 text-xs">
@@ -1326,18 +1360,49 @@ function CatalogCheck({
               </p>
             ))}
 
+            {needProducts.length ? (
+              // The setup path for a shop that has never used SKUs: build the
+              // products from the listings themselves, in one go.
+              <div className="flex flex-wrap items-center gap-2 rounded-md bg-ink-100 p-2.5 text-sm">
+                <span className="text-ink-700">
+                  <strong>{needProducts.length}</strong> listing
+                  {needProducts.length === 1 ? '' : 's'} with no product yet. Create
+                  them from Etsy — each one is linked to its listing as it is made.
+                </span>
+                <div className="ml-auto flex gap-1">
+                  <Button
+                    size="sm"
+                    disabled={busy !== null}
+                    onClick={() => create(needProducts, 'printed')}
+                  >
+                    {busy === 'all' ? 'Creating…' : 'Create all as printed'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={() => create(needProducts, 'stocked')}
+                  >
+                    As stocked
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {notice ? <Alert tone="success">{notice}</Alert> : null}
+
             {rows.length === 0 ? (
               <Alert tone="success">
-                Every listing Etsy sells reaches a product here, by SKU or by a
-                linked listing. Orders will match on arrival.
+                Every listing Etsy sells reaches a product here. Orders will match
+                on arrival.
               </Alert>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="text-xs uppercase tracking-wide text-ink-500">
                     <tr>
-                      <th className="py-1 pr-3 font-medium">Etsy SKU</th>
-                      <th className="py-1 pr-3 font-medium">Listing</th>
+                      <th className="py-1 pr-3 font-medium">Etsy listing</th>
+                      <th className="py-1 pr-3 font-medium">Title</th>
                       <th className="py-1 pr-3 font-medium">Options</th>
                       <th className="py-1 pr-3 font-medium">In PrintFlow</th>
                       <th />
@@ -1346,8 +1411,8 @@ function CatalogCheck({
                   <tbody>
                     {rows.map((row, i) => (
                       <tr key={`${row.listing_id}-${row.sku}-${i}`} className="border-t border-ink-100">
-                        <td className="py-1.5 pr-3 align-top font-mono text-xs">
-                          {row.sku ?? <span className="text-ink-400">—</span>}
+                        <td className="py-1.5 pr-3 align-top font-mono text-xs text-ink-600">
+                          {row.listing_id ?? <span className="text-ink-400">—</span>}
                         </td>
                         <td className="py-1.5 pr-3 align-top">
                           <span className="text-ink-700">{row.title}</span>
@@ -1368,41 +1433,40 @@ function CatalogCheck({
                           ) : null}
                         </td>
                         <td className="py-1.5 text-right align-top">
-                          {row.status === 'missing' ? (
-                            <div className="flex justify-end gap-1">
-                              <Button
-                                size="sm"
-                                disabled={busy === row.sku}
-                                onClick={() => create(row, 'printed')}
+                          {(row.status === 'missing' || row.status === 'no_sku') &&
+                          row.listing_id ? (
+                            <div className="flex flex-col items-end gap-1">
+                              <div className="flex gap-1">
+                                <Button
+                                  size="sm"
+                                  disabled={busy !== null}
+                                  onClick={() => create([row.listing_id!], 'printed')}
+                                >
+                                  Create printed
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={busy !== null}
+                                  onClick={() => create([row.listing_id!], 'stocked')}
+                                >
+                                  Create stocked
+                                </Button>
+                              </div>
+                              <select
+                                className={cx(inputClass, 'text-xs')}
+                                value=""
+                                disabled={busy !== null}
+                                onChange={(e) => link(row, e.target.value)}
                               >
-                                Create printed
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={busy === row.sku}
-                                onClick={() => create(row, 'stocked')}
-                              >
-                                Create stocked
-                              </Button>
+                                <option value="">…or link an existing product</option>
+                                {allProducts.map((product) => (
+                                  <option key={product.id} value={product.id}>
+                                    {product.name} ({product.sku})
+                                  </option>
+                                ))}
+                              </select>
                             </div>
-                          ) : row.status === 'no_sku' && row.listing_id ? (
-                            // Etsy does not require a SKU, so "go add one" is
-                            // advice, not a fix. Naming the product here makes
-                            // the listing match as it stands.
-                            <select
-                              className={cx(inputClass, 'text-xs')}
-                              value=""
-                              disabled={busy === String(row.listing_id)}
-                              onChange={(e) => link(row, e.target.value)}
-                            >
-                              <option value="">Link to a product…</option>
-                              {allProducts.map((product) => (
-                                <option key={product.id} value={product.id}>
-                                  {product.sku} — {product.name}
-                                </option>
-                              ))}
-                            </select>
                           ) : null}
                         </td>
                       </tr>

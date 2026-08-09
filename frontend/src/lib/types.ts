@@ -183,7 +183,7 @@ export interface Product {
   etsy_links: EtsyLink[]
 }
 
-/** An Etsy listing that resolves to this product without going through a SKU. */
+/** An Etsy listing that resolves to this product. This is how orders match. */
 export interface EtsyLink {
   id: string
   etsy_listing_id: number

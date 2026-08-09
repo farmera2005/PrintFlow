@@ -24,7 +24,7 @@ from ..models import (
     Product,
     User,
 )
-from ..services import audit, intake
+from ..services import audit, codes, intake
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
@@ -146,7 +146,10 @@ async def list_products(
 
 
 class ProductRequest(BaseModel):
-    sku: str = Field(min_length=1, max_length=200)
+    # Optional: Etsy never required a SKU, so neither does PrintFlow. Left
+    # blank, a code is generated from the Etsy listing this product is linked
+    # to, or from its name.
+    sku: str | None = Field(default=None, max_length=200)
     name: str = Field(min_length=1, max_length=500)
     fulfillment: str
     qbo_item_id: str | None = None
@@ -170,8 +173,11 @@ async def create_product(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     _validate_fulfillment(body.fulfillment)
+    code = (body.sku or "").strip() or await codes.unique(
+        session, codes.from_name(body.name)
+    )
     product = Product(
-        sku=body.sku.strip(),
+        sku=code,
         name=body.name.strip(),
         fulfillment=body.fulfillment,
         qbo_item_id=body.qbo_item_id,
@@ -184,7 +190,7 @@ async def create_product(
     except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
-            status.HTTP_409_CONFLICT, f"A product with SKU '{body.sku.strip()}' already exists"
+            status.HTTP_409_CONFLICT, f"A product with code '{code}' already exists"
         ) from exc
     return _serialize(await _get(session, product.id))
 
@@ -232,7 +238,10 @@ async def update_product(
                 "Remove the Bambuddy print mapping before changing the fulfillment type.",
             )
 
-    product.sku = body.sku.strip()
+    # Clearing the code regenerates one rather than leaving the product with
+    # nothing to print next to it.
+    code = (body.sku or "").strip() or product.sku
+    product.sku = code
     product.name = body.name.strip()
     product.fulfillment = body.fulfillment
     product.qbo_item_id = body.qbo_item_id
@@ -243,7 +252,7 @@ async def update_product(
     except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
-            status.HTTP_409_CONFLICT, f"A product with SKU '{body.sku.strip()}' already exists"
+            status.HTTP_409_CONFLICT, f"A product with code '{code}' already exists"
         ) from exc
     return _serialize(await _get(session, product_id))
 

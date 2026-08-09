@@ -28,10 +28,11 @@ from ..models import (
     PROVIDER_QBO,
     PROVIDER_SHIPSTATION,
     PROVIDERS,
+    EtsyProductLink,
     OAuthState,
     User,
 )
-from ..services import audit, catalog, credentials, public_url
+from ..services import audit, catalog, credentials, intake, public_url
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.integrations")
@@ -301,6 +302,69 @@ async def etsy_catalog(
 
     result = await catalog.reconcile(session, listings)
     return {**result, "notes": notes, "error": None, "needs_reconnect": False}
+
+
+class ImportListingsRequest(BaseModel):
+    listing_ids: list[int] = Field(min_length=1, max_length=500)
+    fulfillment: str = Field(pattern="^(printed|stocked)$")
+    state: str = "active"
+
+
+@router.post("/etsy/catalog/import")
+async def etsy_catalog_import(
+    body: ImportListingsRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Build products straight from Etsy listings, each already linked.
+
+    The setup path for a shop that has never used SKUs: rather than inventing a
+    code per listing and linking each one by hand, take the listings Etsy
+    already describes and make the products from them.
+    """
+    client = await _etsy_client(session)
+    if not client.shop_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "No Etsy shop selected yet.")
+    try:
+        listings, _notes = await catalog.fetch_listings(client, state=body.state)
+    except IntegrationError as exc:
+        await session.rollback()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    result = await catalog.import_listings(
+        session, listings, body.listing_ids, fulfillment=body.fulfillment
+    )
+
+    # Orders that stalled on these listings are the reason the products are
+    # being made at all, so clear them in the same pass.
+    fixed = 0
+    for entry in result["created"]:
+        link = (
+            await session.execute(
+                select(EtsyProductLink).where(
+                    EtsyProductLink.etsy_listing_id == entry["listing_id"],
+                    EtsyProductLink.etsy_product_id.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if link is not None:
+            fixed += await intake.apply_etsy_link(session, link)
+
+    await audit.record(
+        session,
+        entity_type="integration",
+        entity_id=None,
+        action="etsy_catalog_import",
+        detail={
+            "created": len(result["created"]),
+            "skipped": len(result["skipped"]),
+            "fulfillment": body.fulfillment,
+            "also_fixed": fixed,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return {**result, "also_fixed": fixed}
 
 
 @router.post("/etsy/test")

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..integrations import etsy as etsy_api
 from ..integrations.base import IntegrationError
 from ..models import EtsyProductLink, Product
+from ..services import codes
 
 log = logging.getLogger("printflow.catalog")
 
@@ -151,6 +152,10 @@ async def reconcile(
                 }
             )
 
+    # "Nothing on Etsy sells this" has to account for both ways a listing can
+    # reach a product. A linked product is sold; its code was never meant to
+    # appear in Etsy, so looking for it there would report every one of them.
+    sold_by_link = {link.product_id for link in links}
     unused = [
         {
             "id": product.id,
@@ -159,7 +164,7 @@ async def reconcile(
             "fulfillment": product.fulfillment,
         }
         for key, product in by_sku.items()
-        if key not in seen_skus
+        if key not in seen_skus and product.id not in sold_by_link
     ]
     unused.sort(key=lambda row: row["sku"].lower())
 
@@ -173,6 +178,93 @@ async def reconcile(
         "unused_products": len(unused),
     }
     return {"rows": rows, "unused_products": unused, "counts": counts}
+
+
+async def import_listings(
+    session: AsyncSession,
+    listings: list[dict[str, Any]],
+    listing_ids: list[int],
+    *,
+    fulfillment: str,
+) -> dict[str, Any]:
+    """Create a product per Etsy listing, already linked to it.
+
+    This is the path that makes a shop with no SKUs workable: a listing carries
+    its own identity, so PrintFlow can build the product from it and record the
+    link in the same step, without anyone inventing a code.
+
+    One product per listing, not per variation. Etsy issues a fresh product id
+    for a variation every time the listing's options are edited, so a
+    per-variation product would stop matching after the next edit; what differs
+    between variations belongs in BOM option rules, which match on the values.
+    """
+    wanted = set(listing_ids)
+    by_id = {
+        listing.get("listing_id"): listing
+        for listing in listings
+        if listing.get("listing_id") in wanted
+    }
+
+    linked_already = set(
+        (
+            await session.execute(
+                select(EtsyProductLink.etsy_listing_id).where(
+                    EtsyProductLink.etsy_listing_id.in_(wanted)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for listing_id in listing_ids:
+        listing = by_id.get(listing_id)
+        if listing is None:
+            skipped.append({"listing_id": listing_id, "reason": "Etsy no longer lists it"})
+            continue
+        if listing_id in linked_already:
+            skipped.append({"listing_id": listing_id, "reason": "already linked"})
+            continue
+
+        title = (listing.get("title") or "").strip() or f"Etsy listing {listing_id}"
+        # If the listing does happen to carry one SKU, keep it as the code — it
+        # is the shop's own word for the thing, and better than a generated one.
+        # Matching does not depend on it either way; the link does that.
+        variants = etsy_api.listing_variants(
+            listing, etsy_api.listing_inventory_of(listing)
+        )
+        skus = {
+            (variant.get("sku") or "").strip()
+            for variant in variants
+            if (variant.get("sku") or "").strip()
+        }
+        base = skus.pop() if len(skus) == 1 else codes.from_listing(listing_id) or ""
+
+        product = Product(
+            sku=await codes.unique(session, base),
+            name=title[:500],
+            fulfillment=fulfillment,
+            qbo_item_id=None,
+            active=True,
+        )
+        session.add(product)
+        await session.flush()
+        session.add(
+            EtsyProductLink(
+                product_id=product.id,
+                etsy_listing_id=listing_id,
+                listing_title=title,
+            )
+        )
+        await session.flush()
+        linked_already.add(listing_id)
+        created.append(
+            {"listing_id": listing_id, "product_id": product.id, "code": product.sku}
+        )
+
+    return {"created": created, "skipped": skipped}
 
 
 def _status(sku: str | None, product: Product | None, linked: bool) -> str:

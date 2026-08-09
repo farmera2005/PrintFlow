@@ -699,7 +699,7 @@ interface BambuddyEndpoints {
 
 const PATH_ROLES: { key: string; label: string; hint: string }[] = [
   { key: 'printers', label: 'Printers', hint: 'Listed during setup and shown on the queue.' },
-  { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a SKU to a print file.' },
+  { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a product to a print file.' },
   { key: 'queue', label: 'Queue', hint: 'Read for job status, and posted to when a plate is sent.' },
 ]
 

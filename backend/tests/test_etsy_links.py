@@ -7,9 +7,9 @@ id of the exact variation the buyer bought.
 
 Two things these tests are careful about:
 
-* **Order of preference.** A real SKU still wins. A link is a local decision
-  about a listing, and if the seller later fills the SKU in, the SKU takes over
-  without anyone having to remove the link.
+* **Order of preference.** The Etsy identity wins. It is on every receipt, and
+  it is what the operator linked on purpose; a product code is a local label
+  that only gets consulted when the listing is not linked to anything.
 * **The listing beats the variation.** Etsy issues a new product id for a
   variation every time the seller edits the listing's options, so a
   variation-scoped link is the fragile one and only ever applies when it matches
@@ -174,16 +174,31 @@ class TestMatching:
         await db.commit()
         assert (await _line(db, order)).product_id == general.id
 
-    async def test_a_real_sku_wins_over_a_link(self, db):
-        """A link is a local guess; a SKU is what the seller actually declared."""
-        by_sku = await _product(db, "BIN-FAN")
+    async def test_a_link_wins_over_a_matching_code(self, db):
+        """The link is the deliberate decision; a code is only a label.
+
+        A receipt can still carry a SKU — an old listing, or one edited by
+        somebody else — and it must not silently override a listing the
+        operator has pointed somewhere on purpose.
+        """
+        by_code = await _product(db, "BIN-FAN")
         by_link = await _product(db, "BIN-PLAIN")
         db.add(EtsyProductLink(product_id=by_link.id, etsy_listing_id=LISTING))
         await db.commit()
 
         order, _ = await intake.ingest_receipt(db, _receipt(7, sku="BIN-FAN"))
         await db.commit()
-        assert (await _line(db, order)).product_id == by_sku.id
+        assert (await _line(db, order)).product_id == by_link.id
+        assert by_code.id != by_link.id
+
+    async def test_a_code_still_matches_when_no_listing_is_linked(self, db):
+        """Shops that do keep SKUs in Etsy keep working, unchanged."""
+        by_code = await _product(db, "BIN-FAN")
+        await db.commit()
+
+        order, _ = await intake.ingest_receipt(db, _receipt(70, sku="BIN-FAN"))
+        await db.commit()
+        assert (await _line(db, order)).product_id == by_code.id
 
     async def test_a_link_for_a_different_listing_does_not_match(self, db):
         other = await _product(db, "SOMETHING-ELSE")

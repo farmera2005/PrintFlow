@@ -114,6 +114,31 @@ class TestCatalogue:
         listing = (await signed_in.get("/api/products")).json()["products"]
         assert [p["sku"] for p in listing] == ["WIDGET"]
 
+    async def test_a_product_needs_no_code(self, signed_in):
+        """Etsy never required a SKU, so PrintFlow does not require a code."""
+        response = await signed_in.post(
+            "/api/products", json={"name": "Storage bin", "fulfillment": "printed"}
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["sku"] == "STORAGE-BIN"
+
+    async def test_generated_codes_do_not_collide(self, signed_in):
+        for _ in range(2):
+            await signed_in.post(
+                "/api/products", json={"name": "Storage bin", "fulfillment": "printed"}
+            )
+        listing = (await signed_in.get("/api/products")).json()["products"]
+        assert sorted(p["sku"] for p in listing) == ["STORAGE-BIN", "STORAGE-BIN-2"]
+
+    async def test_clearing_a_code_keeps_the_old_one(self, signed_in):
+        """A product with nothing to print next to it is worse than a stale code."""
+        product = await make_product(signed_in, sku="WIDGET")
+        updated = await signed_in.put(
+            f"/api/products/{product['id']}",
+            json={"sku": "", "name": "Widget", "fulfillment": "printed"},
+        )
+        assert updated.json()["sku"] == "WIDGET"
+
     async def test_duplicate_sku_is_rejected(self, signed_in):
         await make_product(signed_in, sku="WIDGET")
         response = await signed_in.post(
