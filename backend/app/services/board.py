@@ -73,6 +73,9 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             # "Color: Red" without opening Etsy.
             "variations": line.variations or [],
             "option_effects": line.option_effects or [],
+            # Which variation of its product this is, so the operator can see
+            # the automatch landed where they expect.
+            "variation_label": line.variation.label if line.variation else None,
             # The listing this came from, so an unmatched line can offer to
             # remember the link — a listing with no SKU has nothing else.
             "etsy_listing_id": line.etsy_listing_id,

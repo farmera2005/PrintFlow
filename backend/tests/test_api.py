@@ -264,7 +264,9 @@ class TestCatalogue:
         await db.commit()
         response = await signed_in.delete(f"/api/products/{product['id']}")
         assert response.status_code == 409
-        assert "Deactivate it instead" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "1 order line references it" in detail
+        assert "inactive" in detail
 
 
 class TestBoardAndOverrides:

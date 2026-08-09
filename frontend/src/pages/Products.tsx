@@ -9,6 +9,7 @@ import type {
   Fulfillment,
   ObservedOption,
   Product,
+  ProductVariation,
   QboItem,
 } from '../lib/types'
 import {
@@ -36,6 +37,9 @@ export default function Products() {
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Product | 'new' | null>(null)
   const [checking, setChecking] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -53,6 +57,48 @@ export default function Products() {
     load()
   }, [load])
 
+  const toggle = (id: string) =>
+    setSelected((current) => {
+      const next = new Set(current)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+
+  const deleteSelected = async () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    if (
+      !window.confirm(
+        `Delete ${ids.length} product${ids.length === 1 ? '' : 's'}? This cannot be undone.`,
+      )
+    )
+      return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await api.post<{
+        deleted: number
+        kept: { name: string; reason: string }[]
+      }>('/api/products/bulk-delete', { product_ids: ids })
+      setSelected(new Set())
+      // Anything held back is named with its reason — "3 of 5 deleted" without
+      // saying which, or why, is not an answer.
+      setNotice(
+        `Deleted ${result.deleted}.` +
+          (result.kept.length
+            ? ` Kept ${result.kept.length}: ` +
+              result.kept.map((k) => `${k.name} — ${k.reason}`).join(' ')
+            : ''),
+      )
+      await load()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
       <div className="mx-auto max-w-5xl space-y-4">
@@ -64,7 +110,20 @@ export default function Products() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <Button className="ml-auto" onClick={() => setChecking(true)}>
+          {selected.size ? (
+            <Button
+              className="ml-auto"
+              variant="ghost"
+              disabled={busy}
+              onClick={deleteSelected}
+            >
+              {busy ? 'Deleting…' : `Delete ${selected.size} selected`}
+            </Button>
+          ) : null}
+          <Button
+            className={selected.size ? '' : 'ml-auto'}
+            onClick={() => setChecking(true)}
+          >
             Check against Etsy
           </Button>
           <Button variant="primary" onClick={() => setEditing('new')}>
@@ -73,6 +132,7 @@ export default function Products() {
         </div>
 
         {error ? <Alert tone="error">{error}</Alert> : null}
+        {notice ? <Alert tone="info">{notice}</Alert> : null}
 
         {!products ? (
           <div className="flex justify-center py-10">
@@ -91,18 +151,27 @@ export default function Products() {
         ) : (
           <Card className="divide-y divide-ink-200">
             {products.map((product) => (
-              <button
+              // The checkbox sits outside the row button: a control inside a
+              // button is not reachable on its own.
+              <div
                 key={product.id}
-                type="button"
-                onClick={() => setEditing(product)}
-                className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left hover:bg-ink-50"
+                className="flex w-full items-center gap-2 pl-4 hover:bg-ink-50"
               >
-                <span className="font-mono text-sm font-medium text-ink-900">
-                  {product.sku}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm text-ink-600">
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${product.name}`}
+                  checked={selected.has(product.id)}
+                  onChange={() => toggle(product.id)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setEditing(product)}
+                  className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-3 pr-4 text-left"
+                >
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-900">
                   {product.name}
                 </span>
+                <span className="font-mono text-xs text-ink-500">{product.sku}</span>
                 <Badge>{product.fulfillment}</Badge>
                 {product.fulfillment === 'bundle' ? (
                   <Badge
@@ -128,7 +197,8 @@ export default function Products() {
                 ) : null}
                 {product.qbo_item_id ? <Badge>QBO linked</Badge> : null}
                 {!product.active ? <Badge>inactive</Badge> : null}
-              </button>
+                </button>
+              </div>
             ))}
           </Card>
         )}
@@ -336,6 +406,12 @@ function ProductEditor({
         ) : null}
 
         {product ? <EtsyLinksEditor product={product} onSaved={onSaved} /> : null}
+
+        {product && fulfillment !== 'bundle' ? (
+          // A bundle's options change its BOM, which is what option rules are
+          // for; variations are about the thing itself.
+          <VariationsEditor product={product} onSaved={onSaved} />
+        ) : null}
 
         {!product ? (
           <Alert tone="info">
@@ -1035,6 +1111,248 @@ function OptionRulesEditor({
       >
         {busy ? 'Adding…' : 'Add rule'}
       </Button>
+    </div>
+  )
+}
+
+/** The buyable combinations of a product, and what each one changes.
+ *
+ * Read from the Etsy listing rather than typed: the option names and values
+ * have to match Etsy's exactly for an order to attach to the right one, and a
+ * typo there is silent — it prints the wrong plate and nobody finds out until
+ * the parcel is open.
+ */
+function VariationsEditor({
+  product,
+  onSaved,
+}: {
+  product: Product
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [picking, setPicking] = useState<ProductVariation | null>(null)
+
+  const sync = async () => {
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<
+        Product & { added: number; updated: number; retired: number }
+      >(`/api/products/${product.id}/variations/sync-etsy`, {})
+      await onSaved(saved)
+      setNotice(
+        `${saved.added} new, ${saved.updated} refreshed` +
+          (saved.retired ? `, ${saved.retired} no longer sold` : '') +
+          '. Orders match these on their own.',
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const save = async (variation: ProductVariation, changes: Partial<ProductVariation>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const body = { ...variation, ...changes }
+      await onSaved(
+        await api.put<Product>(
+          `/api/products/${product.id}/variations/${variation.id}`,
+          {
+            bambuddy_archive_id: body.bambuddy_archive_id,
+            bambuddy_archive_name: body.bambuddy_archive_name,
+            plate_number: body.plate_number,
+            units_per_plate: body.units_per_plate,
+            preferred_printer_id: body.preferred_printer_id,
+            qbo_item_id: body.qbo_item_id,
+            qbo_item_name: body.qbo_item_name,
+            active: body.active,
+          },
+        ),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (variationId: string) => {
+    setBusy(true)
+    try {
+      await onSaved(
+        await api.del<Product>(`/api/products/${product.id}/variations/${variationId}`),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-ink-200 p-3">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-48 flex-1">
+          <h3 className="text-sm font-semibold text-ink-800">Variations</h3>
+          <p className="text-xs text-ink-500">
+            What the buyer can pick on Etsy. Orders attach to one automatically —
+            by Etsy's variation id, or by the option values if Etsy has reissued
+            the ids. Leave a row blank to use the product's own settings.
+          </p>
+        </div>
+        <Button size="sm" onClick={sync} disabled={busy}>
+          {busy ? 'Reading…' : 'Pull from Etsy'}
+        </Button>
+      </div>
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {notice ? <Alert tone="success">{notice}</Alert> : null}
+
+      {product.variations.length === 0 ? (
+        <p className="text-sm text-ink-500">
+          None yet.{' '}
+          {product.etsy_links.length
+            ? 'Pull them from Etsy — every combination the listing sells becomes a row.'
+            : 'Link an Etsy listing below first; variations come from the listing.'}
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {product.variations.map((variation) => (
+            <li
+              key={variation.id}
+              className={cx(
+                'rounded-md border p-2',
+                variation.active ? 'border-ink-200' : 'border-ink-200 bg-ink-50',
+              )}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium text-ink-800">
+                  {variation.label}
+                </span>
+                {!variation.active ? (
+                  <Badge className="bg-amber-100 text-amber-800 ring-amber-300">
+                    no longer sold on Etsy
+                  </Badge>
+                ) : null}
+                {variation.etsy_product_id ? (
+                  <span className="font-mono text-[11px] text-ink-400">
+                    {variation.etsy_product_id}
+                  </span>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="ml-auto"
+                  disabled={busy}
+                  onClick={() => remove(variation.id)}
+                >
+                  Remove
+                </Button>
+              </div>
+
+              {product.fulfillment === 'printed' ? (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-ink-500">Prints:</span>
+                  {variation.bambuddy_archive_id ? (
+                    <>
+                      <span className="text-ink-700">
+                        {variation.bambuddy_archive_name ??
+                          `archive ${variation.bambuddy_archive_id}`}
+                        {variation.plate_number ? `, plate ${variation.plate_number}` : ''}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          save(variation, {
+                            bambuddy_archive_id: null,
+                            bambuddy_archive_name: null,
+                            plate_number: null,
+                            units_per_plate: null,
+                            preferred_printer_id: null,
+                          })
+                        }
+                      >
+                        Use the product's file
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-ink-500">the product's file</span>
+                      <Button size="sm" variant="ghost" onClick={() => setPicking(variation)}>
+                        Use a different one
+                      </Button>
+                    </>
+                  )}
+                </div>
+              ) : null}
+
+              {product.fulfillment === 'stocked' ? (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-ink-500">Stock:</span>
+                  <span className="text-ink-700">
+                    {variation.qbo_item_name ??
+                      (variation.qbo_item_id
+                        ? `item ${variation.qbo_item_id}`
+                        : "the product's QuickBooks item")}
+                  </span>
+                  {variation.qbo_item_id ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() =>
+                        save(variation, { qbo_item_id: null, qbo_item_name: null })
+                      }
+                    >
+                      Use the product's item
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="ghost" onClick={() => setPicking(variation)}>
+                      Track separately
+                    </Button>
+                  )}
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {picking && product.fulfillment === 'printed' ? (
+        <ArchivePicker
+          onClose={() => setPicking(null)}
+          onPick={async (archive, printerId) => {
+            const variation = picking
+            setPicking(null)
+            await save(variation, {
+              bambuddy_archive_id: archive.id,
+              bambuddy_archive_name: archive.name,
+              plate_number: variation.plate_number ?? 1,
+              units_per_plate: variation.units_per_plate ?? 1,
+              preferred_printer_id: printerId,
+            })
+          }}
+        />
+      ) : null}
+
+      {picking && product.fulfillment === 'stocked' ? (
+        <QboItemPicker
+          onClose={() => setPicking(null)}
+          onPick={async (item) => {
+            const variation = picking
+            setPicking(null)
+            await save(variation, { qbo_item_id: item.id, qbo_item_name: item.name })
+          }}
+        />
+      ) : null}
     </div>
   )
 }

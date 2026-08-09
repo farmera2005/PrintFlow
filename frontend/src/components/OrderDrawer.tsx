@@ -193,6 +193,11 @@ function LineRow({
           {line.sku ? (
             <span className="font-mono text-xs text-ink-500">{line.sku}</span>
           ) : null}
+          {line.variation_label ? (
+            <Badge className="bg-sky-100 text-sky-800 ring-sky-300">
+              {line.variation_label}
+            </Badge>
+          ) : null}
           <Badge className={LINE_STATE_CLASSES[line.state]}>
             {LINE_STATE_LABELS[line.state]}
           </Badge>

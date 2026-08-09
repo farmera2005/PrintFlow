@@ -25,8 +25,9 @@ from ..models import (
     PrintJob,
     PrintMapping,
     Product,
+    ProductVariation,
 )
-from ..services import credentials
+from ..services import credentials, variations
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import recompute_order_by_id
 
@@ -63,33 +64,73 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
         .scalars()
         .all()
     }
+    # A variation can print a different file entirely — "with fan" and "without
+    # fan" are not the same plate — so it gets the last word on what is queued.
+    variation_rows = {
+        variation.id: variation
+        for variation in (
+            await session.execute(
+                select(ProductVariation).where(
+                    ProductVariation.id.in_(
+                        [line.variation_id for line in targets if line.variation_id]
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
 
     created: list[PrintJob] = []
     for line in targets:
-        mapping = mappings.get(line.product_id)
-        if mapping is None:
+        variation = variation_rows.get(line.variation_id)
+        plan = variations.print_plan(mappings.get(line.product_id), variation)
+        if plan is None:
             line.stock_note = (
                 (line.stock_note + " ") if line.stock_note else ""
-            ) + "No Bambuddy print mapping for this SKU — cannot queue prints."
+            ) + "No Bambuddy print mapping for this product — cannot queue prints."
             continue
 
-        existing = (
-            await session.execute(
-                select(PrintJob).where(
-                    PrintJob.order_line_id == line.id,
-                    PrintJob.status.in_(LIVE_JOB_STATUSES),
+        existing = list(
+            (
+                await session.execute(
+                    select(PrintJob).where(
+                        PrintJob.order_line_id == line.id,
+                        PrintJob.status.in_(LIVE_JOB_STATUSES),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
-        required = plates_needed(line.qty_to_print, mapping.units_per_plate)
+        # A variation set up after the order arrived changes what should be
+        # printed. A job that has not reached Bambuddy is still only an
+        # intention, so correct it; anything queued or printing is a fact on a
+        # machine and hiding it would not unprint it.
+        stale = [
+            job
+            for job in existing
+            if job.status == JOB_PENDING
+            and (
+                job.bambuddy_archive_id != plan.bambuddy_archive_id
+                or job.plate_number != plan.plate_number
+            )
+        ]
+        for job in stale:
+            await session.delete(job)
+        if stale:
+            existing = [job for job in existing if job not in stale]
+            await session.flush()
+
+        required = plates_needed(line.qty_to_print, plan.units_per_plate)
         for _ in range(max(0, required - len(existing))):
             job = PrintJob(
                 order_line_id=line.id,
-                bambuddy_archive_id=mapping.bambuddy_archive_id,
-                plate_number=mapping.plate_number,
-                printer_id=mapping.preferred_printer_id,
-                units_expected=mapping.units_per_plate,
+                bambuddy_archive_id=plan.bambuddy_archive_id,
+                plate_number=plan.plate_number,
+                printer_id=plan.preferred_printer_id,
+                units_expected=plan.units_per_plate,
                 status=JOB_PENDING,
             )
             session.add(job)

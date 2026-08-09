@@ -59,6 +59,13 @@ Four answers, and all four are worth seeing:
 Products no live listing sells are listed separately. Usually those are bundle
 components, which is expected — a finished good sitting there is worth a look.
 
+Products can be removed from the Products screen: tick the rows and **Delete
+selected**. Anything that cannot go is kept and says why — an order that
+references it, a bundle that uses it as a component, an option rule that brings
+it in, or a made-items line that recorded making it. Those last two are
+accounting history and are never rewritten, so mark the product inactive
+instead.
+
 Each row also carries the listing's own option values, so a
 [BOM option rule](#etsy-options-that-change-the-bom) can be written from the
 listing before a single order has arrived carrying that option.
@@ -111,6 +118,43 @@ and PrintFlow generates one, either from the Etsy listing (`ETSY-1895497697`,
 which pastes straight into an Etsy URL) or from the product's name. Nothing
 matches on it unless a receipt happens to carry that exact SKU and the listing
 is not linked to anything.
+
+## Variations
+
+A listing sells one product in several combinations — *Bin Fan: Yes* and *Bin
+Fan: No* — and those are not interchangeable: one is a different plate on the
+printer, or a different item drawn down in QuickBooks. **Products → (a product)
+→ Variations → Pull from Etsy** reads the listing and makes a row per
+combination. Nobody types option names: they have to match Etsy's exactly, and a
+typo there is silent — it prints the wrong plate and nobody finds out until the
+parcel is open.
+
+Orders attach to a variation automatically, most specific first:
+
+1. Etsy's own variation id, when it is current;
+2. the option values, compared ignoring case and spacing.
+
+Both are kept because Etsy **reissues a variation's id whenever the seller edits
+the listing's options**. Matching on the id alone would go quiet after an edit
+and take the wrong plate with it; the values survive.
+
+Each row can override, and every override is optional:
+
+* **the print file** — a different archive, or the same one on a different
+  plate;
+* **the QuickBooks item** — for a variation whose stock is tracked separately.
+
+Blank means "use the product's". A variation with no overrides is still worth
+having: the order says which one was bought.
+
+Setting variations up **after** the first order arrived is the normal way round,
+so pulling them re-matches the open orders on that product, and rewrites any
+print job that has not reached Bambuddy yet. A job already queued or printing is
+left alone — it is a fact on a machine, and deleting the row would not unprint
+it.
+
+Combinations Etsy stops selling are marked *no longer sold* rather than deleted,
+because old orders still point at them.
 
 ## Etsy options that change the BOM
 

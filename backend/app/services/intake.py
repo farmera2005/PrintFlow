@@ -20,8 +20,9 @@ from ..models import (
     Order,
     OrderLine,
     Product,
+    ProductVariation,
 )
-from ..services import allocation, bom_options, printing
+from ..services import allocation, bom_options, printing, variations
 from ..services.state import recompute_order
 
 log = logging.getLogger("printflow.intake")
@@ -395,6 +396,30 @@ async def process_order(session: AsyncSession, order: Order) -> Order:
     return order
 
 
+async def attach_variation(
+    session: AsyncSession, line: OrderLine, product: Product
+) -> ProductVariation | None:
+    """Work out which variation of its product a line is, and record it.
+
+    Left unset when nothing describes the combination, which is the ordinary
+    case for a product that has no variations at all.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(ProductVariation)
+                .where(ProductVariation.product_id == product.id)
+                .order_by(ProductVariation.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    match = variations.automatch(line, list(rows))
+    line.variation_id = match.id if match is not None else None
+    return match
+
+
 async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLine]:
     """Match a top-level line to a product and explode it if it is a bundle.
 
@@ -422,6 +447,11 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
             line.state = LINE_UNMATCHED
             await session.flush()
             return []
+
+    # Which variation of it the buyer bought. Re-run every time rather than only
+    # when unset: variations get added after the order arrived, and re-running
+    # intake is how an operator applies them.
+    await attach_variation(session, line, product)
 
     if product.fulfillment != "bundle":
         if line.state == LINE_UNMATCHED:

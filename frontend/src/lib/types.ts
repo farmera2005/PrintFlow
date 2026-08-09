@@ -53,6 +53,8 @@ export interface OrderLine {
   stock_note: string | null
   variations: { name: string; value: string; free_text?: boolean }[]
   option_effects: string[]
+  /** Which variation of its product this line matched, if any. */
+  variation_label: string | null
   etsy_listing_id: number | null
   etsy_product_id: number | null
   assembled_at: string | null
@@ -181,6 +183,28 @@ export interface Product {
   bom: BomEntry[]
   option_rules: OptionRule[]
   etsy_links: EtsyLink[]
+  variations: ProductVariation[]
+}
+
+/** One buyable combination of a product's options, and what it changes.
+ *
+ * Orders attach to one of these automatically — by Etsy's variation id where
+ * it is current, by the option values otherwise. Every override is optional;
+ * null means "use the product's". */
+export interface ProductVariation {
+  id: string
+  label: string
+  options: { name: string; value: string }[]
+  etsy_listing_id: number | null
+  etsy_product_id: number | null
+  bambuddy_archive_id: number | null
+  bambuddy_archive_name: string | null
+  plate_number: number | null
+  units_per_plate: number | null
+  preferred_printer_id: number | null
+  qbo_item_id: string | null
+  qbo_item_name: string | null
+  active: boolean
 }
 
 /** An Etsy listing that resolves to this product. This is how orders match. */

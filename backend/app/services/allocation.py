@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,9 @@ from ..models import (
     RESERVING_LINE_STATES,
     OrderLine,
     Product,
+    ProductVariation,
 )
-from ..services import credentials
+from ..services import credentials, variations
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.allocation")
@@ -37,23 +39,28 @@ def split_quantity(
 
 
 async def reserved_quantities(
-    session: AsyncSession, product_ids: list, exclude_line_ids: list | None = None
-) -> dict:
-    """Sum of stock already claimed by other open lines, per product."""
-    if not product_ids:
-        return {}
+    session: AsyncSession, exclude_line_ids: list | None = None
+) -> dict[str, int]:
+    """Stock already claimed by other open lines, keyed by QuickBooks item.
+
+    Keyed by the item rather than the product because the two stopped being the
+    same thing once a variation could name its own item: one colour of a
+    printed part draws down its own stock, while two products pointed at one
+    item are competing for the same units and have to see each other's claims.
+    """
+    item = func.coalesce(ProductVariation.qbo_item_id, Product.qbo_item_id)
     stmt = (
-        select(OrderLine.product_id, func.coalesce(func.sum(OrderLine.qty_from_stock), 0))
-        .where(
-            OrderLine.product_id.in_(product_ids),
-            OrderLine.state.in_(RESERVING_LINE_STATES),
-        )
-        .group_by(OrderLine.product_id)
+        select(item, func.coalesce(func.sum(OrderLine.qty_from_stock), 0))
+        .select_from(OrderLine)
+        .join(Product, Product.id == OrderLine.product_id)
+        .outerjoin(ProductVariation, ProductVariation.id == OrderLine.variation_id)
+        .where(OrderLine.state.in_(RESERVING_LINE_STATES), item.isnot(None))
+        .group_by(item)
     )
     if exclude_line_ids:
         stmt = stmt.where(OrderLine.id.notin_(exclude_line_ids))
     rows = (await session.execute(stmt)).all()
-    return {product_id: int(total or 0) for product_id, total in rows}
+    return {str(item_id): int(total or 0) for item_id, total in rows}
 
 
 async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
@@ -86,12 +93,32 @@ async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
     if not targets:
         return
 
+    # The variation, where there is one, decides which item this line draws on.
+    variation_rows = {
+        variation.id: variation
+        for variation in (
+            await session.execute(
+                select(ProductVariation).where(
+                    ProductVariation.id.in_(
+                        [line.variation_id for line in targets if line.variation_id]
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+    item_of: dict[Any, str | None] = {}
+    for line in targets:
+        item_id, _name = variations.stock_item(
+            products[line.product_id], variation_rows.get(line.variation_id)
+        )
+        item_of[line.id] = item_id
+
     needs_qbo = [
-        line
-        for line in targets
-        if not line.force_print and products[line.product_id].qbo_item_id
+        line for line in targets if not line.force_print and item_of[line.id]
     ]
-    item_ids = sorted({products[line.product_id].qbo_item_id for line in needs_qbo})
+    item_ids = sorted({item_of[line.id] for line in needs_qbo})
 
     items: dict[str, dict] = {}
     qbo_error: str | None = None
@@ -109,14 +136,13 @@ async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
             log.warning("QBO lookup failed during decisioning: %s", qbo_error)
 
     reserved = await reserved_quantities(
-        session,
-        [line.product_id for line in targets],
-        exclude_line_ids=[line.id for line in targets],
+        session, exclude_line_ids=[line.id for line in targets]
     )
     now = datetime.now(timezone.utc)
 
     for line in targets:
         product = products[line.product_id]
+        item_id = item_of[line.id]
         note: str | None = None
 
         if line.force_print:
@@ -129,21 +155,21 @@ async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
             # and warn if QuickBooks says there isn't enough.
             line.qty_from_stock = line.quantity
             line.qty_to_print = 0
-            qty = qbo_api.item_qty_on_hand(items.get(str(product.qbo_item_id), {}))
+            qty = qbo_api.item_qty_on_hand(items.get(str(item_id), {}))
             if qbo_error:
                 note = f"Stock not verified: {qbo_error}."
-            elif product.qbo_item_id is None:
+            elif item_id is None:
                 note = "No QuickBooks item linked — stock not verified."
             elif qty is None:
                 note = "QuickBooks item is not inventory-tracked — stock not verified."
             else:
-                available = int(qty) - reserved.get(line.product_id, 0)
+                available = int(qty) - reserved.get(str(item_id), 0)
                 if available < line.quantity:
                     note = (
                         f"Short on stock: {max(available, 0)} available in QuickBooks, "
                         f"{line.quantity} needed."
                     )
-        elif not product.qbo_item_id:
+        elif not item_id:
             # §4.2: a printed product with no QBO item skips the stock check.
             line.qty_from_stock = 0
             line.qty_to_print = line.quantity
@@ -152,17 +178,17 @@ async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
             line.qty_to_print = line.quantity
             note = f"{qbo_error} — printing full quantity."
         else:
-            item = items.get(str(product.qbo_item_id))
+            item = items.get(str(item_id))
             if item is None:
                 line.qty_from_stock = 0
                 line.qty_to_print = line.quantity
                 note = (
-                    f"QuickBooks item {product.qbo_item_id} not found — printing full quantity."
+                    f"QuickBooks item {item_id} not found — printing full quantity."
                 )
             else:
                 qty = qbo_api.item_qty_on_hand(item)
                 from_stock, to_print = split_quantity(
-                    line.quantity, qty, reserved.get(line.product_id, 0)
+                    line.quantity, qty, reserved.get(str(item_id), 0)
                 )
                 line.qty_from_stock = from_stock
                 line.qty_to_print = to_print
@@ -170,7 +196,8 @@ async def decide_lines(session: AsyncSession, lines: list[OrderLine]) -> None:
                     note = "QuickBooks item is not inventory-tracked — printing full quantity."
 
         # Claim what this line just took so the next line in the same batch sees it.
-        reserved[line.product_id] = reserved.get(line.product_id, 0) + line.qty_from_stock
+        if item_id:
+            reserved[str(item_id)] = reserved.get(str(item_id), 0) + line.qty_from_stock
         line.stock_note = note
         line.decided_at = now
 

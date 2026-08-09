@@ -209,6 +209,9 @@ class Product(Base):
     etsy_links: Mapped[list[EtsyProductLink]] = relationship(
         back_populates="product", cascade="all, delete-orphan", lazy="selectin"
     )
+    variations: Mapped[list[ProductVariation]] = relationship(
+        back_populates="product", cascade="all, delete-orphan", lazy="selectin"
+    )
 
 
 class BomLine(Base):
@@ -292,6 +295,82 @@ class EtsyProductLink(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="etsy_links")
+
+
+class ProductVariation(Base):
+    """One buyable combination of a product's options, and what it changes.
+
+    A listing sells "Storage Bin" with *Bin Fan: Yes* and *Bin Fan: No*. Those
+    are one product to the shop and two different things to make — a different
+    plate on the printer, or a different item drawn down in QuickBooks. Without
+    somewhere to say so, every variation of a printed product would print the
+    same file, silently.
+
+    Matching an order to one of these is automatic, most specific first:
+
+    * `etsy_product_id` — the exact variation Etsy sold. Unambiguous, but Etsy
+      reissues these ids whenever the seller edits the listing's options.
+    * `options` — the option names and values, compared case- and
+      space-insensitively. Slower to match but survives an edit, which is why
+      both are kept and the ids are refreshed rather than relied upon.
+
+    Every override is optional. A variation that sets none of them is still
+    worth having: it records what the listing offers, and the order says which
+    one was bought.
+    """
+
+    __tablename__ = "product_variations"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    etsy_listing_id: Mapped[int | None] = mapped_column(BigInteger)
+    etsy_product_id: Mapped[int | None] = mapped_column(BigInteger)
+    # [{"name": "Bin Fan", "value": "Yes"}, …] — every option this combination
+    # pins. An empty list matches nothing; that is a listing without variations,
+    # which needs no variation row.
+    options: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Print override. Null archive means "use the product's print mapping".
+    bambuddy_archive_id: Mapped[int | None] = mapped_column(Integer)
+    bambuddy_archive_name: Mapped[str | None] = mapped_column(Text)
+    plate_number: Mapped[int | None] = mapped_column(Integer)
+    units_per_plate: Mapped[int | None] = mapped_column(Integer)
+    preferred_printer_id: Mapped[int | None] = mapped_column(Integer)
+
+    # Stock override. Null means "use the product's QuickBooks item".
+    qbo_item_id: Mapped[str | None] = mapped_column(Text)
+    qbo_item_name: Mapped[str | None] = mapped_column(Text)
+
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "units_per_plate is null or units_per_plate > 0",
+            name="ck_variation_units_per_plate_positive",
+        ),
+        CheckConstraint(
+            "plate_number is null or plate_number > 0",
+            name="ck_variation_plate_positive",
+        ),
+        # One row per Etsy variation. Partial, because plenty of variations are
+        # described by their options alone and carry no id at all.
+        Index(
+            "uq_variation_etsy_product",
+            "etsy_product_id",
+            unique=True,
+            postgresql_where=text("etsy_product_id is not null"),
+            sqlite_where=text("etsy_product_id is not null"),
+        ),
+    )
+
+    product: Mapped[Product] = relationship(back_populates="variations")
 
 
 class BomOptionRule(Base):
@@ -439,6 +518,12 @@ class OrderLine(Base):
     product_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), index=True
     )
+    # Which of the product's variations this line is, worked out at intake from
+    # the options the buyer picked. Decides the plate that gets printed and the
+    # QuickBooks item drawn down, when the variation overrides them.
+    variation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_variations.id", ondelete="SET NULL"), index=True
+    )
     etsy_listing_id: Mapped[int | None] = mapped_column(BigInteger)
     # Etsy's inventory product: the exact variant the buyer bought. Kept so a
     # listing with no SKU can still be matched, and so a link can be narrowed
@@ -493,6 +578,9 @@ class OrderLine(Base):
         back_populates="children", remote_side=[id]
     )
     product: Mapped[Product | None] = relationship(lazy="selectin")
+    # Eager, like the product: the board reads it for every line it draws, and a
+    # lazy load there is a MissingGreenlet waiting to happen.
+    variation: Mapped[ProductVariation | None] = relationship(lazy="selectin")
     print_jobs: Mapped[list[PrintJob]] = relationship(
         back_populates="order_line", cascade="all, delete-orphan"
     )
