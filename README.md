@@ -55,12 +55,28 @@ items are greyed out and refused: QuickBooks tracks no quantity on them, so
 such a line would book the expense and move no stock at all.
 
 Costed at the BOM roll-up, the two sides cancel and the expense totals zero: the
-sheet simply moves value out of components and into finished goods. Type a
-higher unit cost to absorb labour or machine time and the difference lands in
-the account you choose under **Settings → QuickBooks → Manufacturing postings**.
-There is no default for that account, and posting stays blocked until you pick
-one — where manufacturing cost belongs depends on your chart of accounts, and
-guessing would file it somewhere you did not choose.
+sheet simply moves value out of components and into finished goods.
+
+Two accounts are configured under **Settings → QuickBooks → Manufacturing
+postings**, and they do different jobs:
+
+* **Paid from** (required). QuickBooks calls this the Purchase's `AccountRef`
+  and treats it as the account the expense came *out of*, so it only accepts a
+  **Bank** account — or a **Credit Card** account when the payment type is
+  CreditCard. Anything else is rejected with error 6430, "Invalid account type
+  used". A sheet costed at its BOM nets to zero and never touches this account,
+  so a clearing account suits it well.
+* **Value added goes to** (optional). When you cost items above their components
+  to absorb labour or machine time, that difference is credited here and the
+  Purchase totals zero. Leave it blank and the difference comes out of the
+  "paid from" account instead — which reads as money leaving a bank account
+  that nothing actually left.
+
+Neither has a default and posting stays blocked until the first is set: which
+accounts are right depends on your chart of accounts, and guessing would file
+real money somewhere you did not choose. PrintFlow checks the account's type
+before posting, so a wrong choice is explained here rather than returned as a
+bare error code by QuickBooks.
 
 Guardrails, because this is the one place PrintFlow writes to your books:
 

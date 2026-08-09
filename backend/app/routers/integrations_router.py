@@ -616,26 +616,39 @@ async def qbo_items(
     }
 
 
-# Which accounts make sense as the other side of a manufacturing posting. Cost
-# of Goods Sold and Expense cover the usual choices; Other Current Asset is
-# there for shops that run a work-in-process account.
-MANUFACTURING_ACCOUNT_TYPES = (
+# A Purchase's AccountRef is the account the money came *out of*, so only these
+# are valid there. Offering an expense account is what produced QuickBooks
+# error 6430, "Invalid account type used".
+PAYMENT_ACCOUNT_TYPES = ("Bank", "Credit Card")
+
+# Where value added beyond the components goes — labour, machine time.
+OFFSET_ACCOUNT_TYPES = (
     "Cost of Goods Sold",
     "Expense",
     "Other Expense",
     "Other Current Asset",
-    "Bank",
+    "Other Current Liability",
 )
+
+ACCOUNT_ROLES = {"payment": PAYMENT_ACCOUNT_TYPES, "offset": OFFSET_ACCOUNT_TYPES}
 
 
 @router.get("/qbo/accounts")
 async def qbo_accounts(
-    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+    role: str = "payment",
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Chart of accounts for the manufacturing-cost picker."""
+    """Chart of accounts, filtered to what the chosen role can legally use."""
+    types = ACCOUNT_ROLES.get(role)
+    if types is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown account role '{role}'. Use one of {', '.join(ACCOUNT_ROLES)}.",
+        )
     try:
         client = await qbo_api.client_for(session)
-        accounts = await client.get_accounts(MANUFACTURING_ACCOUNT_TYPES)
+        accounts = await client.get_accounts(types)
     except IntegrationNotConfigured as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except IntegrationError as exc:

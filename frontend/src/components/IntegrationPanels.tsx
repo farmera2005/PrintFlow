@@ -437,20 +437,34 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
 interface ManufacturingSettings {
   account_id: string | null
   account_name: string | null
+  offset_account_id: string | null
+  offset_account_name: string | null
   payment_type: string
   doc_number_prefix: string
 }
 
-/** Where the cost of a made-items sheet lands.
+interface QboAccount {
+  id: string
+  name: string
+  type: string
+}
+
+/** How a made-items sheet posts.
  *
- * There is deliberately no default: which account is right depends on how the
- * shop's books are laid out, and picking one on their behalf would quietly file
- * manufacturing cost somewhere they did not choose. Posting stays blocked until
- * this is set, and the Manufacturing tab says so.
+ * Two accounts, and they do different jobs. QuickBooks calls the first one
+ * AccountRef and treats it as the account the expense is *paid from* — it only
+ * accepts a Bank account there, or a Credit Card account when the payment type
+ * is CreditCard. The second is optional and absorbs value added beyond the
+ * components, so that labour does not show up as money leaving a bank account.
+ *
+ * Neither has a default: which account is right depends on the shop's chart of
+ * accounts, and picking one on their behalf would file real money somewhere
+ * nobody chose. Posting stays blocked until the first is set.
  */
 function ManufacturingPosting() {
   const [settings, setSettings] = useState<ManufacturingSettings | null>(null)
-  const [accounts, setAccounts] = useState<{ id: string; name: string; type: string }[]>([])
+  const [accounts, setAccounts] = useState<QboAccount[]>([])
+  const [offsetAccounts, setOffsetAccounts] = useState<QboAccount[]>([])
   const [paymentTypes, setPaymentTypes] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -467,11 +481,13 @@ function ManufacturingPosting() {
       })
       .catch((err) => setError(errorMessage(err)))
     api
-      .get<{ accounts: { id: string; name: string; type: string }[] }>(
-        '/api/integrations/qbo/accounts',
-      )
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=payment')
       .then((data) => setAccounts(data.accounts))
       .catch(() => setAccounts([]))
+    api
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=offset')
+      .then((data) => setOffsetAccounts(data.accounts))
+      .catch(() => setOffsetAccounts([]))
   }, [])
 
   const save = async (changes: Partial<ManufacturingSettings>) => {
@@ -496,9 +512,27 @@ function ManufacturingPosting() {
   return (
     <div className="space-y-3 rounded-md bg-ink-50 p-3">
       <p className="text-sm font-medium text-ink-800">Manufacturing postings</p>
+      <Field label="Payment type" hint="How QuickBooks records the expense.">
+        <select
+          className={inputClass}
+          value={settings.payment_type}
+          disabled={busy}
+          onChange={(e) => save({ payment_type: e.target.value })}
+        >
+          {paymentTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </Field>
       <Field
-        label="Account for manufacturing cost"
-        hint="Where the difference between what you made and what it consumed lands. A pure assembly nets to zero and never touches it."
+        label="Paid from"
+        hint={
+          settings.payment_type === 'CreditCard'
+            ? 'QuickBooks only accepts a credit card account here.'
+            : 'QuickBooks only accepts a bank account here. A sheet costed at its BOM nets to zero and never touches it, so a clearing account works well.'
+        }
       >
         <select
           className={inputClass}
@@ -517,29 +551,40 @@ function ManufacturingPosting() {
           ))}
         </select>
       </Field>
+      <Field
+        label="Value added goes to (optional)"
+        hint="When you cost items above their components to absorb labour or machine time, that difference is credited here. Leave it blank and it comes out of the account above instead."
+      >
+        <select
+          className={inputClass}
+          value={settings.offset_account_id ?? ''}
+          disabled={busy}
+          onChange={(e) => {
+            const account = offsetAccounts.find((a) => a.id === e.target.value)
+            save({
+              offset_account_id: account?.id ?? null,
+              offset_account_name: account?.name ?? null,
+            })
+          }}
+        >
+          <option value="">None — it comes out of the account above</option>
+          {offsetAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name} ({account.type})
+            </option>
+          ))}
+        </select>
+      </Field>
       {!accounts.length ? (
         <p className="text-xs text-ink-500">
           Could not read your chart of accounts. Reconnect QuickBooks, or reload
           this page once it is back.
         </p>
       ) : null}
-      <Field label="Payment type" hint="How QuickBooks records the expense.">
-        <select
-          className={inputClass}
-          value={settings.payment_type}
-          disabled={busy}
-          onChange={(e) => save({ payment_type: e.target.value })}
-        >
-          {paymentTypes.map((type) => (
-            <option key={type} value={type}>
-              {type}
-            </option>
-          ))}
-        </select>
-      </Field>
       {!settings.account_id ? (
         <Alert tone="warning">
-          Until an account is chosen, made-items sheets can be built but not posted.
+          Until a "paid from" account is chosen, made-items sheets can be built but
+          not posted.
         </Alert>
       ) : null}
       {saved && settings.account_id ? (

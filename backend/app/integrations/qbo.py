@@ -259,6 +259,13 @@ class QboClient:
         )
         return list(result.get("Account") or [])
 
+    async def get_account(self, account_id: str) -> dict[str, Any] | None:
+        result = await self.query(
+            f"select * from Account where Id = '{escape_literal(str(account_id))}'"
+        )
+        rows = result.get("Account") or []
+        return rows[0] if rows else None
+
     async def search_vendors(self, term: str = "", limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
         if term.strip():

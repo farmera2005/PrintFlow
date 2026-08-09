@@ -56,7 +56,7 @@ from ..models import (
 )
 from . import audit
 from .credentials import IntegrationNotConfigured
-from .settings_store import get_manufacturing_settings
+from .settings_store import PAYMENT_ACCOUNT_TYPES, get_manufacturing_settings
 
 log = logging.getLogger("printflow.manufacturing")
 
@@ -135,6 +135,42 @@ async def qbo_item_cost(session: AsyncSession, item_id: str) -> Decimal | None:
     """What QuickBooks says the item costs — the prefill for a direct item line."""
     item = await qbo_item(session, item_id)
     return qbo_api.item_purchase_cost(item) if item else None
+
+
+async def _account_problems(
+    session: AsyncSession, settings: dict[str, Any]
+) -> list[str]:
+    """Catch "Invalid account type used" before QuickBooks does.
+
+    A Purchase's AccountRef is the account the money came *out of*. QuickBooks
+    accepts only a Bank account there — or a Credit Card account when the
+    payment type is CreditCard — and rejects anything else with error 6430,
+    which names no field and so is very hard to act on.
+    """
+    payment_type = str(settings.get("payment_type") or "Cash")
+    allowed = PAYMENT_ACCOUNT_TYPES.get(payment_type, ("Bank",))
+    try:
+        client = await qbo_api.client_for(session)
+        account = await client.get_account(str(settings["account_id"]))
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        log.info("Could not check the posting account: %s", exc)
+        return []
+
+    if account is None:
+        return [
+            f"The posting account ({settings.get('account_name') or settings['account_id']}) "
+            "no longer exists in QuickBooks. Choose another under Settings."
+        ]
+    actual = str(account.get("AccountType") or "unknown")
+    if actual not in allowed:
+        joined = " or ".join(allowed)
+        return [
+            f"{account.get('Name') or 'The posting account'} is a {actual} account. "
+            f"QuickBooks needs a {joined} account here, because this is the account "
+            f"the expense is paid from — not where the cost lands. Choose one under "
+            "Settings → QuickBooks → Manufacturing postings."
+        ]
+    return []
 
 
 async def non_inventory_items(
@@ -260,11 +296,13 @@ async def preview(session: AsyncSession, sheet: MadeSheet) -> dict[str, Any]:
         "made_total": str(money(made_total)),
         "consumed": consumed,
         "consumed_total": str(money(consumed_total)),
-        # What lands in the chosen account: added value (labour, overhead) when
+        # Value added over the components: labour and machine time when
         # positive, and a credit back when the made items were costed below
-        # their components.
+        # what they consumed.
         "net_to_account": str(money(made_total - consumed_total)),
-        "account_name": settings.get("account_name"),
+        "account_name": settings.get("offset_account_name") or settings.get("account_name"),
+        "offset_account_name": settings.get("offset_account_name"),
+        "payment_account_name": settings.get("account_name"),
         "problems": await problems(session, sheet, settings),
     }
 
@@ -299,9 +337,11 @@ async def problems(
         found.append("The sheet has no lines.")
     if not settings.get("account_id"):
         found.append(
-            "No account is set for manufacturing cost. "
-            "Choose one under Settings → QuickBooks."
+            "No account is set for the posting. Choose one under "
+            "Settings → QuickBooks → Manufacturing postings."
         )
+    else:
+        found.extend(await _account_problems(session, settings))
 
     for line in sheet.lines:
         if not line.item_id:
@@ -379,6 +419,28 @@ def build_purchase(
                 description=f"Consumed {quantity} × {product.sku} — {product.name}",
                 account_id=settings.get("account_id"),
             )
+        )
+
+    # Value added over and above the components — labour, machine time. Left
+    # alone it falls to AccountRef, which is a bank account, so QuickBooks would
+    # show money leaving an account that nothing left. An offsetting line puts
+    # it against an expense account instead and brings the Purchase to zero,
+    # which is what capitalising labour into inventory should look like.
+    net = money(sum((Decimal(str(line["Amount"])) for line in lines), Decimal("0")))
+    if settings.get("offset_account_id") and net != 0:
+        lines.append(
+            {
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Amount": float(-net),
+                "Description": (
+                    "Value added in manufacturing"
+                    if net > 0
+                    else "Manufacturing costed below its components"
+                ),
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": str(settings["offset_account_id"])}
+                },
+            }
         )
 
     body: dict[str, Any] = {

@@ -15,13 +15,22 @@ KEY_PUBLIC_BASE_URL = "public_base_url"
 KEY_HTTPS_REDIRECT = "https_redirect"
 KEY_MANUFACTURING = "manufacturing"
 
-# How a made-items sheet posts to QuickBooks. `account_id` is the account the
-# manufacturing cost comes out of, and is the one field with no sensible
-# default: it depends on the operator's chart of accounts, so posting is blocked
-# until they choose it.
+# How a made-items sheet posts to QuickBooks.
+#
+# `account_id` is the Purchase's AccountRef — which QuickBooks defines as the
+# account the money came *out of*, not where the cost lands. It must be a Bank
+# account (or a Credit Card account when the payment type is CreditCard);
+# anything else is rejected with "Invalid account type used" (error 6430).
+#
+# `offset_account_id` is optional and is where value added beyond the
+# components goes — labour, machine time. Without it, that difference is
+# credited to the payment account, which reads as money leaving a bank account
+# that nothing actually left.
 DEFAULT_MANUFACTURING: dict[str, Any] = {
     "account_id": None,
     "account_name": None,
+    "offset_account_id": None,
+    "offset_account_name": None,
     "payment_type": "Cash",
     "vendor_id": None,
     "vendor_name": None,
@@ -31,6 +40,14 @@ DEFAULT_MANUFACTURING: dict[str, Any] = {
 MANUFACTURING_FIELDS = tuple(DEFAULT_MANUFACTURING)
 # QuickBooks rejects anything else on a Purchase.
 PAYMENT_TYPES = ("Cash", "Check", "CreditCard")
+
+# What AccountRef may be, per payment type. QuickBooks has no "Cash" account
+# type — petty cash is a Bank account like any other.
+PAYMENT_ACCOUNT_TYPES: dict[str, tuple[str, ...]] = {
+    "Cash": ("Bank",),
+    "Check": ("Bank",),
+    "CreditCard": ("Credit Card",),
+}
 
 # Defaults from §6 of the build spec.
 DEFAULT_POLL_INTERVALS: dict[str, int] = {

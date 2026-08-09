@@ -67,6 +67,10 @@ def _serialize(sheet: MadeSheet) -> dict[str, Any]:
         "voided_at": sheet.voided_at,
         "voided_by": sheet.voided_by,
         "created_at": sheet.created_at,
+        # Kept so a QuickBooks rejection can be read rather than guessed at.
+        # Its validation errors name a code and not a field, so the payload is
+        # usually the only way to see which value it objected to.
+        "qbo_request": sheet.qbo_request,
         "lines": [_serialize_line(line) for line in sheet.lines],
         "total": str(
             manufacturing.money(
@@ -111,6 +115,8 @@ def _parse_cost(raw: Any) -> Decimal:
 class ManufacturingSettingsRequest(BaseModel):
     account_id: str | None = None
     account_name: str | None = None
+    offset_account_id: str | None = None
+    offset_account_name: str | None = None
     payment_type: str | None = None
     vendor_id: str | None = None
     vendor_name: str | None = None

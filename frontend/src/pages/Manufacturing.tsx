@@ -41,6 +41,7 @@ interface Sheet {
   voided_at: string | null
   voided_by: string | null
   created_at: string
+  qbo_request: unknown
   lines: SheetLine[]
   total: string
 }
@@ -60,6 +61,8 @@ interface Preview {
   consumed_total: string
   net_to_account: string
   account_name: string | null
+  offset_account_name: string | null
+  payment_account_name: string | null
   problems: string[]
 }
 
@@ -655,7 +658,9 @@ function SheetEditor({
                 </>
               ) : null}
               <dt className="border-t border-ink-200 pt-1 font-medium text-ink-800">
-                {preview.account_name ?? 'Manufacturing account'}
+                {Number(preview.net_to_account) === 0
+                  ? 'Nothing leaves any account'
+                  : `Value added → ${preview.account_name ?? 'the posting account'}`}
               </dt>
               <dd className="border-t border-ink-200 pt-1 text-right font-medium tabular-nums">
                 {currency(preview.net_to_account)}
@@ -701,6 +706,20 @@ function SheetEditor({
         ) : null}
 
         {error ? <Alert tone="error">{error}</Alert> : null}
+        {error && current.qbo_request ? (
+          <details className="text-xs text-ink-600">
+            <summary className="cursor-pointer">
+              Show exactly what was sent to QuickBooks
+            </summary>
+            <pre className="mt-1 max-h-64 overflow-auto rounded bg-ink-50 p-2 text-[11px] leading-snug">
+              {JSON.stringify(current.qbo_request, null, 2)}
+            </pre>
+            <p className="mt-1">
+              QuickBooks validation errors name a code rather than a field, so this
+              is usually the quickest way to see what it objected to.
+            </p>
+          </details>
+        ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
           {draft ? (
@@ -740,7 +759,7 @@ function SheetEditor({
                 −{currency(preview?.consumed_total ?? null)}
               </dd>
               <dt className="font-medium text-ink-800">
-                {preview?.account_name ?? 'Manufacturing account'}
+                Value added → {preview?.account_name ?? 'the posting account'}
               </dt>
               <dd className="text-right font-medium tabular-nums">
                 {currency(preview?.net_to_account ?? null)}

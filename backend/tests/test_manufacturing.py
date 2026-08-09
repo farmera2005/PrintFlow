@@ -109,7 +109,7 @@ async def _configured(session, **overrides):
         session,
         {
             "account_id": "42",
-            "account_name": "Cost of Goods Sold",
+            "account_name": "Manufacturing Clearing",
             "payment_type": "Cash",
             **overrides,
         },
@@ -125,6 +125,47 @@ def _patch_qbo(monkeypatch, handler):
         return base_module.new_client(**kwargs)
 
     monkeypatch.setattr(qbo_api, "new_client", fake)
+
+
+# The account every test posts against unless it says otherwise. Bank, because
+# that is the only type QuickBooks accepts as a Purchase's AccountRef.
+DEFAULT_ACCOUNTS = {
+    "42": {"Id": "42", "Name": "Manufacturing Clearing", "AccountType": "Bank"},
+    "80": {"Id": "80", "Name": "Overhead Applied", "AccountType": "Expense"},
+}
+
+
+def _stub(*, items=(), accounts=None, posted=None, purchase=None, on_post=None):
+    """A QuickBooks that answers item and account queries and accepts Purchases.
+
+    Shared because every posting path now reads the account as well as the
+    items, and eight hand-rolled handlers each answering half the questions is
+    how a test ends up asserting something the product never does.
+    """
+    known = {**DEFAULT_ACCOUNTS, **(accounts or {})}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            query = request.url.params.get("query", "")
+            ids = re.findall(r"'([^']+)'", query)
+            if "from account" in query.lower():
+                rows = [known[i] for i in ids if i in known] if ids else list(known.values())
+                return httpx.Response(200, json={"QueryResponse": {"Account": rows}})
+            rows = [i for i in items if not ids or i.get("Id") in ids]
+            return httpx.Response(200, json={"QueryResponse": {"Item": rows}})
+        if on_post is not None:
+            return on_post(request)
+        if posted is not None:
+            posted.append(json.loads(request.content or b"{}"))
+        return httpx.Response(
+            200,
+            json={
+                "Purchase": purchase
+                or {"Id": "180", "DocNumber": "1042", "SyncToken": "0"}
+            },
+        )
+
+    return handler
 
 
 # --------------------------------------------------------------------------
@@ -381,15 +422,7 @@ class TestPosting:
     ):
         sheet = await self._ready(db)
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
-            return httpx.Response(
-                200,
-                json={"Purchase": {"Id": "180", "DocNumber": "1042", "SyncToken": "0"}},
-            )
-
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(monkeypatch, _stub())
         await manufacturing.post(db, sheet, actor="admin")
 
         assert sheet.status == SHEET_POSTED
@@ -405,13 +438,11 @@ class TestPosting:
         sheet = await self._ready(db)
         seen: list[str | None] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
+        def on_post(request: httpx.Request) -> httpx.Response:
             seen.append(request.url.params.get("requestid"))
             return httpx.Response(200, json={"Purchase": {"Id": "1", "SyncToken": "0"}})
 
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(monkeypatch, _stub(on_post=on_post))
         await manufacturing.post(db, sheet, actor="admin")
         assert seen == [str(sheet.idempotency_key)]
 
@@ -420,14 +451,12 @@ class TestPosting:
         sheet = await self._ready(db)
         attempts = {"n": 0}
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
+        def on_post(request: httpx.Request) -> httpx.Response:
             attempts["n"] += 1
             # 503 is in the retry set for reads.
             return httpx.Response(503, json={"Fault": {"Error": [{"Message": "busy"}]}})
 
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(monkeypatch, _stub(on_post=on_post))
         with pytest.raises(SheetError):
             await manufacturing.post(db, sheet, actor="admin")
         assert attempts["n"] == 1
@@ -435,14 +464,14 @@ class TestPosting:
     async def test_a_rejected_post_leaves_the_sheet_a_draft(self, db, monkeypatch):
         sheet = await self._ready(db)
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
-            return httpx.Response(
-                400, json={"Fault": {"Error": [{"Message": "Invalid account"}]}}
-            )
-
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(
+            monkeypatch,
+            _stub(
+                on_post=lambda r: httpx.Response(
+                    400, json={"Fault": {"Error": [{"Message": "Invalid account"}]}}
+                )
+            ),
+        )
         with pytest.raises(SheetError) as excinfo:
             await manufacturing.post(db, sheet, actor="admin")
         assert sheet.status == SHEET_DRAFT
@@ -638,20 +667,14 @@ class TestTheSheetApi:
         sheet_row = await _sheet(db, [(widget, 10, "1.50")])
         await db.commit()
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={"QueryResponse": {"Item": [{"Id": "1", "PurchaseCost": 0.25}]}},
-            )
-
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(monkeypatch, _stub(items=[{"Id": "1", "PurchaseCost": 0.25}]))
         body = (
             await signed_in.get(f"/api/manufacturing/sheets/{sheet_row.id}/preview")
         ).json()
         assert body["made_total"] == "15.00"
         assert body["consumed_total"] == "10.00"
         assert body["net_to_account"] == "5.00"
-        assert body["account_name"] == "Cost of Goods Sold"
+        assert body["account_name"] == "Manufacturing Clearing"
         assert body["problems"] == []
 
     async def test_the_preview_writes_nothing(self, signed_in, db, monkeypatch):
@@ -678,14 +701,10 @@ class TestTheSheetApi:
         sheet_row = await _sheet(db, [(plain, 3, "2.00")])
         await db.commit()
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
-            return httpx.Response(
-                200, json={"Purchase": {"Id": "9", "DocNumber": "77", "SyncToken": "0"}}
-            )
-
-        _patch_qbo(monkeypatch, handler)
+        _patch_qbo(
+            monkeypatch,
+            _stub(purchase={"Id": "9", "DocNumber": "77", "SyncToken": "0"}),
+        )
         body = (
             await signed_in.post(f"/api/manufacturing/sheets/{sheet_row.id}/post")
         ).json()
@@ -716,19 +735,11 @@ class TestQuickBooksItemsCanBeAddedDirectly:
         return rows + (extra or [])
 
     def _handler(self, extra=None, posted=None):
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "GET":
-                q = request.url.params.get("query", "")
-                ids = re.findall(r"'([^']+)'", q)
-                rows = [r for r in self._items(extra) if not ids or r["Id"] in ids]
-                return httpx.Response(200, json={"QueryResponse": {"Item": rows}})
-            if posted is not None:
-                posted.append(json.loads(request.content or b"{}"))
-            return httpx.Response(
-                200, json={"Purchase": {"Id": "5", "DocNumber": "88", "SyncToken": "0"}}
-            )
-
-        return handler
+        return _stub(
+            items=self._items(extra),
+            posted=posted,
+            purchase={"Id": "5", "DocNumber": "88", "SyncToken": "0"},
+        )
 
     async def test_an_item_with_no_product_can_be_added(self, signed_in, db, monkeypatch):
         await _qbo_connected(db)
@@ -895,15 +906,191 @@ class TestQuickBooksItemsCanBeAddedDirectly:
         assert moved == {"9": 2, "50": 3}
 
 
+class TestThePostingAccount:
+    """QuickBooks calls the Purchase's AccountRef the account the money is paid
+    *from*, and accepts only a Bank account there — or a Credit Card account for
+    a CreditCard payment. Anything else is error 6430, "Invalid account type
+    used", which names no field and is close to unactionable on its own.
+    """
+
+    ACCOUNTS = {
+        "42": {"Id": "42", "Name": "Cost of Goods Sold", "AccountType": "Cost of Goods Sold"},
+        "70": {"Id": "70", "Name": "Manufacturing Clearing", "AccountType": "Bank"},
+        "71": {"Id": "71", "Name": "Shop Card", "AccountType": "Credit Card"},
+        "80": {"Id": "80", "Name": "Overhead Applied", "AccountType": "Expense"},
+    }
+
+    def _handler(self, posted=None):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                q = request.url.params.get("query", "")
+                if "from account" in q.lower():
+                    ids = re.findall(r"'([^']+)'", q)
+                    rows = [self.ACCOUNTS[i] for i in ids if i in self.ACCOUNTS]
+                    return httpx.Response(200, json={"QueryResponse": {"Account": rows}})
+                return httpx.Response(200, json={"QueryResponse": {"Item": []}})
+            if posted is not None:
+                posted.append(json.loads(request.content or b"{}"))
+            return httpx.Response(200, json={"Purchase": {"Id": "1", "SyncToken": "0"}})
+
+        return handler
+
+    async def _sheet_for(self, db, cost="1.00"):
+        plain = await _product(db, "PLAIN", qbo_id="9")
+        return await _sheet(db, [(plain, 10, cost)])
+
+    async def test_an_expense_account_is_caught_before_quickbooks_sees_it(
+        self, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _configured(db, account_id="42", account_name="Cost of Goods Sold")
+        sheet = await self._sheet_for(db)
+        _patch_qbo(monkeypatch, self._handler())
+
+        found = await manufacturing.problems(db, sheet)
+        assert any("is a Cost of Goods Sold account" in p for p in found)
+        assert any("needs a Bank account" in p for p in found)
+        # And says why, since "invalid account type" alone explains nothing.
+        assert any("paid from" in p for p in found)
+
+    async def test_a_bank_account_is_accepted(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db, account_id="70", account_name="Manufacturing Clearing")
+        sheet = await self._sheet_for(db)
+        _patch_qbo(monkeypatch, self._handler())
+        assert await manufacturing.problems(db, sheet) == []
+
+    async def test_a_credit_card_payment_wants_a_credit_card_account(
+        self, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _configured(
+            db, account_id="70", account_name="Clearing", payment_type="CreditCard"
+        )
+        sheet = await self._sheet_for(db)
+        _patch_qbo(monkeypatch, self._handler())
+
+        found = await manufacturing.problems(db, sheet)
+        assert any("needs a Credit Card account" in p for p in found)
+
+        await _configured(
+            db, account_id="71", account_name="Shop Card", payment_type="CreditCard"
+        )
+        assert await manufacturing.problems(db, sheet) == []
+
+    async def test_a_deleted_account_is_reported(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db, account_id="999", account_name="Gone")
+        sheet = await self._sheet_for(db)
+        _patch_qbo(monkeypatch, self._handler())
+        assert any(
+            "no longer exists" in p for p in await manufacturing.problems(db, sheet)
+        )
+
+    async def test_an_unreachable_quickbooks_does_not_invent_a_problem(
+        self, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _configured(db, account_id="70", account_name="Clearing")
+        sheet = await self._sheet_for(db)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("down")
+
+        _patch_qbo(monkeypatch, handler)
+        assert await manufacturing.problems(db, sheet) == []
+
+
+class TestValueAddedGoesWhereItIsTold:
+    """Costed above its components, the difference has to land somewhere. Left
+    on the Purchase it falls to AccountRef, which is a bank account — so
+    QuickBooks would show money leaving an account that nothing left."""
+
+    SETTINGS = {
+        "account_id": "70",
+        "account_name": "Manufacturing Clearing",
+        "payment_type": "Cash",
+        "vendor_id": None,
+        "doc_number_prefix": "",
+    }
+
+    async def test_without_an_offset_the_difference_hits_the_bank(self, db):
+        screw = await _product(db, "SCREW", qbo_id="1")
+        widget = await _bundle(db, "WIDGET", [(screw, 4)])
+        sheet = await _sheet(db, [(widget, 10, "1.50")])
+
+        body = build_purchase(
+            sheet, settings=self.SETTINGS, component_unit_costs={"1": Decimal("0.25")}
+        )
+        assert all(
+            line["DetailType"] == "ItemBasedExpenseLineDetail" for line in body["Line"]
+        )
+        assert sum(line["Amount"] for line in body["Line"]) == 5.00
+
+    async def test_an_offset_account_absorbs_it_and_the_purchase_nets_to_zero(self, db):
+        screw = await _product(db, "SCREW", qbo_id="1")
+        widget = await _bundle(db, "WIDGET", [(screw, 4)])
+        sheet = await _sheet(db, [(widget, 10, "1.50")])
+
+        body = build_purchase(
+            sheet,
+            settings={**self.SETTINGS, "offset_account_id": "80"},
+            component_unit_costs={"1": Decimal("0.25")},
+        )
+        offset = [
+            line
+            for line in body["Line"]
+            if line["DetailType"] == "AccountBasedExpenseLineDetail"
+        ]
+        assert len(offset) == 1
+        assert offset[0]["Amount"] == -5.00
+        assert offset[0]["AccountBasedExpenseLineDetail"]["AccountRef"]["value"] == "80"
+        # Nothing leaves the bank: the whole thing is a transfer into inventory.
+        assert sum(line["Amount"] for line in body["Line"]) == 0.0
+
+    async def test_a_pure_transfer_adds_no_offset_line(self, db):
+        """Nothing to absorb, so no line — an empty one would be noise in the register."""
+        screw = await _product(db, "SCREW", qbo_id="1")
+        widget = await _bundle(db, "WIDGET", [(screw, 4)])
+        sheet = await _sheet(db, [(widget, 10, "1.00")])
+
+        body = build_purchase(
+            sheet,
+            settings={**self.SETTINGS, "offset_account_id": "80"},
+            component_unit_costs={"1": Decimal("0.25")},
+        )
+        assert all(
+            line["DetailType"] == "ItemBasedExpenseLineDetail" for line in body["Line"]
+        )
+
+    async def test_costing_below_the_components_reverses_the_sign(self, db):
+        screw = await _product(db, "SCREW", qbo_id="1")
+        widget = await _bundle(db, "WIDGET", [(screw, 4)])
+        sheet = await _sheet(db, [(widget, 10, "0.60")])
+
+        body = build_purchase(
+            sheet,
+            settings={**self.SETTINGS, "offset_account_id": "80"},
+            component_unit_costs={"1": Decimal("0.25")},
+        )
+        offset = [
+            line
+            for line in body["Line"]
+            if line["DetailType"] == "AccountBasedExpenseLineDetail"
+        ][0]
+        assert offset["Amount"] == 4.00
+        assert sum(line["Amount"] for line in body["Line"]) == 0.0
+
+
 class TestPostingSettings:
     async def test_the_account_round_trips(self, signed_in, db):
         await signed_in.put(
             "/api/manufacturing/settings",
-            json={"account_id": "42", "account_name": "Cost of Goods Sold"},
+            json={"account_id": "42", "account_name": "Manufacturing Clearing"},
         )
         body = (await signed_in.get("/api/manufacturing/settings")).json()
         assert body["settings"]["account_id"] == "42"
-        assert body["settings"]["account_name"] == "Cost of Goods Sold"
+        assert body["settings"]["account_name"] == "Manufacturing Clearing"
 
     async def test_an_unknown_payment_type_falls_back(self, signed_in, db):
         await signed_in.put(
