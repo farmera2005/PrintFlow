@@ -99,9 +99,19 @@ function OrderCard({ order, onOpen }: { order: Order; onOpen: () => void }) {
               ) : null}
               <div className="flex items-center gap-1.5 text-xs">
                 <span className="shrink-0 text-ink-400">{leaf.line.quantity}×</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-ink-700">
-                  {leaf.line.sku ?? leaf.line.sku_raw ?? '—'}
-                </span>
+                {/* A listing with no SKU in Etsy has nothing to match on, and
+                    a bare dash tells the operator nothing about which order
+                    this is. Fall back to the title, unstyled — it is a name,
+                    not a code. */}
+                {leaf.line.sku ?? leaf.line.sku_raw ? (
+                  <span className="min-w-0 flex-1 truncate font-mono text-ink-700">
+                    {leaf.line.sku ?? leaf.line.sku_raw}
+                  </span>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate text-ink-700">
+                    {leaf.line.name ?? '—'}
+                  </span>
+                )}
                 <Badge className={LINE_STATE_CLASSES[leaf.line.state]}>
                   {LINE_STATE_LABELS[leaf.line.state]}
                 </Badge>

@@ -63,6 +63,60 @@ class TestExtractingOptions:
         assert intake.extract_variations({}) == []
         assert intake.extract_variations({"variations": None}) == []
 
+    async def test_a_real_etsy_transaction(self):
+        """Taken from a live receipt, with the buyer's details removed.
+
+        Two things here are not what a reading of the docs would lead you to
+        build: the listing carries no SKU at all, and `product_data` is a list
+        of property values rather than the inventory object the SKU extractor
+        looks for. Both are handled; neither should stop the option being read.
+        """
+        transaction = {
+            "sku": "",
+            "title": "Toy Grain Bin Playset | 4 Bins, Overhead Loadout, HO and 1:64 Scale",
+            "quantity": 1,
+            "listing_id": 1895497697,
+            "product_id": 26682511648,
+            "transaction_id": 5174284745,
+            "variations": [
+                {
+                    "value_id": 55743846649,
+                    "property_id": 513,
+                    "question_id": None,
+                    "formatted_name": "Bin Fan",
+                    "formatted_value": "No",
+                }
+            ],
+            "product_data": [
+                {
+                    "values": ["No"],
+                    "scale_id": None,
+                    "value_ids": [55743846649],
+                    "scale_name": None,
+                    "property_id": 513,
+                    # Etsy's internal name for the property, not the buyer's.
+                    "property_name": "Custom Property",
+                }
+            ],
+        }
+        assert intake.extract_variations(transaction) == [
+            {
+                "name": "Bin Fan",
+                "value": "No",
+                "property_id": 513,
+                "value_id": 55743846649,
+            }
+        ]
+        # The shopper-facing name wins over Etsy's "Custom Property".
+        # And an empty SKU is None, not "", so it lands as unmatched rather
+        # than matching some product with a blank SKU.
+        assert intake.extract_sku(transaction) is None
+
+    async def test_product_data_as_a_list_does_not_break_sku_extraction(self):
+        """The SKU extractor expects an object there; live receipts send a list."""
+        assert intake.extract_sku({"sku": "", "product_data": [{"values": ["No"]}]}) is None
+        assert intake.extract_sku({"sku": "ABC", "product_data": [{"values": ["No"]}]}) == "ABC"
+
     async def test_whitespace_is_trimmed(self):
         found = intake.extract_variations(
             {"variations": [{"formatted_name": " Color ", "formatted_value": " Red "}]}
