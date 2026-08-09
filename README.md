@@ -59,7 +59,12 @@ Four answers, and all four are worth seeing:
 Products no live listing sells are listed separately. Usually those are bundle
 components, which is expected — a finished good sitting there is worth a look.
 
-Products can be removed from the Products screen: tick the rows and **Delete
+The Products screen is split by what a product is — **Printed items**, **Stocked
+items**, **Bundled items** — because the three are worked on at different times:
+print files for one, stock levels for another, a bill of materials for the
+third. Variants stay nested under the master they belong to.
+
+Products can be removed from the same screen: tick the rows and **Delete
 selected**. Anything that cannot go is kept and says why — an order that
 references it, a bundle that uses it as a component, an option rule that brings
 it in, or a made-items line that recorded making it. Those last two are
@@ -184,10 +189,9 @@ marks it Shipped.**
 
 What still happens on its own is the *work*: lines are matched, stock is
 checked, plates are planned, queued and tracked, and every line's own state
-follows from that. That is what the badges on a card tell you. When the rules
-think a card belongs somewhere else they say so — a quiet **looks ready to
-ship** badge — and stop there. The drawer turns the same hint into a one-click
-move.
+follows from that. That is what the badges on a card tell you. The board itself
+says nothing about where a card *should* be — when the rules disagree with where
+one sits, the drawer offers a one-click move and nothing else mentions it.
 
 Moving a card is not only a label; the status decides what the lines are:
 
@@ -219,6 +223,20 @@ Two ways back from a wrong match:
   from scratch. This is the one to use after the catalogue changed underneath an
   order — a listing linked, variations added, a BOM corrected. Plain **Re-run
   intake** keeps whatever each line already matched; reset throws it away first.
+
+## Bills of materials, from QuickBooks
+
+A bundle's BOM lists what it consumes. Components can be picked from the
+products you already have, or — **From QuickBooks…** — straight out of
+QuickBooks inventory, which is where the materials already live and the copy the
+stock check actually reads.
+
+Picking an item finds the product that already points at it, or makes a stocked
+one for it. Components stay products underneath because that is what the rest of
+the pipeline works in: allocation reads a product's QuickBooks item, printing
+reads its mapping, a made-items sheet rolls up its BOM. What it saves is the
+step in the middle — retyping a material as a product and then linking it back
+to the item you picked it from, which exists only to be got wrong.
 
 ## Etsy options that change the BOM
 

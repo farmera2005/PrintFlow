@@ -58,13 +58,6 @@ function OrderCard({
   )
   const visible = rows.slice(0, 4)
   const attention = order.summary.needs_attention
-  // Nothing moves a card but a person, so when the rules disagree they say so
-  // rather than acting on it. They never suggest Cancelled, and they say
-  // nothing at all about an order sitting in it.
-  const suggests =
-    order.suggested_status && order.suggested_status !== order.status
-      ? order.suggested_status
-      : null
 
   return (
     <button
@@ -111,14 +104,6 @@ function OrderCard({
         {order.tracking_number ? (
           <Badge className="bg-indigo-100 text-indigo-800 ring-indigo-300">
             {order.tracking_number}
-          </Badge>
-        ) : null}
-        {suggests ? (
-          <Badge
-            className="bg-sky-100 text-sky-800 ring-sky-300"
-            title="Where the work says it is. Drag the card if you agree."
-          >
-            looks {COLUMN_LABELS[suggests].toLowerCase()}
           </Badge>
         ) : null}
       </div>

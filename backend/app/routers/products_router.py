@@ -530,6 +530,95 @@ async def add_bom_line(
     return _serialize(await _get(session, product_id))
 
 
+class BomFromQboRequest(BaseModel):
+    qbo_item_id: str = Field(min_length=1)
+    qbo_item_name: str | None = None
+    quantity: int = Field(gt=0, default=1)
+
+
+@router.post("/{product_id}/bom/from-qbo", status_code=status.HTTP_201_CREATED)
+async def add_bom_line_from_qbo(
+    product_id: uuid.UUID,
+    body: BomFromQboRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Put a QuickBooks inventory item on a bundle's BOM.
+
+    The raw materials a bundle consumes — filament, magnets, a printed insert
+    somebody else makes — are already in QuickBooks, and that is the copy the
+    stock check reads. Making the operator retype each one as a product first,
+    then link it back to the item they picked it from, is a step that can only
+    be got wrong.
+
+    A component is still a product underneath, because that is what the whole
+    pipeline downstream works in. If one already points at this item it is
+    reused; otherwise a stocked product is created for it. Either way the BOM
+    ends up naming something whose stock QuickBooks can answer for.
+    """
+    bundle = await _get(session, product_id)
+    if bundle.fulfillment != "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Only products with fulfillment 'bundle' have a BOM."
+        )
+
+    item_id = body.qbo_item_id.strip()
+    name = (body.qbo_item_name or "").strip() or f"QuickBooks item {item_id}"
+
+    component = (
+        await session.execute(select(Product).where(Product.qbo_item_id == item_id))
+    ).scalars().first()
+    created = False
+    if component is None:
+        component = Product(
+            sku=await codes.unique(session, codes.from_name(name)),
+            name=name[:500],
+            fulfillment="stocked",
+            qbo_item_id=item_id,
+            qbo_item_name=name[:500],
+            active=True,
+        )
+        session.add(component)
+        await session.flush()
+        created = True
+    elif component.id == bundle.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A bundle cannot contain itself.")
+    elif component.fulfillment == "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "BOMs are single-level, and that QuickBooks item is already a bundle here.",
+        )
+
+    session.add(
+        BomLine(bundle_id=bundle.id, component_id=component.id, quantity=body.quantity)
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "That component is already on this bundle's BOM."
+        ) from exc
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=bundle.id,
+        action="bom_add_from_qbo",
+        detail={
+            "qbo_item_id": item_id,
+            "component_sku": component.sku,
+            "quantity": body.quantity,
+            "created_product": created,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    payload = _serialize(await _get(session, product_id))
+    payload["created_product"] = created
+    return payload
+
+
 @router.put("/{product_id}/bom/{bom_line_id}")
 async def update_bom_line(
     product_id: uuid.UUID,

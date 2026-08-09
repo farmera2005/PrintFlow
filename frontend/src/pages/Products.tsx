@@ -25,6 +25,16 @@ import {
   inputClass,
 } from '../components/ui'
 
+/** The Products screen splits by what a product *is*, because the three kinds
+ *  are worked on at different times: print files for one, stock levels for
+ *  another, a bill of materials for the third. */
+const TABS: { key: Fulfillment | 'all'; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'printed', label: 'Printed items' },
+  { key: 'stocked', label: 'Stocked items' },
+  { key: 'bundle', label: 'Bundled items' },
+]
+
 const FULFILLMENTS: { value: Fulfillment; label: string; hint: string }[] = [
   { value: 'printed', label: 'Printed', hint: 'Made on the print farm when stock runs short.' },
   { value: 'stocked', label: 'Stocked', hint: 'Always pulled from inventory.' },
@@ -64,6 +74,7 @@ export default function Products() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [tab, setTab] = useState<Fulfillment | 'all'>('all')
 
   const load = useCallback(async () => {
     try {
@@ -123,6 +134,10 @@ export default function Products() {
     }
   }
 
+  const shown = (products ?? []).filter(
+    (product) => tab === 'all' || product.fulfillment === tab,
+  )
+
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
       <div className="mx-auto max-w-5xl space-y-4">
@@ -155,6 +170,31 @@ export default function Products() {
           </Button>
         </div>
 
+        <div className="flex flex-wrap gap-1 text-xs">
+          {TABS.map((entry) => {
+            const count =
+              entry.key === 'all'
+                ? (products?.length ?? 0)
+                : (products ?? []).filter((p) => p.fulfillment === entry.key).length
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => setTab(entry.key)}
+                className={cx(
+                  'rounded-md px-2.5 py-1 font-medium',
+                  tab === entry.key
+                    ? 'bg-ink-900 text-white'
+                    : 'text-ink-600 hover:bg-ink-100',
+                )}
+              >
+                {entry.label}
+                {count ? <span className="ml-1 opacity-60">{count}</span> : null}
+              </button>
+            )
+          })}
+        </div>
+
         {error ? <Alert tone="error">{error}</Alert> : null}
         {notice ? <Alert tone="info">{notice}</Alert> : null}
 
@@ -162,9 +202,13 @@ export default function Products() {
           <div className="flex justify-center py-10">
             <Spinner className="h-6 w-6" />
           </div>
-        ) : products.length === 0 ? (
+        ) : shown.length === 0 ? (
           <EmptyState
-            title={query ? 'No products match that search' : 'No products yet'}
+            title={
+              query || tab !== 'all'
+                ? 'No products match'
+                : 'No products yet'
+            }
             description="Products map Etsy listings to what actually gets made: a printed part, a stocked item, or a bundle with a bill of materials."
             action={
               <Button variant="primary" onClick={() => setEditing('new')}>
@@ -174,7 +218,7 @@ export default function Products() {
           />
         ) : (
           <Card className="divide-y divide-ink-200">
-            {nest(products).map(({ product, depth }) => (
+            {nest(shown).map(({ product, depth }) => (
               // The checkbox sits outside the row button: a control inside a
               // button is not reachable on its own.
               <div
@@ -489,6 +533,8 @@ function BomEditor({
   const [componentId, setComponentId] = useState('')
   const [quantity, setQuantity] = useState(1)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [qboOpen, setQboOpen] = useState(false)
 
   // Single-level BOMs: a bundle may never contain another bundle.
   const candidates = allProducts.filter(
@@ -525,11 +571,40 @@ function BomEditor({
     await onSaved(saved)
   }
 
+  /** Put a QuickBooks inventory item on the BOM.
+   *
+   * The materials a bundle eats are already in QuickBooks, and that is the copy
+   * the stock check reads — so pick from there rather than retyping each one as
+   * a product and linking it back. */
+  const addFromQbo = async (item: QboItem) => {
+    setQboOpen(false)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<Product & { created_product: boolean }>(
+        `/api/products/${product.id}/bom/from-qbo`,
+        { qbo_item_id: item.id, qbo_item_name: item.name, quantity },
+      )
+      await onSaved(saved)
+      setQuantity(1)
+      if (saved.created_product) {
+        setNotice(
+          `“${item.name}” was added as a stocked product, linked to that ` +
+            'QuickBooks item so its stock is checked from there.',
+        )
+      }
+    } catch (err) {
+      setError(errorMessage(err))
+    }
+  }
+
   return (
     <section className="rounded-lg bg-ink-50 p-3">
       <h3 className="text-sm font-semibold text-ink-800">Bill of materials</h3>
       <p className="mt-0.5 text-xs text-ink-500">
         One level only. Ordering this bundle creates a component line for each row.
+        Materials can come straight from QuickBooks inventory — a product is made
+        for anything that does not have one yet.
       </p>
 
       {product.bom.length === 0 ? (
@@ -594,11 +669,23 @@ function BomEditor({
         <Button onClick={add} disabled={!componentId}>
           Add
         </Button>
+        <Button variant="ghost" onClick={() => setQboOpen(true)}>
+          From QuickBooks…
+        </Button>
       </div>
       {error ? (
         <div className="mt-2">
           <Alert tone="error">{error}</Alert>
         </div>
+      ) : null}
+      {notice ? (
+        <div className="mt-2">
+          <Alert tone="info">{notice}</Alert>
+        </div>
+      ) : null}
+
+      {qboOpen ? (
+        <QboItemPicker onClose={() => setQboOpen(false)} onPick={addFromQbo} />
       ) : null}
     </section>
   )
