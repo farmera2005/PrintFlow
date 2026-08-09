@@ -144,11 +144,19 @@ async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tupl
     ).scalar_one_or_none()
 
     if order is not None:
-        # Already ingested — refresh the stored payload and stop. Re-running
-        # intake on a processed receipt must not duplicate lines.
+        # Already ingested — refresh the stored payload rather than re-import,
+        # because re-running intake on a processed receipt must not duplicate
+        # lines.
         order.raw = receipt
         order.buyer_name = extract_buyer_name(receipt) or order.buyer_name
         await session.flush()
+        # Options were not always captured, and an order taken before they were
+        # sits here forever otherwise: this branch is the one every existing
+        # order takes on every poll. Filling them in costs one pass over the
+        # payload, and only an order that actually gained options pays for the
+        # re-resolve — which it must, since an option can change the BOM.
+        if await backfill_variations(session, order):
+            await process_order(session, order)
         return order, False
 
     order = Order(

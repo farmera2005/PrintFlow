@@ -257,6 +257,13 @@ class TestIntakeUsesTheChosenOptions:
         await db.flush()
         return {"grey": grey, "red": red, "body": body, "egg": egg}
 
+    async def _parent(self, db, order):
+        return (await db.execute(
+            __import__("sqlalchemy").select(OrderLine).where(
+                OrderLine.order_id == order.id, OrderLine.parent_line_id.is_(None)
+            )
+        )).scalar_one()
+
     async def _components(self, db, order):
         lines = (await db.execute(
             __import__("sqlalchemy").select(OrderLine).where(
@@ -373,6 +380,67 @@ class TestIntakeUsesTheChosenOptions:
         await db.flush()
         await intake.process_order(db, order)
         assert await self._components(db, order) == {"EGG-BODY": 1, "PLA-RED": 2}
+
+    async def test_an_order_already_on_the_board_gains_its_options_on_the_next_poll(
+        self, db
+    ):
+        """The branch every existing order takes on every poll.
+
+        An order ingested before options were captured returns early from
+        ingest_receipt, so nothing ever filled them in and the board stayed
+        blank — which is exactly what happened in the field.
+        """
+        shop = await self._shop(db)
+        receipt = _receipt(
+            7, "EGG-DRAGON", [{"formatted_name": "Color", "formatted_value": "Red"}]
+        )
+
+        # Ingest as it would have been before options existed.
+        stripped = {**receipt, "transactions": [
+            {k: v for k, v in receipt["transactions"][0].items() if k != "variations"}
+        ]}
+        order, created = await intake.ingest_receipt(db, stripped)
+        assert created
+        parent = await self._parent(db, order)
+        assert parent.variations == []
+
+        db.add(
+            BomOptionRule(
+                bundle_id=shop["egg"].id,
+                option_name="Color",
+                option_value="Red",
+                replaces_id=shop["grey"].id,
+                component_id=shop["red"].id,
+            )
+        )
+        await db.flush()
+
+        # The poller sees the same receipt again, this time carrying options.
+        order, created = await intake.ingest_receipt(db, receipt)
+        assert not created
+        parent = await self._parent(db, order)
+        assert parent.variations == [{"name": "Color", "value": "Red"}]
+        # And the BOM was re-resolved, because an option can change it.
+        assert await self._components(db, order) == {"EGG-BODY": 1, "PLA-RED": 2}
+
+    async def test_a_repeat_poll_with_nothing_new_does_not_reprocess(self, db, monkeypatch):
+        """Every open order hits this branch on every poll; it must stay cheap."""
+        await self._shop(db)
+        receipt = _receipt(
+            8, "EGG-DRAGON", [{"formatted_name": "Color", "formatted_value": "Red"}]
+        )
+        await intake.ingest_receipt(db, receipt)
+
+        calls = {"n": 0}
+        original = intake.process_order
+
+        async def counted(session, order):
+            calls["n"] += 1
+            return await original(session, order)
+
+        monkeypatch.setattr(intake, "process_order", counted)
+        await intake.ingest_receipt(db, receipt)
+        assert calls["n"] == 0
 
     async def test_options_are_backfilled_from_the_stored_receipt(self, db):
         """Orders taken before options were captured still have them in the payload."""

@@ -100,8 +100,13 @@ Two things are deliberately loud rather than quiet:
   reported, rather than adding its replacement on top and inflating the build.
 
 Options are read from the receipt PrintFlow already stores, so orders taken
-before this existed pick their options up the next time intake runs over them —
-nothing has to be re-fetched from Etsy.
+before this existed pick their options up on the next Etsy poll — nothing has to
+be re-fetched. An order that gains options that way is re-resolved against its
+BOM, since an option can change what it is made of. Only open receipts are
+polled, so a shipped order keeps whatever it shipped with, which is correct.
+
+To see it immediately on one order rather than waiting for the poll, open it and
+press **Re-run intake**.
 
 Two limits worth knowing: rules apply to **bundles**, since that is what has a
 BOM — model an option-driven part as a bundle component to use them. And a
