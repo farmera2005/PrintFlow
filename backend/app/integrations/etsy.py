@@ -30,11 +30,11 @@ SCOPES = ("transactions_r", "shops_r")
 # Refresh a little before expiry so a poll never fails on a stale token.
 REFRESH_MARGIN_SECONDS = 300
 
-USER_AGENT = "PrintFlow/1.0 (order orchestration; +https://github.com/farmera2005/PrintFlow)"
+USER_AGENT = "PrintFlow/1.0"
 
-# Which credential goes in the x-api-key header. Etsy documents the keystring,
-# but answers some endpoints demanding the shared secret instead, so the working
-# choice is discovered once and remembered.
+# Which credential goes in the x-api-key header. Etsy documents the keystring
+# and that is what we send. The override exists only so an instance that stored
+# a different choice under an earlier build keeps behaving predictably.
 KEY_MODE_FIELD = "x_api_key_mode"
 MODE_KEYSTRING = "keystring"
 MODE_SHARED_SECRET = "shared_secret"
@@ -187,19 +187,25 @@ class EtsyClient:
         try:
             return await self._get_with(None, path, params)
         except AuthExpiredError as exc:
-            # Etsy answers some endpoints with:
-            #   {"error":"Shared secret is required in x-api-key header."}
-            # It wants the app's shared secret there rather than the keystring.
-            # Which endpoints want which is not something we can know up front,
-            # so take Etsy at its word, retry, and remember what worked.
-            if not wants_shared_secret(exc.body) or not self.payload.get("shared_secret"):
-                raise
-            if self.payload.get(KEY_MODE_FIELD) == MODE_SHARED_SECRET:
-                raise  # already tried; the secret itself must be wrong
-            log.info("Etsy asked for the shared secret in x-api-key; retrying with it")
-            data = await self._get_with(MODE_SHARED_SECRET, path, params)
-            await self._remember_key_mode(MODE_SHARED_SECRET)
-            return data
+            if wants_shared_secret(exc.body):
+                # Etsy says "Shared secret is required in x-api-key header" here.
+                # Sending the shared secret instead was tried and Etsy rejected
+                # *that* with "API key not found or not active", so the secret
+                # is plainly not an API key and swapping it only produces a more
+                # misleading error. Keep the keystring, and say what this
+                # actually tends to mean.
+                raise AuthExpiredError(
+                    PROVIDER_ETSY,
+                    (
+                        "Etsy rejected the app credentials on this endpoint. This "
+                        "usually means the app is not approved for API access yet, "
+                        "or the keystring belongs to a different app than the one "
+                        "you authorised"
+                    ),
+                    status_code=exc.status_code,
+                    body=exc.body,
+                ) from exc
+            raise
 
     async def _get_with(
         self, mode: str | None, path: str, params: dict[str, Any] | None
@@ -210,16 +216,6 @@ class EtsyClient:
                 client, "GET", path, provider=PROVIDER_ETSY, headers=headers, params=params
             )
         return response.json()
-
-    async def _remember_key_mode(self, mode: str) -> None:
-        """Persist which key Etsy accepted so later calls get it right first."""
-        if self.payload.get(KEY_MODE_FIELD) == mode:
-            return
-        self.payload[KEY_MODE_FIELD] = mode
-        try:
-            await credentials.merge(self.session, PROVIDER_ETSY, {KEY_MODE_FIELD: mode})
-        except Exception as exc:  # pragma: no cover - the call itself succeeded
-            log.warning("Could not persist the Etsy x-api-key mode: %s", exc)
 
     async def me(self) -> dict[str, Any]:
         return await self._get("/users/me")

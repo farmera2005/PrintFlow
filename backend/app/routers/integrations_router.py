@@ -266,6 +266,41 @@ async def etsy_shops(
     return result
 
 
+@router.post("/etsy/test")
+async def etsy_test(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Try the one Etsy call PrintFlow actually depends on: reading receipts.
+
+    Listing shops is a convenience; fetching receipts is the integration. If
+    this works the connection is good, whatever the shops endpoint says.
+    """
+    client = await _etsy_client(session)
+    if not client.shop_id:
+        return {
+            "ok": False,
+            "detail": "No shop selected yet — set the shop ID first.",
+        }
+    try:
+        receipts = await client.iter_receipts(
+            shop_id=client.shop_id, page_size=1, max_pages=1
+        )
+    except IntegrationError as exc:
+        await credentials.mark_error(session, PROVIDER_ETSY, str(exc))
+        await session.commit()
+        return {"ok": False, "detail": str(exc)}
+    await credentials.mark_ok(session, PROVIDER_ETSY)
+    await session.commit()
+    return {
+        "ok": True,
+        "detail": (
+            f"Read the receipt feed for shop {client.shop_id} successfully "
+            f"({len(receipts)} unshipped receipt(s) on the first page). "
+            "Order polling will work."
+        ),
+    }
+
+
 class EtsyShopLookupRequest(BaseModel):
     shop_id: int
 

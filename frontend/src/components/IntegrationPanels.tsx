@@ -69,6 +69,9 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   const [shopName, setShopName] = useState<string | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [manualShop, setManualShop] = useState('')
+  const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(
+    null,
+  )
   const disconnect = useDisconnect('etsy', onChange)
 
   useEffect(() => {
@@ -161,14 +164,15 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
               <Alert tone="warning">
                 Etsy would not list your shops: {listError}
                 <span className="mt-1 block text-xs">
-                  Not a blocker — enter the shop ID below. It is the number in
-                  your shop’s URL in Etsy’s Shop Manager.
+                  This does not stop order polling — that uses a different
+                  endpoint. Enter your shop ID below and use Test connection to
+                  check it for real.
                 </span>
               </Alert>
             ) : null}
             <Field
               label="Shop ID"
-              hint="Find it in Shop Manager, or in any of your listing URLs."
+              hint="The number in your shop's URL in Etsy Shop Manager."
             >
               <div className="flex gap-2">
                 <input
@@ -197,6 +201,38 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
         ) : (
           <Alert tone="warning">Pick a shop — polling stays idle until you do.</Alert>
         )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!selectedShop || busy}
+            onClick={async () => {
+              setBusy(true)
+              setTestResult(null)
+              try {
+                setTestResult(
+                  await api.post<{ ok: boolean; detail: string }>(
+                    '/api/integrations/etsy/test',
+                  ),
+                )
+              } catch (err) {
+                setTestResult({ ok: false, detail: errorMessage(err) })
+              } finally {
+                setBusy(false)
+                await onChange()
+              }
+            }}
+          >
+            {busy ? 'Testing…' : 'Test connection'}
+          </Button>
+          <span className="text-xs text-ink-500">
+            Reads your receipt feed — the call order polling actually makes.
+          </span>
+        </div>
+        {testResult ? (
+          <Alert tone={testResult.ok ? 'success' : 'error'}>{testResult.detail}</Alert>
+        ) : null}
         {error ? <Alert tone="error">{error}</Alert> : null}
       </div>
     )
