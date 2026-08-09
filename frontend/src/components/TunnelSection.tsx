@@ -72,7 +72,9 @@ export default function TunnelSection({
   return (
     <section className="space-y-3 border-t border-ink-200 pt-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold text-ink-800">Public access</h3>
+        <h3 className="text-sm font-semibold text-ink-800">
+          Public access — Cloudflare Tunnel
+        </h3>
         {!tunnel.status.binary_available ? (
           <Badge className="bg-amber-100 text-amber-900 ring-amber-300">
             cloudflared not installed

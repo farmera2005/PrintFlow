@@ -246,6 +246,23 @@ export default function SecurityPanel({
         </Button>
       </section>
 
+      {/* The tunnel decides what the public address *is*, so it belongs next to
+          the address field — above the certificate, which only matters for
+          reaching PrintFlow directly on the LAN. */}
+      <TunnelSection
+        tunnel={status.tunnel}
+        onApplied={load}
+        onUseAsBaseUrl={async (url) => {
+          setBaseUrl(url)
+          await run('base-url', async () => {
+            await api.post('/api/security/base-url', { public_base_url: url })
+            setNote(
+              `Base URL set to ${url}. Register the redirect URIs shown on the Etsy and QuickBooks steps.`,
+            )
+          })
+        }}
+      />
+
       {/* --- Certificate ------------------------------------------------ */}
       <section className="space-y-3 border-t border-ink-200 pt-4">
         <div className="flex flex-wrap items-center gap-2">
@@ -374,20 +391,6 @@ export default function SecurityPanel({
           </div>
         ) : null}
       </section>
-
-      <TunnelSection
-        tunnel={status.tunnel}
-        onApplied={load}
-        onUseAsBaseUrl={async (url) => {
-          setBaseUrl(url)
-          await run('base-url', async () => {
-            await api.post('/api/security/base-url', { public_base_url: url })
-            setNote(
-              `Base URL set to ${url}. Register the redirect URIs shown on the Etsy and QuickBooks steps.`,
-            )
-          })
-        }}
-      />
 
       {/* --- Redirect --------------------------------------------------- */}
       <section className="space-y-2 border-t border-ink-200 pt-4">

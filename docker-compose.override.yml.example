@@ -41,3 +41,33 @@ services:
   #     # Expose the database on the host for backups or inspection. Off by
   #     # default: it is only reachable from the app container otherwise.
   #     - "5432:5432"
+
+# --------------------------------------------------------------------------
+# Cloudflare Tunnel as a separate container (optional)
+# --------------------------------------------------------------------------
+# You do NOT need this. cloudflared is bundled in the app image and PrintFlow
+# supervises it: set it up in Settings → Access & security → Public access,
+# where the token is encrypted at rest instead of living in a file.
+#
+# Use the sidecar below only if you would rather manage the tunnel yourself —
+# for example because you already run cloudflared for other services, or your
+# image was built without network access so the binary is missing.
+#
+# Point the tunnel's public hostname at http://app:8000 (the service name on
+# the compose network), then leave the in-app tunnel set to "Off" so the two do
+# not both try to connect.
+#
+#   1. cp docker-compose.override.yml.example docker-compose.override.yml
+#   2. uncomment the block below
+#   3. put the token in .env:  CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
+#   4. docker compose up -d
+#
+# services:
+#   cloudflared:
+#     image: cloudflare/cloudflared:latest
+#     restart: unless-stopped
+#     command: tunnel --no-autoupdate run
+#     environment:
+#       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+#     depends_on:
+#       - app

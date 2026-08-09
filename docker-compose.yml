@@ -14,6 +14,14 @@
 # The `printflow-data` volume holds the generated encryption key that stored
 # credentials are encrypted with. Back it up, and do not delete it unless you
 # intend to reconnect every integration.
+#
+# CLOUDFLARE TUNNEL: there is deliberately no `cloudflared` service here. The
+# binary is bundled into the app image and PrintFlow runs it as a child process,
+# so the tunnel is set up in the app itself — Settings (or the setup wizard) →
+# Access & security → Public access — with the token encrypted at rest rather
+# than sitting in this file. Nothing to add here to use it.
+# If you would rather run cloudflared as its own container, there is a
+# ready-made sidecar in docker-compose.override.yml.example.
 
 services:
   postgres:
