@@ -200,6 +200,12 @@ class Product(Base):
     print_mapping: Mapped[PrintMapping | None] = relationship(
         back_populates="product", cascade="all, delete-orphan", uselist=False, lazy="selectin"
     )
+    option_rules: Mapped[list[BomOptionRule]] = relationship(
+        back_populates="bundle",
+        foreign_keys="BomOptionRule.bundle_id",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
 
 class BomLine(Base):
@@ -228,6 +234,72 @@ class BomLine(Base):
         back_populates="bom_lines", foreign_keys=[bundle_id]
     )
     component: Mapped[Product] = relationship(foreign_keys=[component_id], lazy="selectin")
+
+
+class BomOptionRule(Base):
+    """How one chosen Etsy option changes a bundle's BOM.
+
+    A buyer picking "Color: Red" does not change what the shop sells, it changes
+    what comes off the shelf — red filament instead of grey. Modelling that as a
+    separate product per colour would split the finished good in QuickBooks for
+    no reason, so the option edits the BOM instead.
+
+    Two shapes cover what shops actually need:
+
+    * `replaces_id` set — swap that component for `component_id`. The quantity
+      carries over from the BOM line unless `quantity` overrides it.
+    * `replaces_id` null — add `component_id` × `quantity`, for options that add
+      something rather than change it ("Gift box: Yes").
+    """
+
+    __tablename__ = "bom_option_rules"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    bundle_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Matched against Etsy's formatted_name / formatted_value, trimmed and
+    # case-insensitively — the same forgiveness SKU matching already gets,
+    # because these strings are typed by hand in the Etsy listing editor.
+    option_name: Mapped[str] = mapped_column(Text, nullable=False)
+    option_value: Mapped[str] = mapped_column(Text, nullable=False)
+
+    replaces_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT")
+    )
+    component_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    )
+    quantity: Mapped[int | None] = mapped_column(Integer)
+
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "quantity is null or quantity > 0", name="ck_bom_option_quantity_positive"
+        ),
+        CheckConstraint(
+            "replaces_id is null or replaces_id <> component_id",
+            name="ck_bom_option_no_self_swap",
+        ),
+        Index(
+            "uq_bom_option_rule",
+            "bundle_id",
+            func.lower(option_name),
+            func.lower(option_value),
+            "component_id",
+            unique=True,
+        ),
+    )
+
+    bundle: Mapped[Product] = relationship(
+        back_populates="option_rules", foreign_keys=[bundle_id]
+    )
+    component: Mapped[Product] = relationship(foreign_keys=[component_id], lazy="selectin")
+    replaces: Mapped[Product | None] = relationship(
+        foreign_keys=[replaces_id], lazy="selectin"
+    )
 
 
 class PrintMapping(Base):
@@ -313,6 +385,19 @@ class OrderLine(Base):
     etsy_transaction_id: Mapped[int | None] = mapped_column(BigInteger)
     sku_raw: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
+    # The options the buyer chose on Etsy, normalised to
+    # [{"name": "Color", "value": "Red", ...}]. Kept on the line rather than
+    # only in the receipt payload because they decide what gets made: a colour
+    # choice can swap a component out of the BOM.
+    variations: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
+    # Which option rules fired, in words. Recomputed on every intake run, and
+    # kept because "why is this order pulling red filament" is a question that
+    # gets asked after the fact, when the rules may already have changed.
+    option_effects: Mapped[list[str]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     qty_from_stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     qty_to_print: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

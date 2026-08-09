@@ -18,7 +18,8 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 
 1. An order arrives from Etsy and is polled in.
 2. Line items are matched to products by SKU (case-insensitive, trimmed).
-3. Bundle SKUs explode into component SKUs using the BOM table.
+3. Bundle SKUs explode into component SKUs using the BOM table, adjusted by
+   whatever options the buyer picked on Etsy (see below).
 4. For each component, QuickBooks quantity on hand decides print-or-pull:
    stock covers the need → allocate; shortfall → print the shortfall only.
 5. Print jobs go to the Bambuddy queue — one queue item per plate, with the
@@ -32,6 +33,51 @@ either — importing, deciding and fulfilling an order only ever reads quantity 
 hand. The single exception is the Manufacturing tab, and it only acts when you
 press Post. Labels are never bought automatically — they cost money, so they are
 always an explicit click.
+
+## Etsy options that change the BOM
+
+Buyers pick options on a listing — colour, size, "add a gift box" — and those
+picks change what comes off the shelf. PrintFlow stores every option a
+transaction carried, shows them on the order, and lets a bundle's BOM change in
+response.
+
+A rule on a bundle says: when this option has this value, either **swap** one
+component for another, or **add** one.
+
+```
+Color = Red      swap PLA-GREY → PLA-RED
+Gift box = Yes   add GIFT-BOX × 1
+```
+
+A swap keeps the quantity from the BOM line it replaces unless you override it.
+Matching ignores case and surrounding spaces, because these strings are typed by
+hand in Etsy's listing editor.
+
+Rules live under **Products → (a bundle) → Etsy options**, and the option names
+and values are offered **from what real orders have actually carried** rather
+than typed from memory — a rule with a typo in it fires on nothing and says
+nothing. Free-text personalisation is shown on the order but never offered as a
+rule value; matching a rule against an arbitrary engraving message would fire on
+coincidence.
+
+Two things are deliberately loud rather than quiet:
+
+* An order arrives with a value you have no rule for — say a new colour — and
+  the line is flagged: *"No rule for Color = Teal. The base BOM was used."* It
+  still flows through, because a missing rule must not strand an order, but the
+  base BOM being used silently is exactly how the wrong filament ends up in the
+  parcel.
+* A rule that swaps out a component the BOM no longer has is skipped and
+  reported, rather than adding its replacement on top and inflating the build.
+
+Options are read from the receipt PrintFlow already stores, so orders taken
+before this existed pick their options up the next time intake runs over them —
+nothing has to be re-fetched from Etsy.
+
+Two limits worth knowing: rules apply to **bundles**, since that is what has a
+BOM — model an option-driven part as a bundle component to use them. And a
+made-items sheet on the Manufacturing tab uses the base BOM, because there is no
+Etsy order to read options from; pick the components you actually used there.
 
 ## Manufacturing (made-items sheets)
 

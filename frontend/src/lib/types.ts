@@ -51,6 +51,8 @@ export interface OrderLine {
   override_state: LineState | null
   force_print: boolean
   stock_note: string | null
+  variations: { name: string; value: string; free_text?: boolean }[]
+  option_effects: string[]
   assembled_at: string | null
   is_bundle: boolean
   print_jobs: PrintJob[]
@@ -120,6 +122,23 @@ export interface PrintMapping {
   preferred_printer_id: number | null
 }
 
+export interface OptionRule {
+  id: string
+  option_name: string
+  option_value: string
+  replaces_id: string | null
+  replaces_sku: string | null
+  component_id: string
+  component_sku: string | null
+  quantity: number | null
+}
+
+/** An option name and the values orders for a product have actually carried. */
+export interface ObservedOption {
+  name: string
+  values: { value: string; orders: number }[]
+}
+
 export interface Product {
   id: string
   sku: string
@@ -132,6 +151,7 @@ export interface Product {
   updated_at: string
   print_mapping: PrintMapping | null
   bom: BomEntry[]
+  option_rules: OptionRule[]
 }
 
 export interface QboItem {

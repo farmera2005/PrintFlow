@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..models import (
+    BomOptionRule,
     LINE_EXPLODED,
     LINE_NEW,
     LINE_UNMATCHED,
@@ -19,7 +20,7 @@ from ..models import (
     OrderLine,
     Product,
 )
-from ..services import allocation, printing
+from ..services import allocation, bom_options, printing
 from ..services.state import recompute_order
 
 log = logging.getLogger("printflow.intake")
@@ -44,6 +45,60 @@ def extract_sku(transaction: dict[str, Any]) -> str | None:
                 sku = normalize_sku(offering.get("sku"))
                 if sku:
                     return sku
+    return None
+
+
+def normalize_option(raw: str | None) -> str:
+    """Option names and values are typed by hand in Etsy's listing editor.
+
+    Matched the way SKUs already are — trimmed and case-folded — because
+    "Color" and "color " are the same option to everyone except a computer.
+    """
+    return (raw or "").strip().casefold()
+
+
+def extract_variations(transaction: dict[str, Any]) -> list[dict[str, Any]]:
+    """The options the buyer chose, normalised to name/value pairs.
+
+    Etsy documents these as `formatted_name` / `formatted_value`, but the field
+    names have varied across API versions and shapes, so the plainer spellings
+    are accepted too. Anything that yields a name and a value is kept; the
+    property and value ids come along when present because they are the only
+    stable identifiers Etsy gives.
+    """
+    out: list[dict[str, Any]] = []
+    for variation in transaction.get("variations") or []:
+        if not isinstance(variation, dict):
+            continue
+        name = _first_string(variation, "formatted_name", "name", "property_name")
+        value = _first_string(variation, "formatted_value", "value", "property_value")
+        if not name or not value:
+            continue
+        entry: dict[str, Any] = {"name": name, "value": value}
+        if variation.get("property_id") is not None:
+            entry["property_id"] = _as_int(variation.get("property_id"))
+        if variation.get("value_id") is not None:
+            entry["value_id"] = _as_int(variation.get("value_id"))
+        if variation.get("scale_name"):
+            entry["scale"] = str(variation["scale_name"])
+        out.append(entry)
+
+    # Personalisation arrives outside `variations` on some listings. It never
+    # drives a BOM rule — it is free text — but it is what the operator has to
+    # read before making the thing, so it must not be dropped.
+    personalization = transaction.get("personalization")
+    if isinstance(personalization, str) and personalization.strip():
+        out.append(
+            {"name": "Personalization", "value": personalization.strip(), "free_text": True}
+        )
+    return out
+
+
+def _first_string(data: dict[str, Any], *names: str) -> str | None:
+    for name in names:
+        value = data.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
@@ -118,6 +173,7 @@ async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tupl
             quantity=max(1, quantity),
             etsy_listing_id=_as_int(transaction.get("listing_id")),
             etsy_transaction_id=_as_int(transaction.get("transaction_id")),
+            variations=extract_variations(transaction),
             state=LINE_NEW,
         )
         session.add(line)
@@ -134,8 +190,51 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+async def backfill_variations(session: AsyncSession, order: Order) -> int:
+    """Fill in options for lines ingested before options were captured.
+
+    The whole receipt is kept on the order, so nothing has to be re-fetched from
+    Etsy — the options were always there, just never read. Only empty lines are
+    touched, so this never overwrites what a later intake already worked out.
+    """
+    transactions = {
+        _as_int(t.get("transaction_id")): t
+        for t in (order.raw or {}).get("transactions") or []
+        if isinstance(t, dict)
+    }
+    if not transactions:
+        return 0
+
+    lines = (
+        (
+            await session.execute(
+                select(OrderLine).where(
+                    OrderLine.order_id == order.id, OrderLine.parent_line_id.is_(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    filled = 0
+    for line in lines:
+        if line.variations:
+            continue
+        transaction = transactions.get(line.etsy_transaction_id)
+        if not transaction:
+            continue
+        found = extract_variations(transaction)
+        if found:
+            line.variations = found
+            filled += 1
+    if filled:
+        await session.flush()
+    return filled
+
+
 async def process_order(session: AsyncSession, order: Order) -> Order:
     """Run the full intake pipeline for one order. Safe to re-run."""
+    await backfill_variations(session, order)
     top_lines = (
         (
             await session.execute(
@@ -215,17 +314,38 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
         await session.flush()
         return []
 
+    rules = (
+        (
+            await session.execute(
+                select(BomOptionRule)
+                .where(BomOptionRule.bundle_id == product.id)
+                .options(
+                    selectinload(BomOptionRule.component),
+                    selectinload(BomOptionRule.replaces),
+                )
+                .order_by(BomOptionRule.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # What the buyer chose can swap a component out — grey filament for red —
+    # so the BOM is resolved against the options before anything is built.
+    resolved = bom_options.resolve(list(bom), list(rules), line.variations)
+    line.stock_note = " ".join(resolved.warnings) or None
+    line.option_effects = resolved.applied
+
     children: list[OrderLine] = []
-    for bom_line in bom:
-        needed = line.quantity * bom_line.quantity
-        child = by_product.get(bom_line.component_id)
+    for component, per_bundle in resolved.components:
+        needed = line.quantity * per_bundle
+        child = by_product.pop(component.id, None)
         if child is None:
             child = OrderLine(
                 order_id=line.order_id,
                 parent_line_id=line.id,
-                product_id=bom_line.component_id,
-                sku_raw=bom_line.component.sku if bom_line.component else None,
-                title=bom_line.component.name if bom_line.component else None,
+                product_id=component.id,
+                sku_raw=component.sku,
+                title=component.name,
                 quantity=needed,
                 state=LINE_NEW,
             )
@@ -234,6 +354,19 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
             # BOM edited before anything was printed — resize the component line.
             child.quantity = needed
         children.append(child)
+
+    # Anything left over came from a component the options swapped out. Drop it
+    # if nothing has been printed against it; otherwise leave it alone, because
+    # a plate already on a printer is a fact and hiding it would not unprint it.
+    for stale in by_product.values():
+        if stale.print_jobs:
+            stale.stock_note = (
+                "An option changed this bundle after printing started, and this "
+                "component is no longer part of it."
+            )
+            children.append(stale)
+        else:
+            await session.delete(stale)
 
     await session.flush()
     return children

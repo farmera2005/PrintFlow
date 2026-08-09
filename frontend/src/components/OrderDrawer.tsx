@@ -134,6 +134,34 @@ function LineRow({
           </p>
         ) : null}
 
+        {/* What the buyer picked. The person making this needs to read it
+            here, not in Etsy — and free text is the whole point of
+            personalisation, so it gets room to be read. */}
+        {line.variations?.length ? (
+          <ul className="mt-1 space-y-0.5">
+            {line.variations.map((variation, i) => (
+              <li key={i} className="text-xs">
+                <span className="text-ink-500">{variation.name}:</span>{' '}
+                <span
+                  className={
+                    variation.free_text
+                      ? 'font-medium text-ink-900'
+                      : 'font-medium text-ink-800'
+                  }
+                >
+                  {variation.value}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {line.option_effects?.length ? (
+          <p className="mt-1 text-xs text-violet-700">
+            {line.option_effects.join(' · ')}
+          </p>
+        ) : null}
+
         {line.stock_note ? (
           <p className="mt-1 text-xs text-amber-800">{line.stock_note}</p>
         ) : null}

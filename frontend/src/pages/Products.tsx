@@ -3,7 +3,9 @@ import { api, errorMessage } from '../lib/api'
 import type {
   BambuddyArchive,
   BambuddyPrinter,
+  BomEntry,
   Fulfillment,
+  ObservedOption,
   Product,
   QboItem,
 } from '../lib/types'
@@ -296,7 +298,14 @@ function ProductEditor({
         </div>
 
         {product && fulfillment === 'bundle' ? (
-          <BomEditor product={product} allProducts={allProducts} onSaved={onSaved} />
+          <>
+            <BomEditor product={product} allProducts={allProducts} onSaved={onSaved} />
+            <OptionRulesEditor
+              product={product}
+              allProducts={allProducts}
+              onSaved={onSaved}
+            />
+          </>
         ) : null}
 
         {product && fulfillment === 'printed' ? (
@@ -734,5 +743,236 @@ function ArchivePicker({
         ))}
       </div>
     </Modal>
+  )
+}
+
+/** Etsy options that change what a bundle is made of.
+ *
+ * The option names and values are typed by hand in Etsy's listing editor and
+ * exist nowhere else in PrintFlow, so they are offered from what real orders
+ * have carried rather than asked for from memory — a rule with a typo in it
+ * fires on nothing and says nothing.
+ */
+function OptionRulesEditor({
+  product,
+  allProducts,
+  onSaved,
+}: {
+  product: Product
+  allProducts: Product[]
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const [observed, setObserved] = useState<ObservedOption[] | null>(null)
+  const [optionName, setOptionName] = useState('')
+  const [optionValue, setOptionValue] = useState('')
+  const [replacesId, setReplacesId] = useState('')
+  const [componentId, setComponentId] = useState('')
+  const [quantity, setQuantity] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api
+      .get<{ options: ObservedOption[] }>(
+        `/api/products/${product.id}/observed-options`,
+      )
+      .then((data) => setObserved(data.options))
+      .catch(() => setObserved([]))
+  }, [product.id])
+
+  // Single-level BOMs, so an option can never bring in another bundle.
+  const candidates = allProducts.filter((p) => p.fulfillment !== 'bundle')
+  const values = observed?.find((o) => o.name === optionName)?.values ?? []
+
+  const add = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const saved = await api.post<Product>(
+        `/api/products/${product.id}/option-rules`,
+        {
+          option_name: optionName.trim(),
+          option_value: optionValue.trim(),
+          component_id: componentId,
+          replaces_id: replacesId || null,
+          quantity: quantity ? Number(quantity) : null,
+        },
+      )
+      await onSaved(saved)
+      setOptionValue('')
+      setComponentId('')
+      setQuantity('')
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (ruleId: string) => {
+    setBusy(true)
+    try {
+      await onSaved(
+        await api.del<Product>(`/api/products/${product.id}/option-rules/${ruleId}`),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-ink-200 p-3">
+      <div>
+        <h3 className="text-sm font-semibold text-ink-800">Etsy options</h3>
+        <p className="text-xs text-ink-500">
+          When a buyer picks an option, swap a component for another or add one.
+          A colour choice usually swaps the filament.
+        </p>
+      </div>
+
+      {product.option_rules.length === 0 ? (
+        <p className="text-sm text-ink-500">
+          No option rules — every order uses the BOM above as it stands.
+        </p>
+      ) : (
+        <ul className="space-y-1 text-sm">
+          {product.option_rules.map((rule) => (
+            <li
+              key={rule.id}
+              className="flex flex-wrap items-center gap-2 border-b border-ink-100 pb-1"
+            >
+              <span className="font-medium text-ink-800">
+                {rule.option_name} = {rule.option_value}
+              </span>
+              <span className="text-ink-600">
+                {rule.replaces_sku
+                  ? `swap ${rule.replaces_sku} → ${rule.component_sku}`
+                  : `add ${rule.component_sku}`}
+                {rule.quantity ? ` × ${rule.quantity}` : ''}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto"
+                disabled={busy}
+                onClick={() => remove(rule.id)}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {observed !== null && observed.length === 0 ? (
+        <Alert tone="info">
+          No orders for this product have carried options yet. Rules can still be
+          typed in, but the names and values must match Etsy's exactly — it is
+          usually easier to wait for one order and pick them from the list.
+        </Alert>
+      ) : null}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label="Option">
+          {observed && observed.length ? (
+            <select
+              className={inputClass}
+              value={optionName}
+              onChange={(e) => {
+                setOptionName(e.target.value)
+                setOptionValue('')
+              }}
+            >
+              <option value="">Choose an option…</option>
+              {observed.map((option) => (
+                <option key={option.name} value={option.name}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className={inputClass}
+              placeholder="Color"
+              value={optionName}
+              onChange={(e) => setOptionName(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Value">
+          {values.length ? (
+            <select
+              className={inputClass}
+              value={optionValue}
+              onChange={(e) => setOptionValue(e.target.value)}
+            >
+              <option value="">Choose a value…</option>
+              {values.map((entry) => (
+                <option key={entry.value} value={entry.value}>
+                  {entry.value} ({entry.orders} order{entry.orders === 1 ? '' : 's'})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className={inputClass}
+              placeholder="Red"
+              value={optionValue}
+              onChange={(e) => setOptionValue(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Replaces" hint="Leave as “nothing” to add a component instead.">
+          <select
+            className={inputClass}
+            value={replacesId}
+            onChange={(e) => setReplacesId(e.target.value)}
+          >
+            <option value="">nothing — just add</option>
+            {product.bom.map((entry: BomEntry) => (
+              <option key={entry.id} value={entry.component_id}>
+                {entry.component_sku}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Use this component">
+          <select
+            className={inputClass}
+            value={componentId}
+            onChange={(e) => setComponentId(e.target.value)}
+          >
+            <option value="">Choose a component…</option>
+            {candidates.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.sku} — {candidate.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="Quantity"
+          hint={replacesId ? 'Blank keeps the quantity from the BOM.' : 'Blank means one.'}
+        >
+          <input
+            className={inputClass}
+            inputMode="numeric"
+            placeholder={replacesId ? 'same as BOM' : '1'}
+            value={quantity}
+            onChange={(e) => setQuantity(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+      </div>
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      <Button
+        onClick={add}
+        disabled={busy || !optionName.trim() || !optionValue.trim() || !componentId}
+      >
+        {busy ? 'Adding…' : 'Add rule'}
+      </Button>
+    </div>
   )
 }

@@ -17,6 +17,7 @@ from ..db import get_session
 from ..models import (
     FULFILLMENT_TYPES,
     BomLine,
+    BomOptionRule,
     OrderLine,
     PrintMapping,
     Product,
@@ -65,6 +66,19 @@ def _serialize(product: Product) -> dict[str, Any]:
             }
             for line in sorted(product.bom_lines, key=lambda line: line.created_at)
         ],
+        "option_rules": [
+            {
+                "id": rule.id,
+                "option_name": rule.option_name,
+                "option_value": rule.option_value,
+                "replaces_id": rule.replaces_id,
+                "replaces_sku": rule.replaces.sku if rule.replaces else None,
+                "component_id": rule.component_id,
+                "component_sku": rule.component.sku if rule.component else None,
+                "quantity": rule.quantity,
+            }
+            for rule in sorted(product.option_rules, key=lambda rule: rule.created_at)
+        ],
     }
 
 
@@ -76,6 +90,8 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
             .options(
                 selectinload(Product.print_mapping),
                 selectinload(Product.bom_lines).selectinload(BomLine.component),
+                selectinload(Product.option_rules).selectinload(BomOptionRule.component),
+                selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
             )
             # Sessions do not expire on commit, so without this the identity map
             # would hand back the collections as they were before the write.
@@ -99,6 +115,8 @@ async def list_products(
     stmt = select(Product).options(
         selectinload(Product.print_mapping),
         selectinload(Product.bom_lines).selectinload(BomLine.component),
+        selectinload(Product.option_rules).selectinload(BomOptionRule.component),
+        selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
     )
     if q.strip():
         needle = f"%{q.strip().lower()}%"
@@ -397,4 +415,169 @@ async def delete_print_mapping(
     if product.print_mapping is not None:
         await session.delete(product.print_mapping)
         await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+# --------------------------------------------------------------------------
+# Etsy option rules
+# --------------------------------------------------------------------------
+
+
+class OptionRuleRequest(BaseModel):
+    option_name: str = Field(min_length=1, max_length=200)
+    option_value: str = Field(min_length=1, max_length=200)
+    component_id: uuid.UUID
+    # Null means "add this component"; set means "swap that one for this one".
+    replaces_id: uuid.UUID | None = None
+    # Null on a swap keeps the quantity from the BOM line being replaced.
+    quantity: int | None = Field(default=None, gt=0)
+
+
+@router.get("/{product_id}/observed-options")
+async def observed_options(
+    product_id: uuid.UUID,
+    limit: int = 500,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The option names and values orders for this product have actually carried.
+
+    Rules match on Etsy's own strings, which are typed by hand in the listing
+    editor and are not visible anywhere in PrintFlow otherwise. Asking someone
+    to reproduce them from memory is how you get a rule that silently never
+    fires, so the choices are offered from what really arrived.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(OrderLine.variations)
+                .where(OrderLine.product_id == product_id)
+                .order_by(OrderLine.created_at.desc())
+                .limit(max(1, min(limit, 2000)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    seen: dict[str, dict[str, Any]] = {}
+    for variations in rows:
+        for variation in variations or []:
+            if not isinstance(variation, dict) or variation.get("free_text"):
+                continue
+            name, value = variation.get("name"), variation.get("value")
+            if not name or not value:
+                continue
+            entry = seen.setdefault(str(name), {"name": str(name), "values": {}})
+            entry["values"][str(value)] = entry["values"].get(str(value), 0) + 1
+
+    return {
+        "options": [
+            {
+                "name": entry["name"],
+                "values": [
+                    {"value": value, "orders": count}
+                    for value, count in sorted(
+                        entry["values"].items(), key=lambda pair: (-pair[1], pair[0])
+                    )
+                ],
+            }
+            for entry in sorted(seen.values(), key=lambda e: e["name"].lower())
+        ]
+    }
+
+
+@router.post("/{product_id}/option-rules", status_code=status.HTTP_201_CREATED)
+async def add_option_rule(
+    product_id: uuid.UUID,
+    body: OptionRuleRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    bundle = await _get(session, product_id)
+    if bundle.fulfillment != "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Only a bundle has a BOM for an option to change. Model the option-driven "
+            "part as a bundle component first.",
+        )
+
+    component = await session.get(Product, body.component_id)
+    if component is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Component product not found")
+    if component.fulfillment == "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "BOMs are single-level: an option cannot bring in another bundle.",
+        )
+    if component.id == bundle.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A bundle cannot contain itself.")
+
+    if body.replaces_id is not None:
+        if body.replaces_id == body.component_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "A rule cannot swap a component for itself."
+            )
+        on_bom = (
+            await session.execute(
+                select(BomLine.id).where(
+                    BomLine.bundle_id == bundle.id, BomLine.component_id == body.replaces_id
+                )
+            )
+        ).first()
+        if not on_bom:
+            # A rule pointing at a component the bundle does not have would be
+            # skipped at intake and the order built wrong, so refuse it here
+            # while someone is looking at the screen.
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "The component being replaced is not on this bundle's BOM.",
+            )
+
+    session.add(
+        BomOptionRule(
+            bundle_id=bundle.id,
+            option_name=body.option_name.strip(),
+            option_value=body.option_value.strip(),
+            replaces_id=body.replaces_id,
+            component_id=body.component_id,
+            quantity=body.quantity,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"A rule for {body.option_name.strip()} = {body.option_value.strip()} "
+            "already brings in that component.",
+        ) from exc
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=bundle.id,
+        action="option_rule_add",
+        detail={
+            "option": f"{body.option_name.strip()} = {body.option_value.strip()}",
+            "component_sku": component.sku,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+@router.delete("/{product_id}/option-rules/{rule_id}")
+async def delete_option_rule(
+    product_id: uuid.UUID,
+    rule_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    rule = await session.get(BomOptionRule, rule_id)
+    if rule is None or rule.bundle_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rule not found")
+    await session.delete(rule)
+    await session.commit()
     return _serialize(await _get(session, product_id))

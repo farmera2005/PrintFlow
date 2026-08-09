@@ -68,6 +68,11 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             "override_state": line.override_state,
             "force_print": line.force_print,
             "stock_note": line.stock_note,
+            # What the buyer picked, and what those picks did to the BOM. Both
+            # belong on the card: the operator making the thing needs to see
+            # "Color: Red" without opening Etsy.
+            "variations": line.variations or [],
+            "option_effects": line.option_effects or [],
             "assembled_at": line.assembled_at,
             "is_bundle": bool(kids),
             "print_jobs": [_job(job) for job in sorted(line.print_jobs, key=lambda j: j.created_at)],
