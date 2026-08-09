@@ -34,6 +34,35 @@ hand. The single exception is the Manufacturing tab, and it only acts when you
 press Post. Labels are never bought automatically — they cost money, so they are
 always an explicit click.
 
+## Checking products against Etsy
+
+**Products → Check against Etsy** reads the shop's live listings and lines every
+SKU Etsy sells up against the product table, before any order depends on it.
+Intake already reports an unmatched SKU, but only once a real order has arrived
+and stalled on it; this is the same comparison made while there is still time.
+
+Three answers, and all three are worth seeing:
+
+* **matched** — Etsy sells it, PrintFlow can make it.
+* **no product** — an order for this will stall on arrival. Create the product
+  from the row, printed or stocked, without leaving the screen.
+* **no SKU on Etsy** — the listing has no SKU at all, so nothing can match it.
+  That one has to be fixed in Etsy.
+
+Products no live listing sells are listed separately. Usually those are bundle
+components, which is expected — a finished good sitting there is worth a look.
+
+Each row also carries the listing's own option values, so a
+[BOM option rule](#etsy-options-that-change-the-bom) can be written from the
+listing before a single order has arrived carrying that option.
+
+**This needs a permission your Etsy connection may not have.** Reading listings
+requires the `listings_r` scope, which older PrintFlow connections were never
+granted. Order polling is unaffected and keeps working; only this screen needs
+it. If yours predates it, the screen says so and asks you to reconnect Etsy from
+**Settings → Etsy** — the authorisation page now requests listing access along
+with orders.
+
 ## Etsy options that change the BOM
 
 Buyers pick options on a listing — colour, size, "add a gift box" — and those

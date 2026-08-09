@@ -4,6 +4,8 @@ import type {
   BambuddyArchive,
   BambuddyPrinter,
   BomEntry,
+  Catalog,
+  CatalogRow,
   Fulfillment,
   ObservedOption,
   Product,
@@ -32,6 +34,7 @@ export default function Products() {
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Product | 'new' | null>(null)
+  const [checking, setChecking] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -60,7 +63,10 @@ export default function Products() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <Button variant="primary" className="ml-auto" onClick={() => setEditing('new')}>
+          <Button className="ml-auto" onClick={() => setChecking(true)}>
+            Check against Etsy
+          </Button>
+          <Button variant="primary" onClick={() => setEditing('new')}>
             New product
           </Button>
         </div>
@@ -126,6 +132,10 @@ export default function Products() {
           </Card>
         )}
       </div>
+
+      {checking ? (
+        <CatalogCheck onClose={() => setChecking(false)} onChanged={load} />
+      ) : null}
 
       {editing ? (
         <ProductEditor
@@ -771,13 +781,51 @@ function OptionRulesEditor({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  /* Two sources, merged: what past orders carried, and what the Etsy listing
+     offers. The listing is the one that works before a single order has
+     arrived, which is when the rules actually need writing. */
   useEffect(() => {
-    api
-      .get<{ options: ObservedOption[] }>(
-        `/api/products/${product.id}/observed-options`,
+    let cancelled = false
+    Promise.all([
+      api
+        .get<{ options: ObservedOption[] }>(
+          `/api/products/${product.id}/observed-options`,
+        )
+        .then((d) => d.options)
+        .catch(() => [] as ObservedOption[]),
+      api
+        .get<Catalog>('/api/integrations/etsy/catalog')
+        .then((c) =>
+          c.error
+            ? []
+            : c.rows
+                .filter((row) => row.product_id === product.id)
+                .flatMap((row) => row.listing_options),
+        )
+        .catch(() => [] as ObservedOption[]),
+    ]).then(([fromOrders, fromListing]) => {
+      if (cancelled) return
+      const merged = new Map<string, Map<string, number | undefined>>()
+      for (const source of [fromOrders, fromListing]) {
+        for (const option of source) {
+          const values = merged.get(option.name) ?? new Map()
+          for (const entry of option.values) {
+            // An order count is the more informative of the two, so it wins.
+            values.set(entry.value, entry.orders ?? values.get(entry.value))
+          }
+          merged.set(option.name, values)
+        }
+      }
+      setObserved(
+        [...merged.entries()].map(([name, values]) => ({
+          name,
+          values: [...values.entries()].map(([value, orders]) => ({ value, orders })),
+        })),
       )
-      .then((data) => setObserved(data.options))
-      .catch(() => setObserved([]))
+    })
+    return () => {
+      cancelled = true
+    }
   }, [product.id])
 
   // Single-level BOMs, so an option can never bring in another bundle.
@@ -911,7 +959,10 @@ function OptionRulesEditor({
               <option value="">Choose a value…</option>
               {values.map((entry) => (
                 <option key={entry.value} value={entry.value}>
-                  {entry.value} ({entry.orders} order{entry.orders === 1 ? '' : 's'})
+                  {entry.value}
+                  {entry.orders
+                    ? ` (${entry.orders} order${entry.orders === 1 ? '' : 's'})`
+                    : ' (from the listing)'}
                 </option>
               ))}
             </select>
@@ -974,5 +1025,247 @@ function OptionRulesEditor({
         {busy ? 'Adding…' : 'Add rule'}
       </Button>
     </div>
+  )
+}
+
+const CATALOG_STATUS: Record<
+  CatalogRow['status'],
+  { label: string; className: string }
+> = {
+  matched: { label: 'matched', className: 'bg-emerald-100 text-emerald-800 ring-emerald-300' },
+  missing: { label: 'no product', className: 'bg-red-100 text-red-800 ring-red-300' },
+  no_sku: { label: 'no SKU on Etsy', className: 'bg-amber-100 text-amber-800 ring-amber-300' },
+}
+
+/** What Etsy sells, lined up against what PrintFlow can make.
+ *
+ * Intake already reports an unmatched SKU, but only once a real order has
+ * arrived and stalled on it. This is the same comparison up front, while there
+ * is still time to fix it.
+ */
+function CatalogCheck({
+  onClose,
+  onChanged,
+}: {
+  onClose: () => void
+  onChanged: () => void | Promise<void>
+}) {
+  const [catalog, setCatalog] = useState<Catalog | null>(null)
+  const [filter, setFilter] = useState<'all' | 'missing'>('missing')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setCatalog(null)
+    try {
+      setCatalog(await api.get<Catalog>('/api/integrations/etsy/catalog'))
+    } catch (err) {
+      setError(errorMessage(err))
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  /** Create the product Etsy is already selling, so its orders stop stalling. */
+  const create = async (row: CatalogRow, fulfillment: Fulfillment) => {
+    if (!row.sku) return
+    setBusy(row.sku)
+    setError(null)
+    try {
+      await api.post<Product>('/api/products', {
+        sku: row.sku,
+        name: row.title ?? row.sku,
+        fulfillment,
+        qbo_item_id: null,
+        qbo_item_name: null,
+        active: true,
+      })
+      await onChanged()
+      await load()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const rows = (catalog?.rows ?? []).filter(
+    (row) => filter === 'all' || row.status !== 'matched',
+  )
+
+  return (
+    <Modal open wide title="Check products against Etsy" onClose={onClose}>
+      <div className="space-y-3">
+        {catalog === null && !error ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-ink-600">
+            <Spinner className="h-4 w-4" />
+            Reading your Etsy listings…
+          </div>
+        ) : null}
+
+        {catalog?.error ? (
+          <Alert tone={catalog.needs_reconnect ? 'warning' : 'error'}>
+            {catalog.error}
+            {catalog.needs_reconnect ? (
+              <span className="mt-1 block text-xs">
+                Order polling is unaffected and keeps working — only this screen
+                needs the extra permission.
+              </span>
+            ) : null}
+          </Alert>
+        ) : null}
+        {error ? <Alert tone="error">{error}</Alert> : null}
+
+        {catalog && !catalog.error ? (
+          <>
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <span className="text-ink-700">
+                <strong>{catalog.counts.variants ?? 0}</strong> sellable variants
+                across <strong>{catalog.counts.listings ?? 0}</strong> listings
+              </span>
+              <Badge className={CATALOG_STATUS.matched.className}>
+                {catalog.counts.matched ?? 0} matched
+              </Badge>
+              {catalog.counts.missing ? (
+                <Badge className={CATALOG_STATUS.missing.className}>
+                  {catalog.counts.missing} with no product
+                </Badge>
+              ) : null}
+              {catalog.counts.no_sku ? (
+                <Badge className={CATALOG_STATUS.no_sku.className}>
+                  {catalog.counts.no_sku} with no SKU
+                </Badge>
+              ) : null}
+              <div className="ml-auto flex gap-1 text-xs">
+                {(['missing', 'all'] as const).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setFilter(key)}
+                    className={
+                      filter === key
+                        ? 'rounded-md bg-ink-900 px-2.5 py-1 font-medium text-white'
+                        : 'rounded-md px-2.5 py-1 font-medium text-ink-600 hover:bg-ink-100'
+                    }
+                  >
+                    {key === 'missing' ? 'Needs attention' : 'Everything'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {catalog.notes.map((note, i) => (
+              <p key={i} className="text-xs text-ink-500">
+                {note}
+              </p>
+            ))}
+
+            {rows.length === 0 ? (
+              <Alert tone="success">
+                Every SKU Etsy sells has a product here. Orders will match on
+                arrival.
+              </Alert>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-xs uppercase tracking-wide text-ink-500">
+                    <tr>
+                      <th className="py-1 pr-3 font-medium">Etsy SKU</th>
+                      <th className="py-1 pr-3 font-medium">Listing</th>
+                      <th className="py-1 pr-3 font-medium">Options</th>
+                      <th className="py-1 pr-3 font-medium">In PrintFlow</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, i) => (
+                      <tr key={`${row.listing_id}-${row.sku}-${i}`} className="border-t border-ink-100">
+                        <td className="py-1.5 pr-3 align-top font-mono text-xs">
+                          {row.sku ?? <span className="text-ink-400">—</span>}
+                        </td>
+                        <td className="py-1.5 pr-3 align-top">
+                          <span className="text-ink-700">{row.title}</span>
+                        </td>
+                        <td className="py-1.5 pr-3 align-top text-xs text-ink-600">
+                          {row.options.length
+                            ? row.options.map((o) => `${o.name}: ${o.value}`).join(' · ')
+                            : '—'}
+                        </td>
+                        <td className="py-1.5 pr-3 align-top">
+                          <Badge className={CATALOG_STATUS[row.status].className}>
+                            {CATALOG_STATUS[row.status].label}
+                          </Badge>
+                          {row.product_sku ? (
+                            <div className="mt-0.5 text-xs text-ink-500">
+                              {row.product_sku} · {row.fulfillment}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="py-1.5 text-right align-top">
+                          {row.status === 'missing' ? (
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                size="sm"
+                                disabled={busy === row.sku}
+                                onClick={() => create(row, 'printed')}
+                              >
+                                Create printed
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={busy === row.sku}
+                                onClick={() => create(row, 'stocked')}
+                              >
+                                Create stocked
+                              </Button>
+                            </div>
+                          ) : row.status === 'no_sku' ? (
+                            <span className="text-xs text-ink-500">
+                              Add a SKU in Etsy — orders cannot match without one
+                            </span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {catalog.unused_products.length ? (
+              <details className="text-xs text-ink-600">
+                <summary className="cursor-pointer">
+                  {catalog.unused_products.length} products no live listing sells
+                </summary>
+                <p className="mt-1">
+                  Usually components of a bundle, which is expected. A finished
+                  good here is worth a look — a retired listing, or a typo.
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {catalog.unused_products.map((product) => (
+                    <li key={product.id}>
+                      <span className="font-mono">{product.sku}</span> — {product.name}{' '}
+                      <span className="text-ink-400">({product.fulfillment})</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </>
+        ) : null}
+
+        <div className="flex gap-2">
+          <Button onClick={load} disabled={catalog === null && !error}>
+            Refresh from Etsy
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </Modal>
   )
 }

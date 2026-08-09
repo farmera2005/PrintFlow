@@ -122,6 +122,38 @@ export interface PrintMapping {
   preferred_printer_id: number | null
 }
 
+/** An option name and the values seen for it — from past orders, or from the
+ *  Etsy listing itself. `orders` is absent when it came from the listing. */
+export interface ObservedOption {
+  name: string
+  values: { value: string; orders?: number }[]
+}
+
+export interface CatalogRow {
+  listing_id: number | null
+  title: string | null
+  state: string | null
+  url: string | null
+  sku: string | null
+  options: { name: string; value: string }[]
+  listing_options: ObservedOption[]
+  product_id: string | null
+  product_sku: string | null
+  product_name: string | null
+  fulfillment: Fulfillment | null
+  qbo_item_id: string | null
+  status: 'matched' | 'missing' | 'no_sku'
+}
+
+export interface Catalog {
+  rows: CatalogRow[]
+  unused_products: { id: string; sku: string; name: string; fulfillment: Fulfillment }[]
+  counts: Record<string, number>
+  notes: string[]
+  error: string | null
+  needs_reconnect: boolean
+}
+
 export interface OptionRule {
   id: string
   option_name: string
@@ -131,12 +163,6 @@ export interface OptionRule {
   component_id: string
   component_sku: string | null
   quantity: number | null
-}
-
-/** An option name and the values orders for a product have actually carried. */
-export interface ObservedOption {
-  name: string
-  values: { value: string; orders: number }[]
 }
 
 export interface Product {

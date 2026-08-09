@@ -31,7 +31,7 @@ from ..models import (
     OAuthState,
     User,
 )
-from ..services import audit, credentials, public_url
+from ..services import audit, catalog, credentials, public_url
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.integrations")
@@ -267,6 +267,40 @@ async def etsy_shops(
         await session.rollback()
         result["error"] = str(exc)
     return result
+
+
+@router.get("/etsy/catalog")
+async def etsy_catalog(
+    state: str = "active",
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The shop's listings lined up against the product table.
+
+    Returns 200 with an `error` rather than failing: the point of this screen is
+    to be told what is wrong, and a token issued before the listings scope
+    existed will land here — which is worth explaining, not just refusing.
+    """
+    client = await _etsy_client(session)
+    empty = {"rows": [], "unused_products": [], "counts": {}, "notes": []}
+    if not client.shop_id:
+        return {**empty, "error": "No Etsy shop selected yet.", "needs_reconnect": False}
+    try:
+        listings, notes = await catalog.fetch_listings(client, state=state)
+    except IntegrationError as exc:
+        needs_reconnect = etsy_api.wants_listing_scope(exc)
+        message = (
+            "Etsy will not release your listings with the access this connection "
+            "was granted. Reconnect Etsy — the authorisation screen now asks for "
+            "permission to read listings as well as orders."
+            if needs_reconnect
+            else str(exc)
+        )
+        await session.rollback()
+        return {**empty, "error": message, "needs_reconnect": needs_reconnect}
+
+    result = await catalog.reconcile(session, listings)
+    return {**result, "notes": notes, "error": None, "needs_reconnect": False}
 
 
 @router.post("/etsy/test")

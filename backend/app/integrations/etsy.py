@@ -25,7 +25,14 @@ log = logging.getLogger("printflow.etsy")
 CONNECT_URL = "https://www.etsy.com/oauth/connect"
 TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 API_BASE = "https://openapi.etsy.com/v3/application"
-SCOPES = ("transactions_r", "shops_r")
+# listings_r is what lets PrintFlow read the shop's own listings, including
+# their SKUs and variation values, so the product table can be checked against
+# Etsy before any order arrives. A token issued before this scope existed does
+# not carry it, and Etsy answers those calls with a scope error — which is
+# detected and reported as "reconnect Etsy" rather than a bare 403.
+SCOPES = ("transactions_r", "shops_r", "listings_r")
+
+SCOPE_LISTINGS = "listings_r"
 
 # Refresh a little before expiry so a poll never fails on a stale token.
 REFRESH_MARGIN_SECONDS = 300
@@ -48,6 +55,19 @@ KEY_MODE_FIELD = "x_api_key_mode"
 MODE_COMBINED = "combined"
 MODE_KEYSTRING = "keystring"
 MODE_SHARED_SECRET = "shared_secret"
+
+
+def wants_listing_scope(exc: IntegrationError) -> bool:
+    """True when Etsy refused because the token predates the listings scope.
+
+    A token issued before `listings_r` was requested keeps working for orders
+    forever, so this shows up as one screen failing while everything else is
+    fine — worth naming exactly rather than reporting as another 403.
+    """
+    if exc.status_code not in (401, 403):
+        return False
+    body = (exc.body or "").lower()
+    return "scope" in body or "listings_r" in body
 
 
 def wants_shared_secret(body: str | None) -> bool:
@@ -126,6 +146,85 @@ def _token_payload(data: dict[str, Any]) -> dict[str, Any]:
         "refresh_token": data.get("refresh_token"),
         "expires_at": time.time() + float(data.get("expires_in", 3600)),
     }
+
+
+def listing_inventory_of(listing: dict[str, Any]) -> dict[str, Any] | None:
+    """The inventory Etsy inlined on a listing, if it did.
+
+    `includes=Inventory` has arrived under both spellings across API versions,
+    and is simply absent when Etsy ignores the parameter.
+    """
+    for key in ("inventory", "Inventory"):
+        value = listing.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def listing_variants(
+    listing: dict[str, Any], inventory: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Every buyable combination of a listing, with its SKU and its options.
+
+    One row per Etsy "product" — the thing a buyer actually ends up with once
+    they have picked every option. A listing with no variations yields a single
+    row carrying the listing-level SKU.
+    """
+    rows: list[dict[str, Any]] = []
+    products = (inventory or {}).get("products") or []
+    for product in products:
+        if not isinstance(product, dict) or product.get("is_deleted"):
+            continue
+        options: list[dict[str, Any]] = []
+        for prop in product.get("property_values") or []:
+            if not isinstance(prop, dict):
+                continue
+            name = prop.get("property_name") or prop.get("formatted_name")
+            values = [str(v) for v in (prop.get("values") or []) if str(v).strip()]
+            if not name or not values:
+                continue
+            options.append(
+                {
+                    "name": str(name).strip(),
+                    # Etsy allows several values on one property; the buyer ends
+                    # up with one of them per purchase, so each is a variant.
+                    "value": values[0] if len(values) == 1 else ", ".join(values),
+                    "property_id": prop.get("property_id"),
+                }
+            )
+        rows.append(
+            {
+                "sku": (str(product.get("sku") or "").strip() or None),
+                "options": options,
+                "product_id": product.get("product_id"),
+            }
+        )
+
+    if not rows:
+        # No variations, or no inventory read: fall back to the listing's own
+        # SKUs so a plain listing still shows up in the comparison.
+        skus = [str(s).strip() for s in (listing.get("skus") or []) if str(s).strip()]
+        rows = [{"sku": sku, "options": [], "product_id": None} for sku in skus] or [
+            {"sku": None, "options": [], "product_id": None}
+        ]
+    return rows
+
+
+def listing_options(variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The option names and the values this listing offers for each.
+
+    Straight from the listing, so rules can be written before a single order has
+    arrived carrying that option.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for variant in variants:
+        for option in variant.get("options") or []:
+            entry = seen.setdefault(
+                option["name"], {"name": option["name"], "values": []}
+            )
+            if option["value"] not in entry["values"]:
+                entry["values"].append(option["value"])
+    return sorted(seen.values(), key=lambda entry: entry["name"].lower())
 
 
 def user_id_from_token(access_token: str | None) -> str | None:
@@ -265,6 +364,44 @@ class EtsyClient:
 
     async def get_shop(self, shop_id: int | str) -> dict[str, Any]:
         return await self._get(f"/shops/{shop_id}")
+
+    async def iter_listings(
+        self,
+        *,
+        shop_id: int | str,
+        state: str = "active",
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """The shop's listings, with inventory inline where Etsy will give it.
+
+        `includes=Inventory` saves one request per listing, which on a shop with
+        a few hundred listings is the difference between a screen that loads and
+        one that trips the rate limit. Etsy does not always honour it, so
+        callers must cope with inventory being absent — see `listing_inventory`.
+        """
+        listings: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(max_pages):
+            data = await self._get(
+                f"/shops/{shop_id}/listings",
+                {
+                    "state": state,
+                    "limit": page_size,
+                    "offset": offset,
+                    "includes": "Inventory",
+                },
+            )
+            page = list(data.get("results") or [])
+            listings.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return listings
+
+    async def listing_inventory(self, listing_id: int | str) -> dict[str, Any]:
+        """One listing's variations and per-variation SKUs."""
+        return await self._get(f"/listings/{listing_id}/inventory")
 
     async def iter_receipts(
         self,
