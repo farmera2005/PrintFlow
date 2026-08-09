@@ -379,3 +379,88 @@ class TestVisibility:
             f"/api/orders/{order.id}/status", json={"status": "somewhere"}
         )
         assert response.status_code == 400
+
+
+# --------------------------------------------------------------------------
+# Coming back out of Cancelled
+# --------------------------------------------------------------------------
+
+
+class TestNoLongerCancelled:
+    """An order that is not cancelled must not read as cancelled anywhere.
+
+    Two ways it used to. The roll-up called an all-cancelled order Cancelled,
+    which the board showed as a "looks cancelled" badge on a card sitting in
+    New. And a line cancelled by hand kept its own override, so the order came
+    back to a live column with nothing on it — still cancelled in every way that
+    showed, just not in the column heading.
+    """
+
+    @staticmethod
+    async def _cancelled_by_line(signed_in, db, receipt_id):
+        product = Product(sku="BIN", name="Bin", fulfillment="stocked", qbo_item_id="7")
+        db.add(product)
+        await db.commit()
+        order, _ = await intake.ingest_receipt(db, _receipt(receipt_id))
+        await db.commit()
+        line = (await db.execute(select(OrderLine))).scalar_one()
+        await signed_in.post(
+            f"/api/orders/{order.id}/lines/{line.id}/override", json={"action": "cancel"}
+        )
+        await signed_in.put(
+            f"/api/orders/{order.id}/status", json={"status": "cancelled"}
+        )
+        return order
+
+    async def test_the_rules_never_suggest_cancelled(self, signed_in, db):
+        order = await self._cancelled_by_line(signed_in, db, 40)
+        body = (
+            await signed_in.put(f"/api/orders/{order.id}/status", json={"status": "new"})
+        ).json()
+        assert body["status"] == "new"
+        assert body["suggested_status"] != "cancelled"
+
+    async def test_its_lines_come_back_with_it(self, signed_in, db):
+        order = await self._cancelled_by_line(signed_in, db, 41)
+        body = (
+            await signed_in.put(f"/api/orders/{order.id}/status", json={"status": "new"})
+        ).json()
+        assert body["lines_restored"] == 1
+        assert body["lines"][0]["state"] != "cancelled"
+        assert body["lines"][0]["override_state"] is None
+        # And the card is not empty, which is what an operator actually sees.
+        assert body["summary"]["line_count"] == 1
+
+    async def test_nothing_in_the_payload_says_cancelled(self, signed_in, db):
+        order = await self._cancelled_by_line(signed_in, db, 42)
+        body = (
+            await signed_in.put(f"/api/orders/{order.id}/status", json={"status": "new"})
+        ).json()
+
+        def mentions(node, path=""):
+            if isinstance(node, dict):
+                return [m for k, v in node.items() for m in mentions(v, f"{path}.{k}")]
+            if isinstance(node, list):
+                return [m for i, v in enumerate(node) for m in mentions(v, f"{path}[{i}]")]
+            if isinstance(node, str) and "cancel" in node.lower():
+                return [f"{path} = {node!r}"]
+            return []
+
+        assert mentions(body) == []
+
+    async def test_the_stock_comes_back_too(self, signed_in, db):
+        order = await self._cancelled_by_line(signed_in, db, 43)
+        assert await allocation.reserved_quantities(db) == {}
+        await signed_in.put(f"/api/orders/{order.id}/status", json={"status": "new"})
+        assert await allocation.reserved_quantities(db) == {"7": 1}
+
+    async def test_an_order_still_in_cancelled_keeps_its_lines(self, signed_in, db):
+        """Only leaving the column restores them; moving within it changes nothing."""
+        order = await self._cancelled_by_line(signed_in, db, 44)
+        body = (
+            await signed_in.put(
+                f"/api/orders/{order.id}/status", json={"status": "cancelled"}
+            )
+        ).json()
+        assert body["lines_restored"] == 0
+        assert body["lines"][0]["state"] == "cancelled"

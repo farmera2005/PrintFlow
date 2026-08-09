@@ -59,9 +59,10 @@ function OrderCard({
   const visible = rows.slice(0, 4)
   const attention = order.summary.needs_attention
   // Nothing moves a card but a person, so when the rules disagree they say so
-  // rather than acting on it.
+  // rather than acting on it. They never suggest Cancelled, and they say
+  // nothing at all about an order sitting in it.
   const suggests =
-    order.suggested_status !== order.status && order.status !== 'cancelled'
+    order.suggested_status && order.suggested_status !== order.status
       ? order.suggested_status
       : null
 

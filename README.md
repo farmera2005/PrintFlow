@@ -196,7 +196,12 @@ Moving a card is not only a label; the status decides what the lines are:
 * **Shipped** carries the lines to shipped.
 
 None of that is written down separately, so moving the card back recomputes it
-all. Every move is written to the audit log with the note you gave it.
+all — including any line that was cancelled by hand, which comes back with the
+order. An order that is not in Cancelled must not read as cancelled anywhere,
+and that includes the rules: they never suggest Cancelled, because cancelling is
+decided rather than observed.
+
+Every move is written to the audit log with the note you gave it.
 
 ## Finding an order, and changing a match
 

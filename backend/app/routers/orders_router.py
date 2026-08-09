@@ -18,6 +18,7 @@ from ..db import get_session
 from ..integrations.base import IntegrationError
 from ..models import (
     LINE_CANCELLED,
+    ORDER_CANCELLED,
     ORDER_STATUSES,
     LINE_PRINTED,
     LINE_READY,
@@ -188,6 +189,18 @@ async def set_order_status(
     was = order.status
     order.status = body.status
     order.status_note = (body.note or "").strip() or None
+
+    # Coming back out of Cancelled, the lines have to come with it. A line
+    # cancelled by hand keeps its own override otherwise, so the order would sit
+    # in a live column with nothing on it — still cancelled in every way that
+    # shows, just not in the column heading.
+    restored = 0
+    if was == ORDER_CANCELLED and body.status != ORDER_CANCELLED:
+        for line in order.lines:
+            if line.override_state == LINE_CANCELLED:
+                line.override_state = None
+                restored += 1
+
     await session.flush()
     # Not to work out the status — to bring the lines into line with it.
     await recompute_order(session, order)
@@ -197,11 +210,18 @@ async def set_order_status(
         entity_type="order",
         entity_id=order.id,
         action="set_status",
-        detail={"from": was, "to": order.status, "note": order.status_note},
+        detail={
+            "from": was,
+            "to": order.status,
+            "note": order.status_note,
+            "lines_restored": restored,
+        },
         actor=user.username,
     )
     await session.commit()
-    return await board.load_order_detail(session, order_id)
+    detail = await board.load_order_detail(session, order_id)
+    detail["lines_restored"] = restored
+    return detail
 
 
 @router.post("/orders/{order_id}/reset-matching")

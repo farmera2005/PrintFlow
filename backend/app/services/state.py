@@ -307,14 +307,19 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
     return order.status
 
 
-def suggested_status(order: Order, lines: list[OrderLine]) -> str:
+def suggested_status(order: Order, lines: list[OrderLine]) -> str | None:
     """Where the rules would put this order, for the board to mention.
 
     Nothing acts on this. It is the difference between "your printer says these
     are done" and moving somebody's card while they are looking at it.
+
+    None when there is nothing useful to say. Cancelling is decided, never
+    observed: the rules can see that every line is cancelled, which is only ever
+    a restatement of somebody's decision, and an order that has been moved back
+    out of Cancelled must not be told it looks cancelled.
     """
     children = {line.parent_line_id for line in lines if line.parent_line_id}
-    return compute_order_status(
+    guess = compute_order_status(
         [
             LineView(
                 state=line.state,
@@ -330,6 +335,7 @@ def suggested_status(order: Order, lines: list[OrderLine]) -> str:
         ],
         label_created=order.label_created_at is not None,
     )
+    return None if guess == ORDER_CANCELLED else guess
 
 
 async def recompute_order_by_id(session: AsyncSession, order_id) -> str | None:

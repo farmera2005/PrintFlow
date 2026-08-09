@@ -157,7 +157,7 @@ function StatusPicker({
 }) {
   const [open, setOpen] = useState(false)
   const suggests =
-    order.suggested_status !== order.status && order.status !== 'cancelled'
+    order.suggested_status && order.suggested_status !== order.status
       ? order.suggested_status
       : null
 

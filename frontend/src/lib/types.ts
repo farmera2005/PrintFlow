@@ -82,8 +82,10 @@ export interface Order {
   /** The column this card sits in. Only ever set by a person. */
   status: OrderStatus
   status_note: string | null
-  /** Where the roll-up would put it. Shown when it disagrees; never acted on. */
-  suggested_status: OrderStatus
+  /** Where the roll-up would put it, when it has anything useful to say. Shown
+   *  only when it disagrees, and never acted on. Null for an order whose lines
+   *  are all cancelled: cancelling is decided, not observed. */
+  suggested_status: OrderStatus | null
   tracking_number: string | null
   label_created_at: string | null
   shipstation_order_id: number | null
