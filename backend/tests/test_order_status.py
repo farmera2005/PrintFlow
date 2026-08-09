@@ -1,15 +1,14 @@
-"""Setting an order's status by hand.
+"""An order's status, which only a person ever sets.
 
-The roll-up derives a column from what the lines are doing, which is right
-almost always and cannot be right in the cases it has no way of knowing about:
-a buyer who rang up to cancel, an order handed over in person, one held back
-deliberately. An order stuck in the wrong column with no way to move it is
-worse than a status the system did not work out for itself.
+Nothing moves a card: not intake, not a finished plate, not buying a label. The
+rules can see that four plates came off the printers; they cannot see that the
+parcel is still on the bench or that the buyer rang up. A card that moves itself
+out from under whoever is working the board is worse than one that waits.
 
-So the override wins — and it is not only a label. Cancelling cancels the
-lines, which is what releases their stock and keeps their plates off the
-printers. Clearing it recomputes everything back, because nothing about it is
-written down separately.
+So the arrow points from the status to the lines. Cancelling an order cancels
+them, which is what releases their stock and keeps their plates off the
+printers; Shipped carries them to shipped. Moving the card back recomputes all
+of it, because none of it is written down separately.
 """
 
 from __future__ import annotations
@@ -78,7 +77,7 @@ async def _printed_product(db, sku="BIN"):
 
 
 class TestSettingStatus:
-    async def test_an_order_can_be_put_in_a_column_by_hand(self, signed_in, db):
+    async def test_an_order_can_be_moved_to_a_column(self, signed_in, db):
         await _printed_product(db)
         order, _ = await intake.ingest_receipt(db, _receipt(1))
         await db.commit()
@@ -91,10 +90,22 @@ class TestSettingStatus:
             )
         ).json()
         assert body["status"] == "ready_to_ship"
-        assert body["status_override"] == "ready_to_ship"
-        assert body["status_override_note"] == "Collected in person"
+        assert body["status_note"] == "Collected in person"
 
-    async def test_the_rules_cannot_take_it_back(self, signed_in, db):
+    async def test_an_order_arrives_in_new_and_stays_there(self, signed_in, db):
+        """Intake matches, allocates and plans plates — and moves nothing."""
+        await _printed_product(db)
+        order, _ = await intake.ingest_receipt(db, _receipt(6))
+        await db.commit()
+        assert order.status == "new"
+
+        await intake.process_order(db, order)
+        await recompute_order(db, order)
+        await db.commit()
+        await db.refresh(order)
+        assert order.status == "new"
+
+    async def test_the_rules_never_take_it_back(self, signed_in, db):
         """Anything at all recomputes the order; the choice has to survive that."""
         await _printed_product(db)
         order, _ = await intake.ingest_receipt(db, _receipt(2))
@@ -109,17 +120,43 @@ class TestSettingStatus:
         await db.refresh(order)
         assert order.status == "ready_to_ship"
 
-    async def test_clearing_it_hands_the_order_back(self, signed_in, db):
+    async def test_the_rules_suggest_without_acting(self, signed_in, db):
+        """They still have an opinion; they just do not get to apply it."""
         await _printed_product(db)
         order, _ = await intake.ingest_receipt(db, _receipt(3))
         await db.commit()
+
+        # Move it somewhere the work plainly is not.
         await signed_in.put(
-            f"/api/orders/{order.id}/status", json={"status": "shipped"}
+            f"/api/orders/{order.id}/status", json={"status": "ready_to_ship"}
         )
-        body = (
-            await signed_in.put(f"/api/orders/{order.id}/status", json={"status": None})
-        ).json()
-        assert body["status_override"] is None
+        body = (await signed_in.get(f"/api/orders/{order.id}")).json()
+        assert body["status"] == "ready_to_ship"
+        assert body["suggested_status"] == "new"
+
+    async def test_the_suggestion_follows_the_work(self, signed_in, db, monkeypatch):
+        """Once the plates are actually out, the rules say In Production."""
+
+        class Bambuddy:
+            async def enqueue(self, **kwargs):
+                return {"id": 1}
+
+        async def client_for(_session):
+            return Bambuddy()
+
+        monkeypatch.setattr(printing.bambuddy_api, "client_for", client_for)
+
+        await _printed_product(db)
+        order, _ = await intake.ingest_receipt(db, _receipt(7))
+        await db.commit()
+        assert (await signed_in.get(f"/api/orders/{order.id}")).json()[
+            "suggested_status"
+        ] == "new"
+
+        await printing.dispatch_pending(db)
+        await db.commit()
+        body = (await signed_in.get(f"/api/orders/{order.id}")).json()
+        assert body["suggested_status"] == "in_production"
         assert body["status"] == "new"
 
     async def test_a_status_that_is_not_a_column_is_refused(self, signed_in, db):
@@ -234,7 +271,7 @@ class TestCancelling:
         await printing.dispatch_pending(db)
         assert sent == []
 
-    async def test_uncancelling_puts_everything_back(self, signed_in, db):
+    async def test_moving_it_back_puts_everything_back(self, signed_in, db):
         product = Product(sku="BIN", name="Bin", fulfillment="stocked", qbo_item_id="7")
         db.add(product)
         await db.commit()
@@ -246,7 +283,7 @@ class TestCancelling:
         )
         assert await allocation.reserved_quantities(db) == {}
 
-        await signed_in.put(f"/api/orders/{order.id}/status", json={"status": None})
+        await signed_in.put(f"/api/orders/{order.id}/status", json={"status": "new"})
         assert await allocation.reserved_quantities(db) == {"7": 2}
         line = (await db.execute(select(OrderLine))).scalar_one()
         assert line.state != "cancelled"
@@ -317,9 +354,8 @@ class TestVisibility:
         column = next(c for c in board["columns"] if c["key"] == "assembly")
         assert [o["order_number"] for o in column["orders"]] == ["30"]
 
-    async def test_a_cancelled_order_leaves_the_board_but_not_the_orders_list(
-        self, signed_in, db
-    ):
+    async def test_cancelled_is_a_column_of_its_own(self, signed_in, db):
+        """Draggable to any status means every status has somewhere to drop."""
         await _printed_product(db)
         order, _ = await intake.ingest_receipt(db, _receipt(31))
         await db.commit()
@@ -328,8 +364,18 @@ class TestVisibility:
         )
 
         board = (await signed_in.get("/api/board")).json()
-        assert all(not column["orders"] for column in board["columns"])
+        cancelled = next(c for c in board["columns"] if c["key"] == "cancelled")
+        assert [o["order_number"] for o in cancelled["orders"]] == ["31"]
+        assert all(
+            not column["orders"] for column in board["columns"]
+            if column["key"] != "cancelled"
+        )
 
-        listed = (await signed_in.get("/api/orders")).json()
-        assert [o["order_number"] for o in listed["orders"]] == ["31"]
-        assert listed["counts"]["cancelled"] == 1
+    async def test_a_status_the_board_does_not_know_is_refused(self, signed_in, db):
+        await _printed_product(db)
+        order, _ = await intake.ingest_receipt(db, _receipt(32))
+        await db.commit()
+        response = await signed_in.put(
+            f"/api/orders/{order.id}/status", json={"status": "somewhere"}
+        )
+        assert response.status_code == 400

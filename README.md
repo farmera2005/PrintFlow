@@ -167,25 +167,36 @@ it.
 Combinations Etsy stops selling are marked *no longer sold* rather than deleted,
 because old orders still point at them.
 
-## Setting an order's status
+## The board, and who moves the cards
 
-An order's column is derived from what its lines are doing, which is right
-almost always and cannot be right in the cases the rules have no way of knowing
-about — a buyer who rang up to cancel, an order handed over in person, one held
-back deliberately. The drawer's status badge has a **Change** next to it, and
-**Automatic** hands the order back to the roll-up.
+**Nothing moves a card except you.** Not intake, not a finished plate, not
+buying a label. Drag a card to any column, Cancelled included; the drawer also
+has a **Move** button, which is the way to do it on a phone, since dragging
+needs a mouse.
 
-A status set by hand wins over anything the rules work out, and it is not only a
-label:
+This is a deliberate change from how it used to work. The rules can see that
+four plates came off the printers; they cannot see that the parcel is still on
+the bench, that the buyer rang up, or that this one is waiting on something from
+elsewhere. A card that moves itself out from under whoever is working the board
+is worse than one that waits to be moved. **In particular: an order no longer
+advances to Ready to Ship when its prints finish, and buying a label no longer
+marks it Shipped.**
+
+What still happens on its own is the *work*: lines are matched, stock is
+checked, plates are planned, queued and tracked, and every line's own state
+follows from that. That is what the badges on a card tell you. When the rules
+think a card belongs somewhere else they say so — a quiet **looks ready to
+ship** badge — and stop there. The drawer turns the same hint into a one-click
+move.
+
+Moving a card is not only a label; the status decides what the lines are:
 
 * **Cancelled** cancels the lines, which releases the stock they were holding
   and keeps any plates that have not reached Bambuddy off the printers.
-* **Shipped** carries the lines to shipped, for an order that went out without a
-  ShipStation label.
+* **Shipped** carries the lines to shipped.
 
-None of that is written down separately, so **Automatic** recomputes it all
-back. The badge says which of the two you are looking at, and every change is
-written to the audit log with the note you gave it.
+None of that is written down separately, so moving the card back recomputes it
+all. Every move is written to the audit log with the note you gave it.
 
 ## Finding an order, and changing a match
 

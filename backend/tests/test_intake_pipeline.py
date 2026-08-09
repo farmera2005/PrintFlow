@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.models import (
     BomLine,
@@ -12,10 +13,26 @@ from app.models import (
     PrintMapping,
     Product,
 )
-from app.services import intake, printing
+from app.services import intake, printing, state
 from app.services.state import recompute_order
 
 pytestmark = pytest.mark.asyncio
+
+
+async def suggests(db, order):
+    """Where the rules would put this order, with its lines loaded to say so."""
+    lines = (
+        (
+            await db.execute(
+                select(OrderLine)
+                .where(OrderLine.order_id == order.id)
+                .options(selectinload(OrderLine.print_jobs))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return state.suggested_status(order, list(lines))
 
 
 class FakeQbo:
@@ -370,6 +387,14 @@ class TestQboUnavailable:
 
 
 class TestProgressToReadyToShip:
+    """The work advances on its own; the card does not.
+
+    Line states are still derived from end to end — matched, allocated,
+    printing, printed, ready — which is what tells an operator where the work
+    actually is. The order's column is theirs to set, so it stays put until
+    they move it.
+    """
+
     async def test_full_lifecycle_through_assembly(self, db, fake_qbo, fake_bambuddy):
         await seed_catalog(db)
         order, _ = await intake.ingest_receipt(db, receipt())
@@ -388,7 +413,8 @@ class TestProgressToReadyToShip:
         stats = await printing.dispatch_pending(db)
         await db.commit()
         assert stats["dispatched"] == 4
-        assert order.status == "in_production"
+        # The plates went out; the card has not moved.
+        assert order.status == "new"
         # print_options from the mapping ride along with the queue request.
         # Found by archive rather than by position: every plate for this order is
         # created in one transaction, so they share a created_at and there is no
@@ -406,8 +432,12 @@ class TestProgressToReadyToShip:
         await db.commit()
 
         await db.refresh(order)
-        # Components are printed, but the bundle still needs assembling.
-        assert order.status == "assembly"
+        by_sku = await lines_by_sku(db, order.id)
+        # Components are printed, but the bundle still needs assembling — which
+        # is exactly what the rules would say, without saying it for anyone.
+        assert {by_sku["PART-X"].state, by_sku["PART-Y"].state} == {"printed"}
+        assert await suggests(db, order) == "assembly"
+        assert order.status == "new"
 
         bundle_line = (await lines_by_sku(db, order.id))["bundle-a"]
         from datetime import datetime, timezone
@@ -417,9 +447,11 @@ class TestProgressToReadyToShip:
         await recompute_order(db, order)
         await db.commit()
 
-        assert order.status == "ready_to_ship"
+        by_sku = await lines_by_sku(db, order.id)
+        assert by_sku["PART-X"].state == "ready"
+        assert await suggests(db, order) == "ready_to_ship"
 
-    async def test_a_failed_plate_keeps_the_order_in_production(
+    async def test_a_failed_plate_is_reported_without_moving_the_card(
         self, db, fake_qbo, fake_bambuddy
     ):
         await seed_catalog(db)
@@ -442,7 +474,9 @@ class TestProgressToReadyToShip:
         await db.commit()
 
         await db.refresh(order)
-        assert order.status == "in_production"
+        # The failure is on the line and the job; the card has not moved.
+        assert order.status == "new"
+        assert await suggests(db, order) == "in_production"
 
         failed = (
             (await db.execute(select(PrintJob).where(PrintJob.status == "failed")))
@@ -452,7 +486,7 @@ class TestProgressToReadyToShip:
         assert len(failed) == 1
         assert "spaghetti" in failed[0].error
 
-        # Re-queueing sends it back out and the order can complete.
+        # Re-queueing sends it back out and the work completes.
         await printing.requeue_job(db, failed[0])
         await db.commit()
         for item in fake_bambuddy.queue:
@@ -461,7 +495,9 @@ class TestProgressToReadyToShip:
         await db.commit()
 
         await db.refresh(order)
-        assert order.status == "ready_to_ship"
+        assert (await lines_by_sku(db, order.id))["PART-Y"].state == "ready"
+        assert await suggests(db, order) == "ready_to_ship"
+        assert order.status == "new"
 
     async def test_vanished_queued_job_is_not_assumed_successful(
         self, db, fake_qbo, fake_bambuddy

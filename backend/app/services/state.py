@@ -4,16 +4,27 @@ The transition rules are pure functions over plain values so they can be
 unit-tested without a database. `recompute_order` is the only DB-aware entry
 point; everything that mutates lines or print jobs calls it afterwards.
 
-Order status is *derived*, with one deliberate exception: an operator can set
-`status_override` on the order and that wins. The rules cannot know that a buyer
-rang up to cancel, or that an order was handed over in person, and an order
-stuck in the wrong column with no way to move it is worse than a status the
-system did not work out for itself.
+**Line** states are derived and always have been: what a line is doing follows
+from whether it matched, what stock covered, and what its plates are doing.
+Nobody sets those by hand and this module recomputes them from scratch on every
+call.
 
-An override is not just a label. Cancelling an order cancels its lines, which is
-what releases their stock reservations; marking one shipped carries the lines to
-shipped too. Both fall out of the same pure functions, so clearing the override
-recomputes everything back — nothing is written down that has to be undone.
+**Order** status is not derived. It belongs to the operator, who moves the card
+between columns on the board. The rules can see that four plates finished; they
+cannot see that the parcel is still on the bench, that the buyer rang up, or
+that this one is waiting on a part from somewhere else. A card that moves itself
+out from under the person working the board is worse than one that waits to be
+moved.
+
+So the arrow points the other way: the order's status decides what its lines
+are, not the reverse. Cancelling an order cancels its lines, which is what
+releases their stock reservations and keeps their plates off the printers;
+moving one to Shipped carries the lines with it. Moving it back recomputes all
+of that, because none of it is written down separately.
+
+`compute_order_status` survives as a *suggestion* — the board shows where the
+rules think a card belongs when that differs from where it is — but nothing acts
+on it.
 """
 
 from __future__ import annotations
@@ -250,14 +261,15 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
         if line.parent_line_id is not None:
             children.setdefault(line.parent_line_id, []).append(line)
 
-    # A status set by hand decides what the lines are, not the other way round.
-    forced = order.status_override
-    order_cancelled = forced == ORDER_CANCELLED
-    order_shipped = forced == ORDER_SHIPPED or (
-        order.tracking_number is not None and order.label_created_at is not None
-    )
+    # The order's column decides what its lines are. Being labelled is a fact
+    # about the shipment rather than a column, so it still comes from the label
+    # itself — but only while the operator has not moved the card past it.
+    order_cancelled = order.status == ORDER_CANCELLED
+    order_shipped = order.status == ORDER_SHIPPED
     order_labeled = (
-        forced is None and order.label_created_at is not None and not order_shipped
+        not order_shipped
+        and not order_cancelled
+        and order.label_created_at is not None
     )
 
     # Leaves first: bundle roll-ups read their children's freshly computed states.
@@ -290,25 +302,34 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
             order_cancelled=order_cancelled,
         )
 
-    views = [
-        LineView(
-            state=line.state,
-            is_bundle=bool(children.get(line.id)),
-            is_leaf=not children.get(line.id),
-            has_jobs=any(job.status != JOB_PENDING for job in line.print_jobs),
-            has_failed_job=any(
-                job.status in (JOB_FAILED, JOB_CANCELLED) for job in line.print_jobs
-            ),
-            assembled=line.assembled_at is not None,
-        )
-        for line in lines
-    ]
-    derived = compute_order_status(
-        views, label_created=order.label_created_at is not None
-    )
-    order.status = forced or derived
+    # Deliberately no roll-up onto order.status: see the module docstring.
     await session.flush()
     return order.status
+
+
+def suggested_status(order: Order, lines: list[OrderLine]) -> str:
+    """Where the rules would put this order, for the board to mention.
+
+    Nothing acts on this. It is the difference between "your printer says these
+    are done" and moving somebody's card while they are looking at it.
+    """
+    children = {line.parent_line_id for line in lines if line.parent_line_id}
+    return compute_order_status(
+        [
+            LineView(
+                state=line.state,
+                is_bundle=line.id in children,
+                is_leaf=line.id not in children,
+                has_jobs=any(job.status != JOB_PENDING for job in line.print_jobs),
+                has_failed_job=any(
+                    job.status in (JOB_FAILED, JOB_CANCELLED) for job in line.print_jobs
+                ),
+                assembled=line.assembled_at is not None,
+            )
+            for line in lines
+        ],
+        label_created=order.label_created_at is not None,
+    )
 
 
 async def recompute_order_by_id(session: AsyncSession, order_id) -> str | None:

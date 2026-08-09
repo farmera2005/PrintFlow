@@ -21,6 +21,7 @@ from ..models import (
     PrintJob,
 )
 from ..services import credentials
+from ..services.state import suggested_status
 
 
 async def _load_orders(session: AsyncSession, statuses: tuple[str, ...], limit: int):
@@ -137,10 +138,10 @@ def order_card(order: Order) -> dict[str, Any]:
         "buyer_name": order.buyer_name,
         "placed_at": order.placed_at,
         "status": order.status,
-        # Whether this column was worked out or chosen, so the drawer can offer
-        # to hand it back rather than silently disagreeing with the rules.
-        "status_override": order.status_override,
-        "status_override_note": order.status_override_note,
+        "status_note": order.status_note,
+        # Where the rules would put it. Nothing acts on this — the board shows
+        # it only when it disagrees with where the card actually is.
+        "suggested_status": suggested_status(order, list(order.lines)),
         "tracking_number": order.tracking_number,
         "label_created_at": order.label_created_at,
         "shipstation_order_id": order.shipstation_order_id,

@@ -153,35 +153,32 @@ function StatusPicker({
   onSet,
 }: {
   order: Order
-  onSet: (status: OrderStatus | null, note?: string) => void | Promise<void>
+  onSet: (status: OrderStatus, note?: string) => void | Promise<void>
 }) {
   const [open, setOpen] = useState(false)
-  const manual = order.status_override !== null
+  const suggests =
+    order.suggested_status !== order.status && order.status !== 'cancelled'
+      ? order.suggested_status
+      : null
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Badge
-        className={
-          manual
-            ? 'bg-amber-100 text-amber-800 ring-amber-300'
-            : 'bg-ink-100 text-ink-700 ring-ink-300'
-        }
-        title={order.status_override_note ?? undefined}
+        className="bg-ink-100 text-ink-700 ring-ink-300"
+        title={order.status_note ?? undefined}
       >
         {COLUMN_LABELS[order.status]}
-        {manual ? ' · set by hand' : ''}
       </Badge>
       {open ? (
         <>
           <select
             className={cx(inputClass, 'w-auto py-1 text-xs')}
-            value={order.status_override ?? ''}
+            value={order.status}
             onChange={(e) => {
               setOpen(false)
-              onSet((e.target.value || null) as OrderStatus | null)
+              onSet(e.target.value as OrderStatus)
             }}
           >
-            <option value="">Work it out automatically</option>
             {ORDER_STATUSES.map((value) => (
               <option key={value} value={value}>
                 {COLUMN_LABELS[value]}
@@ -193,15 +190,18 @@ function StatusPicker({
           </Button>
         </>
       ) : (
-        <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
-          Change
-        </Button>
+        <>
+          <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
+            Move
+          </Button>
+          {/* The rules never move a card. When they disagree they offer. */}
+          {suggests ? (
+            <Button size="sm" variant="ghost" onClick={() => onSet(suggests)}>
+              Looks {COLUMN_LABELS[suggests].toLowerCase()} → move it
+            </Button>
+          ) : null}
+        </>
       )}
-      {manual && !open ? (
-        <Button size="sm" variant="ghost" onClick={() => onSet(null)}>
-          Automatic
-        </Button>
-      ) : null}
     </div>
   )
 }
@@ -520,8 +520,8 @@ export default function OrderDrawer({
     }
   }
 
-  /** Put the order in a column by hand, or hand it back to the rules. */
-  const setStatus = async (next: OrderStatus | null, note?: string) => {
+  /** Move the order to a column. Nothing else ever moves one. */
+  const setStatus = async (next: OrderStatus, note?: string) => {
     setNotice(null)
     if (
       next === 'cancelled' &&
@@ -538,7 +538,6 @@ export default function OrderDrawer({
         note: note ?? null,
       }),
     )
-    if (next === null) setNotice('Back to working its status out automatically.')
   }
 
   const matchShipStation = async () => {

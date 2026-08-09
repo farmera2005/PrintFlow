@@ -290,7 +290,15 @@ class TestBoardAndOverrides:
     async def test_board_groups_orders_into_columns(self, seeded):
         body = (await seeded.get("/api/board")).json()
         keys = [column["key"] for column in body["columns"]]
-        assert keys == ["new", "in_production", "assembly", "ready_to_ship", "shipped"]
+        # Cancelled is a column too: a card has to be draggable to any status.
+        assert keys == [
+            "new",
+            "in_production",
+            "assembly",
+            "ready_to_ship",
+            "shipped",
+            "cancelled",
+        ]
         new_column = body["columns"][0]
         assert new_column["count"] == 1
         card = new_column["orders"][0]
@@ -453,7 +461,13 @@ class TestBoardAndOverrides:
 
 
 class TestLabelCreation:
-    async def test_buying_a_label_ships_the_order(self, signed_in, db, monkeypatch):
+    async def test_buying_a_label_does_not_move_the_order(self, signed_in, db, monkeypatch):
+        """Nothing moves a card but a person — not even buying its label.
+
+        The label is bought, the tracking number lands, the lines go to
+        `labeled`; the card waits in Ready to Ship until somebody drags it,
+        because only they know the parcel has actually gone.
+        """
         class FakeShipStation:
             def __init__(self):
                 self.calls = []
@@ -482,8 +496,9 @@ class TestLabelCreation:
             },
         )
         order.shipstation_order_id = 12345
+        # Labels are only sold for an order somebody has moved to Ready to Ship.
+        order.status = "ready_to_ship"
         await db.commit()
-        assert order.status == "ready_to_ship"
 
         response = await signed_in.post(
             f"/api/orders/{order.id}/label",
@@ -500,7 +515,8 @@ class TestLabelCreation:
         assert fake.calls[0]["weight"] == {"value": 6.5, "units": "ounces"}
 
         await db.refresh(order)
-        assert order.status == "shipped"
+        assert order.status == "ready_to_ship"
+        assert order.tracking_number == "9400111899223"
         assert order.label_pdf.startswith(b"%PDF")
 
         pdf = await signed_in.get(f"/api/orders/{order.id}/label.pdf")
