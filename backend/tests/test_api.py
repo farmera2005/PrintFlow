@@ -502,8 +502,12 @@ class TestSyncAndAudit:
         assert (await signed_in.get("/api/sync-log")).json() == {"entries": []}
         assert (await signed_in.get("/api/audit-log")).json() == {"entries": []}
 
-    async def test_health_is_public(self, client):
-        assert (await client.get("/api/health")).json() == {"ok": True}
+    async def test_health_is_public_and_identifies_the_build(self, client):
+        body = (await client.get("/api/health")).json()
+        assert body["ok"] is True
+        # Enough to answer "is my update live?" without signing in.
+        assert "version" in body
+        assert body["features"]["cloudflare_tunnel"] is True
 
     async def test_unknown_api_route_is_404_not_the_spa(self, signed_in):
         response = await signed_in.get("/api/does-not-exist")

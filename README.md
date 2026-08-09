@@ -149,6 +149,26 @@ set **Public base URL** to the proxy's address and ignore 8443.
 
 ## Updating
 
+### Is my update actually live?
+
+```bash
+curl -sk https://localhost:8443/api/health
+```
+
+```json
+{"ok":true,"version":"5b63a74","features":{"cloudflare_tunnel":true,"cloudflared_installed":true}}
+```
+
+No login needed. `version` is the commit the running container was built from.
+If it is missing, or `features` is absent entirely, the container predates that
+build — `docker compose up -d` on its own does **not** rebuild, you need
+`--build` (which `./update.sh` does for you).
+
+If the version looks right but the UI still looks old, it is your browser:
+hard-refresh with **Ctrl/Cmd + Shift + R**. Builds from `5b63a74` onwards send
+`Cache-Control: no-cache` on `index.html` so this cannot happen again.
+
+
 ```bash
 cd PrintFlow
 ./update.sh

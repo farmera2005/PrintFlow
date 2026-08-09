@@ -102,4 +102,24 @@ async def app_settings(
 
 @router.get("/health")
 async def health() -> dict:
-    return {"ok": True}
+    """Container liveness plus enough to answer "is my update actually live?".
+
+    Unauthenticated on purpose: when the UI looks wrong, the first thing worth
+    knowing is which build is answering, and needing to log in to find that out
+    is exactly backwards.
+    """
+    from ..config import get_config
+    from ..services import tunnel
+
+    config = get_config()
+    return {
+        "ok": True,
+        "version": config.git_sha,
+        "built_at": config.built_at,
+        # Present only in builds that include the Cloudflare Tunnel feature, so
+        # its absence dates the container immediately.
+        "features": {
+            "cloudflare_tunnel": True,
+            "cloudflared_installed": tunnel.available(),
+        },
+    }
