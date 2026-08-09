@@ -167,6 +167,26 @@ it.
 Combinations Etsy stops selling are marked *no longer sold* rather than deleted,
 because old orders still point at them.
 
+## Setting an order's status
+
+An order's column is derived from what its lines are doing, which is right
+almost always and cannot be right in the cases the rules have no way of knowing
+about — a buyer who rang up to cancel, an order handed over in person, one held
+back deliberately. The drawer's status badge has a **Change** next to it, and
+**Automatic** hands the order back to the roll-up.
+
+A status set by hand wins over anything the rules work out, and it is not only a
+label:
+
+* **Cancelled** cancels the lines, which releases the stock they were holding
+  and keeps any plates that have not reached Bambuddy off the printers.
+* **Shipped** carries the lines to shipped, for an order that went out without a
+  ShipStation label.
+
+None of that is written down separately, so **Automatic** recomputes it all
+back. The badge says which of the two you are looking at, and every change is
+written to the audit log with the note you gave it.
+
 ## Finding an order, and changing a match
 
 The board draws the five live columns, so a cancelled order is not on it and a

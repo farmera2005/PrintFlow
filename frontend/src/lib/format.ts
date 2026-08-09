@@ -1,5 +1,15 @@
 import type { JobStatus, LineState, OrderStatus } from './types'
 
+/** Every column an order can be in, in the order the board shows them. */
+export const ORDER_STATUSES: OrderStatus[] = [
+  'new',
+  'in_production',
+  'assembly',
+  'ready_to_ship',
+  'shipped',
+  'cancelled',
+]
+
 export const COLUMN_LABELS: Record<OrderStatus, string> = {
   new: 'New',
   in_production: 'In Production',

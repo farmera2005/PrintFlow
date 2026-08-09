@@ -47,12 +47,16 @@ export function Card({ className, children }: { className?: string; children: Re
 export function Badge({
   className,
   children,
+  title,
 }: {
   className?: string
   children: ReactNode
+  /** Hover text — for the note behind a badge, not a substitute for one. */
+  title?: string
 }) {
   return (
     <span
+      title={title}
       className={cx(
         'inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset',
         className ?? 'bg-ink-100 text-ink-700 ring-ink-300',

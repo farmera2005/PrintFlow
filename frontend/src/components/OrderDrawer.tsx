@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import {
   COLUMN_LABELS,
+  ORDER_STATUSES,
   JOB_STATUS_CLASSES,
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
   formatDateTime,
 } from '../lib/format'
-import type { Order, OrderLine, Product } from '../lib/types'
+import type { Order, OrderLine, OrderStatus, Product } from '../lib/types'
 import LabelDialog from './LabelDialog'
 import { Alert, Badge, Button, Modal, Spinner, cx, inputClass } from './ui'
 
@@ -138,6 +139,70 @@ function ProductPicker({
         ))}
       </div>
     </Modal>
+  )
+}
+
+/** The order's column, and a way to say it is something else.
+ *
+ * Almost always the roll-up is right, so the plain case is a label. What it
+ * cannot know is the phone call: a buyer who cancelled, an order handed over
+ * in person. Setting one is deliberate and reversible, and the drawer says
+ * which of the two it is looking at. */
+function StatusPicker({
+  order,
+  onSet,
+}: {
+  order: Order
+  onSet: (status: OrderStatus | null, note?: string) => void | Promise<void>
+}) {
+  const [open, setOpen] = useState(false)
+  const manual = order.status_override !== null
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Badge
+        className={
+          manual
+            ? 'bg-amber-100 text-amber-800 ring-amber-300'
+            : 'bg-ink-100 text-ink-700 ring-ink-300'
+        }
+        title={order.status_override_note ?? undefined}
+      >
+        {COLUMN_LABELS[order.status]}
+        {manual ? ' · set by hand' : ''}
+      </Badge>
+      {open ? (
+        <>
+          <select
+            className={cx(inputClass, 'w-auto py-1 text-xs')}
+            value={order.status_override ?? ''}
+            onChange={(e) => {
+              setOpen(false)
+              onSet((e.target.value || null) as OrderStatus | null)
+            }}
+          >
+            <option value="">Work it out automatically</option>
+            {ORDER_STATUSES.map((value) => (
+              <option key={value} value={value}>
+                {COLUMN_LABELS[value]}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+        </>
+      ) : (
+        <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
+          Change
+        </Button>
+      )}
+      {manual && !open ? (
+        <Button size="sm" variant="ghost" onClick={() => onSet(null)}>
+          Automatic
+        </Button>
+      ) : null}
+    </div>
   )
 }
 
@@ -450,6 +515,27 @@ export default function OrderDrawer({
     }
   }
 
+  /** Put the order in a column by hand, or hand it back to the rules. */
+  const setStatus = async (next: OrderStatus | null, note?: string) => {
+    setNotice(null)
+    if (
+      next === 'cancelled' &&
+      !window.confirm(
+        'Cancel this order? Its lines are cancelled too, which releases their ' +
+          'stock and keeps any plates that have not gone to Bambuddy off the ' +
+          'printers. You can undo it by clearing the status.',
+      )
+    )
+      return
+    await apply(
+      api.put<Order>(`/api/orders/${orderId}/status`, {
+        status: next,
+        note: note ?? null,
+      }),
+    )
+    if (next === null) setNotice('Back to working its status out automatically.')
+  }
+
   const matchShipStation = async () => {
     setMatching(true)
     try {
@@ -476,16 +562,16 @@ export default function OrderDrawer({
         }}
       >
         <div className="flex h-full w-full max-w-2xl flex-col bg-ink-50 shadow-xl">
-          <header className="flex items-center gap-3 border-b border-ink-200 bg-white px-4 py-3">
+          <header className="flex flex-wrap items-center gap-3 border-b border-ink-200 bg-white px-4 py-3">
             <div className="min-w-0">
               <h2 className="font-mono text-base font-semibold text-ink-900">
                 #{order?.order_number ?? '…'}
               </h2>
               <p className="truncate text-sm text-ink-500">
                 {order?.buyer_name ?? ''}
-                {order ? ` · ${COLUMN_LABELS[order.status]}` : ''}
               </p>
             </div>
+            {order ? <StatusPicker order={order} onSet={setStatus} /> : null}
             <Button variant="ghost" className="ml-auto" onClick={onClose}>
               Close
             </Button>

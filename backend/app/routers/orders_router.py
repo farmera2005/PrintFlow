@@ -159,6 +159,52 @@ async def reprocess_order(
 # --------------------------------------------------------------------------
 
 
+class OrderStatusRequest(BaseModel):
+    # Null hands the order back to the roll-up.
+    status: str | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.put("/orders/{order_id}/status")
+async def set_order_status(
+    order_id: uuid.UUID,
+    body: OrderStatusRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Put an order in a column by hand, or hand it back to the rules.
+
+    The roll-up cannot know that a buyer rang up to cancel, or that an order
+    went out by hand. Setting a status is not only a label: cancelling cancels
+    the lines, which releases their stock and stops their plates being sent to
+    Bambuddy; marking shipped carries the lines with it. Clearing it recomputes
+    everything back, because none of that is written down separately.
+    """
+    if body.status is not None and body.status not in ORDER_STATUSES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"status must be one of {', '.join(ORDER_STATUSES)}",
+        )
+
+    order = await _get_order(session, order_id)
+    was = order.status
+    order.status_override = body.status
+    order.status_override_note = (body.note or "").strip() or None
+    await session.flush()
+    await recompute_order(session, order)
+
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="set_status" if body.status else "clear_status_override",
+        detail={"from": was, "to": order.status, "note": order.status_override_note},
+        actor=user.username,
+    )
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
 @router.post("/orders/{order_id}/reset-matching")
 async def reset_matching(
     order_id: uuid.UUID,

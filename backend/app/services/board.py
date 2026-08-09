@@ -137,6 +137,10 @@ def order_card(order: Order) -> dict[str, Any]:
         "buyer_name": order.buyer_name,
         "placed_at": order.placed_at,
         "status": order.status,
+        # Whether this column was worked out or chosen, so the drawer can offer
+        # to hand it back rather than silently disagreeing with the rules.
+        "status_override": order.status_override,
+        "status_override_note": order.status_override_note,
         "tracking_number": order.tracking_number,
         "label_created_at": order.label_created_at,
         "shipstation_order_id": order.shipstation_order_id,

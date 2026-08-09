@@ -4,7 +4,16 @@ The transition rules are pure functions over plain values so they can be
 unit-tested without a database. `recompute_order` is the only DB-aware entry
 point; everything that mutates lines or print jobs calls it afterwards.
 
-Order status is *derived* and never set directly.
+Order status is *derived*, with one deliberate exception: an operator can set
+`status_override` on the order and that wins. The rules cannot know that a buyer
+rang up to cancel, or that an order was handed over in person, and an order
+stuck in the wrong column with no way to move it is worse than a status the
+system did not work out for itself.
+
+An override is not just a label. Cancelling an order cancels its lines, which is
+what releases their stock reservations; marking one shipped carries the lines to
+shipped too. Both fall out of the same pure functions, so clearing the override
+recomputes everything back — nothing is written down that has to be undone.
 """
 
 from __future__ import annotations
@@ -79,9 +88,10 @@ def compute_leaf_line_state(
     parent_assembled: bool = False,
     order_labeled: bool = False,
     order_shipped: bool = False,
+    order_cancelled: bool = False,
 ) -> str:
     """State of a line that is actually produced (never a bundle container)."""
-    if override_state == LINE_CANCELLED:
+    if override_state == LINE_CANCELLED or order_cancelled:
         return LINE_CANCELLED
     if order_shipped:
         return LINE_SHIPPED
@@ -128,9 +138,10 @@ def compute_bundle_line_state(
     override_state: str | None = None,
     order_labeled: bool = False,
     order_shipped: bool = False,
+    order_cancelled: bool = False,
 ) -> str:
     """State of a bundle container line — a roll-up of its component lines."""
-    if override_state == LINE_CANCELLED:
+    if override_state == LINE_CANCELLED or order_cancelled:
         return LINE_CANCELLED
     if order_shipped:
         return LINE_SHIPPED
@@ -239,8 +250,15 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
         if line.parent_line_id is not None:
             children.setdefault(line.parent_line_id, []).append(line)
 
-    order_shipped = order.tracking_number is not None and order.label_created_at is not None
-    order_labeled = order.label_created_at is not None and not order_shipped
+    # A status set by hand decides what the lines are, not the other way round.
+    forced = order.status_override
+    order_cancelled = forced == ORDER_CANCELLED
+    order_shipped = forced == ORDER_SHIPPED or (
+        order.tracking_number is not None and order.label_created_at is not None
+    )
+    order_labeled = (
+        forced is None and order.label_created_at is not None and not order_shipped
+    )
 
     # Leaves first: bundle roll-ups read their children's freshly computed states.
     leaf_lines = [line for line in lines if not children.get(line.id)]
@@ -257,6 +275,7 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
             parent_assembled=bool(parent and parent.assembled_at),
             order_labeled=order_labeled,
             order_shipped=order_shipped,
+            order_cancelled=order_cancelled,
         )
 
     for line in lines:
@@ -268,6 +287,7 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
             override_state=line.override_state,
             order_labeled=order_labeled,
             order_shipped=order_shipped,
+            order_cancelled=order_cancelled,
         )
 
     views = [
@@ -283,7 +303,10 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
         )
         for line in lines
     ]
-    order.status = compute_order_status(views, label_created=order.label_created_at is not None)
+    derived = compute_order_status(
+        views, label_created=order.label_created_at is not None
+    )
+    order.status = forced or derived
     await session.flush()
     return order.status
 

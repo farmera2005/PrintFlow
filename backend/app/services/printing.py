@@ -14,6 +14,7 @@ from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import (
     JOB_CANCELLED,
+    LINE_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
     JOB_PENDING,
@@ -142,10 +143,21 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
 
 async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[str, int]:
     """Push pending jobs onto the Bambuddy queue."""
+    # Never print for a cancelled line. Cancelling did not delete the plates it
+    # had already planned, so without this an order cancelled minutes after it
+    # arrived still goes on a printer — filament and a machine slot spent on
+    # something nobody is going to send. Covers a line cancelled on its own and
+    # a whole order cancelled by hand, because both land in the same state.
     pending = (
         (
             await session.execute(
-                select(PrintJob).where(PrintJob.status == JOB_PENDING).limit(limit)
+                select(PrintJob)
+                .join(OrderLine, OrderLine.id == PrintJob.order_line_id)
+                .where(
+                    PrintJob.status == JOB_PENDING,
+                    OrderLine.state != LINE_CANCELLED,
+                )
+                .limit(limit)
             )
         )
         .scalars()

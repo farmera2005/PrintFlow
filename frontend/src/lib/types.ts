@@ -80,6 +80,9 @@ export interface Order {
   buyer_name: string | null
   placed_at: string | null
   status: OrderStatus
+  /** Set when an operator put this order in a column by hand. */
+  status_override: OrderStatus | null
+  status_override_note: string | null
   tracking_number: string | null
   label_created_at: string | null
   shipstation_order_id: number | null

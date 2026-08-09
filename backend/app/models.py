@@ -513,7 +513,14 @@ class Order(Base):
     order_number: Mapped[str] = mapped_column(Text, nullable=False)
     buyer_name: Mapped[str | None] = mapped_column(Text)
     placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The column the board reads. Derived from the lines, unless an operator has
+    # said otherwise below.
     status: Mapped[str] = mapped_column(Text, nullable=False, default=ORDER_NEW)
+    # Set by hand, and it wins. For the orders the rules cannot know about: one
+    # cancelled by the buyer, one handed over in person, one held back. Null
+    # means the roll-up decides, which is the normal case.
+    status_override: Mapped[str | None] = mapped_column(Text)
+    status_override_note: Mapped[str | None] = mapped_column(Text)
 
     shipstation_order_id: Mapped[int | None] = mapped_column(BigInteger)
     shipstation_last_attempt_at: Mapped[datetime | None] = mapped_column(
@@ -534,6 +541,11 @@ class Order(Base):
         CheckConstraint(
             "status in ('new','in_production','assembly','ready_to_ship','shipped','cancelled')",
             name="ck_orders_status",
+        ),
+        CheckConstraint(
+            "status_override is null or status_override in "
+            "('new','in_production','assembly','ready_to_ship','shipped','cancelled')",
+            name="ck_orders_status_override",
         ),
         Index("ix_orders_status", "status"),
     )
