@@ -66,17 +66,26 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   const [busy, setBusy] = useState(false)
   const [shops, setShops] = useState<{ shop_id: number; shop_name: string }[]>([])
   const [selectedShop, setSelectedShop] = useState<number | null>(null)
+  const [shopName, setShopName] = useState<string | null>(null)
+  const [listError, setListError] = useState<string | null>(null)
+  const [manualShop, setManualShop] = useState('')
   const disconnect = useDisconnect('etsy', onChange)
 
   useEffect(() => {
     if (!status.connected) return
     api
-      .get<{ shops: any[]; selected_shop_id: number | null }>('/api/integrations/etsy/shops')
+      .get<{
+        shops: any[]
+        selected_shop_id: number | null
+        error: string | null
+      }>('/api/integrations/etsy/shops')
       .then((data) => {
         setShops(data.shops.filter((s) => s.shop_id))
         setSelectedShop(data.selected_shop_id)
+        setShopName((data as any).selected_shop_name ?? null)
+        setListError(data.error)
       })
-      .catch((err) => setError(errorMessage(err)))
+      .catch((err) => setListError(errorMessage(err)))
   }, [status.connected])
 
   const connect = async () => {
@@ -95,38 +104,99 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   }
 
   const chooseShop = async (shopId: number) => {
-    const shop = shops.find((s) => s.shop_id === shopId)
-    await api.post('/api/integrations/etsy/shop', {
-      shop_id: shopId,
-      shop_name: shop?.shop_name ?? null,
-    })
-    setSelectedShop(shopId)
-    await onChange()
+    if (!shopId) return
+    setBusy(true)
+    setError(null)
+    try {
+      let name = shops.find((s) => s.shop_id === shopId)?.shop_name ?? null
+      if (!name) {
+        // Best effort: a name is nice to display but must not gate the choice.
+        const check = await api
+          .post<{ found: boolean; shop_name: string | null }>(
+            '/api/integrations/etsy/shop/lookup',
+            { shop_id: shopId },
+          )
+          .catch(() => null)
+        name = check?.shop_name ?? null
+      }
+      await api.post('/api/integrations/etsy/shop', {
+        shop_id: shopId,
+        shop_name: name,
+      })
+      setSelectedShop(shopId)
+      setShopName(name)
+      await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   if (status.connected) {
     return (
       <div className="space-y-3">
         <ConnectedHeader status={status} onDisconnect={disconnect} />
-        <Field label="Shop" hint="Receipts are polled from this shop.">
-          <select
-            className={inputClass}
-            value={selectedShop ?? ''}
-            onChange={(e) => chooseShop(Number(e.target.value))}
-          >
-            <option value="" disabled>
-              Select a shop…
-            </option>
-            {shops.map((shop) => (
-              <option key={shop.shop_id} value={shop.shop_id}>
-                {shop.shop_name} ({shop.shop_id})
+
+        {shops.length ? (
+          <Field label="Shop" hint="Receipts are polled from this shop.">
+            <select
+              className={inputClass}
+              value={selectedShop ?? ''}
+              onChange={(e) => chooseShop(Number(e.target.value))}
+            >
+              <option value="" disabled>
+                Select a shop…
               </option>
-            ))}
-          </select>
-        </Field>
-        {!selectedShop ? (
+              {shops.map((shop) => (
+                <option key={shop.shop_id} value={shop.shop_id}>
+                  {shop.shop_name} ({shop.shop_id})
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          <>
+            {listError ? (
+              <Alert tone="warning">
+                Etsy would not list your shops: {listError}
+                <span className="mt-1 block text-xs">
+                  Not a blocker — enter the shop ID below. It is the number in
+                  your shop’s URL in Etsy’s Shop Manager.
+                </span>
+              </Alert>
+            ) : null}
+            <Field
+              label="Shop ID"
+              hint="Find it in Shop Manager, or in any of your listing URLs."
+            >
+              <div className="flex gap-2">
+                <input
+                  className={inputClass}
+                  inputMode="numeric"
+                  placeholder="12345678"
+                  value={manualShop}
+                  onChange={(e) => setManualShop(e.target.value.replace(/\D/g, ''))}
+                />
+                <Button
+                  onClick={() => chooseShop(Number(manualShop))}
+                  disabled={!manualShop || busy}
+                >
+                  Use
+                </Button>
+              </div>
+            </Field>
+          </>
+        )}
+
+        {selectedShop ? (
+          <p className="text-sm text-ink-600">
+            Polling shop <span className="font-mono">{selectedShop}</span>
+            {shopName ? ` — ${shopName}` : ''}.
+          </p>
+        ) : (
           <Alert tone="warning">Pick a shop — polling stays idle until you do.</Alert>
-        ) : null}
+        )}
         {error ? <Alert tone="error">{error}</Alert> : null}
       </div>
     )

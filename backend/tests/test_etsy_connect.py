@@ -18,6 +18,21 @@ from app.services import credentials
 pytestmark = pytest.mark.asyncio
 
 
+def _patch_transport(monkeypatch, handler):
+    """Point the Etsy client's HTTP client at a canned response.
+
+    Always wraps the pristine factory: re-patching an already-patched
+    etsy_api.new_client would nest, and the innermost transport would win.
+    """
+    from app.integrations import base as base_module
+
+    def fake(**kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return base_module.new_client(**kwargs)
+
+    monkeypatch.setattr(etsy_api, "new_client", fake)
+
+
 class TestErrorMessagesCarryTheReason:
     async def test_body_is_included_so_the_reason_is_visible(self):
         exc = IntegrationError(
@@ -225,3 +240,169 @@ class TestRetryBehaviour:
                 await do_request(client, "GET", "/thing", provider="etsy", base_delay=0.01)
         assert attempts["n"] == 1
         assert "insufficient_scope" in str(excinfo.value)
+
+
+class TestSharedSecretHeaderFallback:
+    """Etsy answers some endpoints with:
+
+        {"error":"Shared secret is required in x-api-key header."}
+
+    It wants the app's shared secret in x-api-key rather than the keystring.
+    Take it at its word, retry, and remember which one worked.
+    """
+
+    async def test_the_error_is_recognised(self):
+        assert etsy_api.wants_shared_secret(
+            '{"error":"Shared secret is required in x-api-key header."}'
+        )
+
+    async def test_unrelated_errors_are_not(self):
+        assert not etsy_api.wants_shared_secret('{"error":"insufficient_scope"}')
+        assert not etsy_api.wants_shared_secret(None)
+
+    async def _connected(self, db):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "the-keystring",
+                "shared_secret": "the-shared-secret",
+                "access_token": "42.token",
+                "refresh_token": "r",
+                "expires_at": 9_999_999_999,
+            },
+        )
+        await db.commit()
+        return await etsy_api.client_for(db)
+
+    async def test_it_retries_with_the_shared_secret_and_succeeds(self, db, monkeypatch):
+        client = await self._connected(db)
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers["x-api-key"])
+            if request.headers["x-api-key"] == "the-keystring":
+                return httpx.Response(
+                    403, json={"error": "Shared secret is required in x-api-key header."}
+                )
+            return httpx.Response(200, json={"results": [{"shop_id": 7, "shop_name": "S"}]})
+
+        _patch_transport(monkeypatch, handler)
+        shops = await client.shops_for_user(42)
+        assert shops == [{"shop_id": 7, "shop_name": "S"}]
+        assert seen == ["the-keystring", "the-shared-secret"]
+
+    async def test_the_working_mode_is_remembered(self, db, monkeypatch):
+        client = await self._connected(db)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.headers["x-api-key"] == "the-keystring":
+                return httpx.Response(
+                    403, json={"error": "Shared secret is required in x-api-key header."}
+                )
+            return httpx.Response(200, json={"results": []})
+
+        _patch_transport(monkeypatch, handler)
+        await client.shops_for_user(42)
+
+        stored = await credentials.load(db, PROVIDER_ETSY)
+        assert stored[etsy_api.KEY_MODE_FIELD] == etsy_api.MODE_SHARED_SECRET
+
+        # A fresh client goes straight to the secret — no wasted 403.
+        seen: list[str] = []
+
+        def handler2(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers["x-api-key"])
+            return httpx.Response(200, json={"results": []})
+
+        _patch_transport(monkeypatch, handler2)
+        await (await etsy_api.client_for(db)).shops_for_user(42)
+        assert seen == ["the-shared-secret"]
+
+    async def test_other_403s_are_not_retried(self, db, monkeypatch):
+        client = await self._connected(db)
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(403, json={"error": "insufficient_scope"})
+
+        _patch_transport(monkeypatch, handler)
+        with pytest.raises(AuthExpiredError):
+            await client.shops_for_user(42)
+        assert calls["n"] == 1
+
+    async def test_a_failing_secret_is_not_retried_forever(self, db, monkeypatch):
+        client = await self._connected(db)
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                403, json={"error": "Shared secret is required in x-api-key header."}
+            )
+
+        _patch_transport(monkeypatch, handler)
+        with pytest.raises(AuthExpiredError):
+            await client.shops_for_user(42)
+        assert calls["n"] == 2  # keystring, then shared secret, then give up
+
+
+class TestShopSelectionNeverDeadEnds:
+    async def test_shop_listing_reports_errors_instead_of_failing(
+        self, signed_in, db, monkeypatch
+    ):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "shared_secret": "s",
+                "access_token": "42.token",
+                "refresh_token": "r",
+                "expires_at": 9_999_999_999,
+            },
+        )
+        await db.commit()
+
+        async def forbidden(self, path, params=None):
+            raise AuthExpiredError(
+                "etsy", "Authorisation was rejected", status_code=403, body='{"error":"nope"}'
+            )
+
+        monkeypatch.setattr(etsy_api.EtsyClient, "_get", forbidden)
+
+        response = await signed_in.get("/api/integrations/etsy/shops")
+        # 200 with an error field: the UI needs to render the manual entry path.
+        assert response.status_code == 200
+        body = response.json()
+        assert body["shops"] == []
+        assert "nope" in body["error"]
+
+    async def test_a_shop_id_can_be_set_by_hand(self, signed_in, db):
+        await credentials.save(
+            db, PROVIDER_ETSY, {"keystring": "k", "access_token": "42.t", "expires_at": 9e9}
+        )
+        await db.commit()
+        response = await signed_in.post(
+            "/api/integrations/etsy/shop", json={"shop_id": 12345678, "shop_name": None}
+        )
+        assert response.status_code == 200
+        stored = await credentials.load(db, PROVIDER_ETSY)
+        assert stored["shop_id"] == 12345678
+
+    async def test_lookup_failure_does_not_block_the_choice(self, signed_in, db, monkeypatch):
+        await credentials.save(
+            db, PROVIDER_ETSY, {"keystring": "k", "access_token": "42.t", "expires_at": 9e9}
+        )
+        await db.commit()
+
+        async def forbidden(self, path, params=None):
+            raise AuthExpiredError("etsy", "rejected", status_code=403, body="{}")
+
+        monkeypatch.setattr(etsy_api.EtsyClient, "_get", forbidden)
+        response = await signed_in.post(
+            "/api/integrations/etsy/shop/lookup", json={"shop_id": 12345678}
+        )
+        assert response.status_code == 200
+        assert response.json()["found"] is False

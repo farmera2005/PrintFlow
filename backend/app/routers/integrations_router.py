@@ -224,20 +224,68 @@ async def etsy_callback(
 async def etsy_shops(
     _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
 ) -> dict:
+    """List the account's shops.
+
+    Returns an `error` instead of failing the request: if Etsy will not list
+    shops, the operator still needs to be able to enter the shop id by hand
+    rather than being stuck at an empty dropdown.
+    """
     client = await _etsy_client(session)
     payload = client.payload
-    user_id = payload.get("user_id")
-    if not user_id:
-        me = await client.me()
-        user_id = me.get("user_id") or me.get("shop_id")
-        await credentials.merge(session, PROVIDER_ETSY, {"user_id": user_id})
-        await session.commit()
-    shops = await client.shops_for_user(user_id)
-    return {
-        "shops": [
-            {"shop_id": s.get("shop_id"), "shop_name": s.get("shop_name")} for s in shops
-        ],
+    result: dict[str, Any] = {
+        "shops": [],
         "selected_shop_id": payload.get("shop_id"),
+        "selected_shop_name": payload.get("shop_name"),
+        "error": None,
+    }
+
+    user_id = etsy_api.user_id_from_token(payload.get("access_token")) or payload.get(
+        "user_id"
+    )
+    try:
+        if not user_id:
+            me = await client.me()
+            user_id = me.get("user_id") or me.get("shop_id")
+        if user_id and payload.get("user_id") != user_id:
+            await credentials.merge(session, PROVIDER_ETSY, {"user_id": user_id})
+            await session.commit()
+        if not user_id:
+            result["error"] = "Could not determine your Etsy user id."
+            return result
+        shops = await client.shops_for_user(user_id)
+        result["shops"] = [
+            {"shop_id": s.get("shop_id"), "shop_name": s.get("shop_name")}
+            for s in shops
+            if s.get("shop_id")
+        ]
+        if not result["shops"]:
+            result["error"] = "Etsy returned no shops for this account."
+    except IntegrationError as exc:
+        await session.rollback()
+        result["error"] = str(exc)
+    return result
+
+
+class EtsyShopLookupRequest(BaseModel):
+    shop_id: int
+
+
+@router.post("/etsy/shop/lookup")
+async def etsy_shop_lookup(
+    body: EtsyShopLookupRequest,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Check a hand-entered shop id, without making it a prerequisite."""
+    client = await _etsy_client(session)
+    try:
+        shop = await client.get_shop(body.shop_id)
+    except IntegrationError as exc:
+        return {"found": False, "shop_name": None, "error": str(exc)}
+    return {
+        "found": True,
+        "shop_name": shop.get("shop_name"),
+        "error": None,
     }
 
 

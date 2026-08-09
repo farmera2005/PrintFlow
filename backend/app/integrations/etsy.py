@@ -7,6 +7,7 @@ what pushes tracking back to the buyer (§4.1, §4.4).
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import os
 import time
@@ -19,6 +20,8 @@ from ..models import PROVIDER_ETSY
 from ..services import credentials
 from .base import AuthExpiredError, IntegrationError, new_client, request
 
+log = logging.getLogger("printflow.etsy")
+
 CONNECT_URL = "https://www.etsy.com/oauth/connect"
 TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 API_BASE = "https://openapi.etsy.com/v3/application"
@@ -26,6 +29,23 @@ SCOPES = ("transactions_r", "shops_r")
 
 # Refresh a little before expiry so a poll never fails on a stale token.
 REFRESH_MARGIN_SECONDS = 300
+
+USER_AGENT = "PrintFlow/1.0 (order orchestration; +https://github.com/farmera2005/PrintFlow)"
+
+# Which credential goes in the x-api-key header. Etsy documents the keystring,
+# but answers some endpoints demanding the shared secret instead, so the working
+# choice is discovered once and remembered.
+KEY_MODE_FIELD = "x_api_key_mode"
+MODE_KEYSTRING = "keystring"
+MODE_SHARED_SECRET = "shared_secret"
+
+
+def wants_shared_secret(body: str | None) -> bool:
+    """True when Etsy's error is specifically asking for the shared secret."""
+    if not body:
+        return False
+    lowered = body.lower()
+    return "shared secret" in lowered and "x-api-key" in lowered
 
 
 def make_pkce_pair() -> tuple[str, str]:
@@ -149,20 +169,57 @@ class EtsyClient:
             },
         )
 
-    async def _headers(self) -> dict[str, str]:
+    def _api_key(self, mode: str | None = None) -> str:
+        mode = mode or self.payload.get(KEY_MODE_FIELD) or MODE_KEYSTRING
+        if mode == MODE_SHARED_SECRET:
+            return str(self.payload.get("shared_secret", ""))
+        return str(self.payload.get("keystring", ""))
+
+    async def _headers(self, mode: str | None = None) -> dict[str, str]:
         return {
-            "x-api-key": str(self.payload.get("keystring", "")),
+            "x-api-key": self._api_key(mode),
             "Authorization": f"Bearer {await self._access_token()}",
             "Accept": "application/json",
+            "User-Agent": USER_AGENT,
         }
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        headers = await self._headers()
+        try:
+            return await self._get_with(None, path, params)
+        except AuthExpiredError as exc:
+            # Etsy answers some endpoints with:
+            #   {"error":"Shared secret is required in x-api-key header."}
+            # It wants the app's shared secret there rather than the keystring.
+            # Which endpoints want which is not something we can know up front,
+            # so take Etsy at its word, retry, and remember what worked.
+            if not wants_shared_secret(exc.body) or not self.payload.get("shared_secret"):
+                raise
+            if self.payload.get(KEY_MODE_FIELD) == MODE_SHARED_SECRET:
+                raise  # already tried; the secret itself must be wrong
+            log.info("Etsy asked for the shared secret in x-api-key; retrying with it")
+            data = await self._get_with(MODE_SHARED_SECRET, path, params)
+            await self._remember_key_mode(MODE_SHARED_SECRET)
+            return data
+
+    async def _get_with(
+        self, mode: str | None, path: str, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        headers = await self._headers(mode)
         async with new_client(base_url=API_BASE) as client:
             response = await request(
                 client, "GET", path, provider=PROVIDER_ETSY, headers=headers, params=params
             )
         return response.json()
+
+    async def _remember_key_mode(self, mode: str) -> None:
+        """Persist which key Etsy accepted so later calls get it right first."""
+        if self.payload.get(KEY_MODE_FIELD) == mode:
+            return
+        self.payload[KEY_MODE_FIELD] = mode
+        try:
+            await credentials.merge(self.session, PROVIDER_ETSY, {KEY_MODE_FIELD: mode})
+        except Exception as exc:  # pragma: no cover - the call itself succeeded
+            log.warning("Could not persist the Etsy x-api-key mode: %s", exc)
 
     async def me(self) -> dict[str, Any]:
         return await self._get("/users/me")
