@@ -4,6 +4,26 @@ import { formatDateTime } from '../lib/format'
 import type { BambuddyPrinter, IntegrationStatus } from '../lib/types'
 import { Alert, Badge, Button, Field, inputClass } from './ui'
 
+interface Diagnosis {
+  summary: string
+  credentials: {
+    keystring: string
+    shared_secret: string
+    access_token: string
+    user_id: string | null
+    shop_id: number | null
+  }
+  attempts: {
+    endpoint: string
+    path: string
+    variant: string
+    status: number | null
+    body: string
+    ok: boolean
+  }[]
+  working: string[]
+}
+
 interface PanelProps {
   status: IntegrationStatus
   redirectUri?: string
@@ -72,6 +92,7 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(
     null,
   )
+  const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null)
   const disconnect = useDisconnect('etsy', onChange)
 
   useEffect(() => {
@@ -226,12 +247,69 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
           >
             {busy ? 'Testing…' : 'Test connection'}
           </Button>
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true)
+              setDiagnosis(null)
+              try {
+                setDiagnosis(await api.post<Diagnosis>('/api/integrations/etsy/diagnose'))
+              } catch (err) {
+                setError(errorMessage(err))
+              } finally {
+                setBusy(false)
+              }
+            }}
+          >
+            Diagnose 403s
+          </Button>
           <span className="text-xs text-ink-500">
-            Reads your receipt feed — the call order polling actually makes.
+            Test reads your receipt feed. Diagnose asks Etsy which header
+            combination it accepts.
           </span>
         </div>
         {testResult ? (
           <Alert tone={testResult.ok ? 'success' : 'error'}>{testResult.detail}</Alert>
+        ) : null}
+
+        {diagnosis ? (
+          <div className="space-y-2 rounded-md bg-ink-50 p-3">
+            <p className="text-sm font-medium text-ink-800">{diagnosis.summary}</p>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 text-xs text-ink-600">
+              <dt>keystring</dt>
+              <dd className="font-mono">{diagnosis.credentials.keystring}</dd>
+              <dt>shared secret</dt>
+              <dd className="font-mono">{diagnosis.credentials.shared_secret}</dd>
+              <dt>access token</dt>
+              <dd className="font-mono">{diagnosis.credentials.access_token}</dd>
+            </dl>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-ink-500">
+                  <tr>
+                    <th className="pr-3 font-medium">Endpoint</th>
+                    <th className="pr-3 font-medium">Headers</th>
+                    <th className="pr-3 font-medium">Status</th>
+                    <th className="font-medium">Etsy said</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {diagnosis.attempts.map((a, i) => (
+                    <tr key={i} className={a.ok ? 'text-emerald-700' : 'text-ink-600'}>
+                      <td className="pr-3 align-top">{a.endpoint}</td>
+                      <td className="pr-3 align-top">{a.variant}</td>
+                      <td className="pr-3 align-top font-mono">{a.status ?? '—'}</td>
+                      <td className="align-top break-all">{a.body}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-ink-500">
+              Credentials are shown truncated. Safe to copy this table.
+            </p>
+          </div>
         ) : null}
         {error ? <Alert tone="error">{error}</Alert> : null}
       </div>

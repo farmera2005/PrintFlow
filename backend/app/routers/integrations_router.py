@@ -301,6 +301,85 @@ async def etsy_test(
     }
 
 
+def _hint(value: str | None) -> str:
+    """Enough of a credential to identify it, not enough to use it."""
+    if not value:
+        return "(empty)"
+    if len(value) <= 8:
+        return f"{value[:2]}…({len(value)} chars)"
+    return f"{value[:4]}…{value[-4:]} ({len(value)} chars)"
+
+
+@router.post("/etsy/diagnose")
+async def etsy_diagnose(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Try each plausible header combination and report what Etsy answers.
+
+    Etsy's 403s here have been contradictory — one endpoint asking for the
+    shared secret in x-api-key, and the shared secret then being rejected as an
+    unknown API key. Rather than keep guessing, ask Etsy directly and show the
+    whole matrix.
+    """
+    client = await _etsy_client(session)
+    payload = client.payload
+    keystring = str(payload.get("keystring") or "")
+    secret = str(payload.get("shared_secret") or "")
+    user_id = etsy_api.user_id_from_token(payload.get("access_token")) or payload.get(
+        "user_id"
+    )
+
+    endpoints: list[tuple[str, str]] = []
+    if client.shop_id:
+        # The one that matters: order polling.
+        endpoints.append(("receipts", f"/shops/{client.shop_id}/receipts"))
+        endpoints.append(("shop", f"/shops/{client.shop_id}"))
+    if user_id:
+        endpoints.append(("shops list", f"/users/{user_id}/shops"))
+    endpoints.append(("me", "/users/me"))
+
+    variants: list[tuple[str, str | None, bool]] = [
+        ("keystring + bearer", keystring, True),
+        ("shared secret + bearer", secret, True),
+        ("keystring:secret + bearer", f"{keystring}:{secret}", True),
+        ("keystring, no bearer", keystring, False),
+    ]
+
+    attempts: list[dict[str, Any]] = []
+    for endpoint_label, path in endpoints:
+        for variant_label, api_key, with_bearer in variants:
+            result = await client.probe(path, api_key=api_key, with_bearer=with_bearer)
+            attempts.append(
+                {
+                    "endpoint": endpoint_label,
+                    "path": path,
+                    "variant": variant_label,
+                    "status": result["status"],
+                    "body": result["body"],
+                    "ok": result["status"] == 200,
+                }
+            )
+
+    working = [a for a in attempts if a["ok"]]
+    return {
+        "credentials": {
+            "keystring": _hint(keystring),
+            "shared_secret": _hint(secret),
+            "access_token": _hint(str(payload.get("access_token") or "")),
+            "user_id": user_id,
+            "shop_id": client.shop_id,
+        },
+        "attempts": attempts,
+        "working": [f"{a['endpoint']} — {a['variant']}" for a in working],
+        "summary": (
+            f"{len(working)} of {len(attempts)} combinations worked."
+            if working
+            else "Etsy rejected every combination. The credentials or the app "
+            "itself are the problem, not the header."
+        ),
+    }
+
+
 class EtsyShopLookupRequest(BaseModel):
     shop_id: int
 

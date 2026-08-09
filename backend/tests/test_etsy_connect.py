@@ -438,3 +438,76 @@ class TestConnectionTest:
 
         record = await credentials.get_record(db, PROVIDER_ETSY)
         assert "insufficient_scope" in record.last_error
+
+
+class TestDiagnostics:
+    """When Etsy's 403s contradict each other, ask Etsy rather than guess."""
+
+    async def _connected(self, db):
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "keystring-abcdefgh",
+                "shared_secret": "secret-12345678",
+                "access_token": "42.tokenvalue",
+                "refresh_token": "r",
+                "expires_at": 9_999_999_999,
+                "shop_id": 4242,
+            },
+        )
+        await db.commit()
+
+    async def test_it_tries_each_header_combination(self, signed_in, db, monkeypatch):
+        await self._connected(db)
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, request.headers.get("x-api-key", "")))
+            return httpx.Response(403, json={"error": "nope"})
+
+        _patch_transport(monkeypatch, handler)
+        body = (await signed_in.post("/api/integrations/etsy/diagnose")).json()
+
+        keys_tried = {key for _, key in seen}
+        assert "keystring-abcdefgh" in keys_tried
+        assert "secret-12345678" in keys_tried
+        assert "keystring-abcdefgh:secret-12345678" in keys_tried
+        # Receipts is the endpoint that matters, so it must be covered.
+        assert any("/receipts" in path for path, _ in seen)
+        assert "Etsy rejected every combination" in body["summary"]
+
+    async def test_a_working_combination_is_identified(self, signed_in, db, monkeypatch):
+        await self._connected(db)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.headers.get("x-api-key") == "keystring-abcdefgh:secret-12345678":
+                return httpx.Response(200, json={"results": []})
+            return httpx.Response(403, json={"error": "nope"})
+
+        _patch_transport(monkeypatch, handler)
+        body = (await signed_in.post("/api/integrations/etsy/diagnose")).json()
+        assert body["working"]
+        assert all("keystring:secret" in w for w in body["working"])
+        assert "combinations worked" in body["summary"]
+
+    async def test_credentials_are_only_ever_shown_truncated(self, signed_in, db, monkeypatch):
+        await self._connected(db)
+        _patch_transport(monkeypatch, lambda r: httpx.Response(403, json={"error": "x"}))
+        response = await signed_in.post("/api/integrations/etsy/diagnose")
+        text = response.text
+        assert "keystring-abcdefgh" not in text
+        assert "secret-12345678" not in text
+        creds = response.json()["credentials"]
+        assert creds["keystring"].startswith("keys")
+        assert "18 chars" in creds["keystring"]
+
+    async def test_errors_name_the_failing_endpoint(self, db, monkeypatch):
+        await self._connected(db)
+        client = await etsy_api.client_for(db)
+        _patch_transport(
+            monkeypatch, lambda r: httpx.Response(403, json={"error": "insufficient_scope"})
+        )
+        with pytest.raises(AuthExpiredError) as excinfo:
+            await client.shops_for_user(42)
+        assert "/users/42/shops" in str(excinfo.value)

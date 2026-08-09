@@ -212,10 +212,37 @@ class EtsyClient:
     ) -> dict[str, Any]:
         headers = await self._headers(mode)
         async with new_client(base_url=API_BASE) as client:
-            response = await request(
-                client, "GET", path, provider=PROVIDER_ETSY, headers=headers, params=params
-            )
+            try:
+                response = await request(
+                    client, "GET", path, provider=PROVIDER_ETSY, headers=headers, params=params
+                )
+            except IntegrationError as exc:
+                # Say which call failed. "Etsy rejected the credentials" is not
+                # actionable when several endpoints are in play and only some
+                # of them matter.
+                exc.args = (f"{exc.args[0] if exc.args else 'Request failed'} on {path}",)
+                raise
         return response.json()
+
+    async def probe(
+        self, path: str, *, api_key: str | None, with_bearer: bool = True
+    ) -> dict[str, Any]:
+        """Single raw request with explicit headers, for the diagnostics screen.
+
+        Never raises on an HTTP error: the point is to report exactly what Etsy
+        answered for each combination.
+        """
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+        if api_key is not None:
+            headers["x-api-key"] = api_key
+        if with_bearer:
+            headers["Authorization"] = f"Bearer {await self._access_token()}"
+        try:
+            async with new_client(base_url=API_BASE) as client:
+                response = await client.get(path, headers=headers, params={"limit": 1})
+        except Exception as exc:
+            return {"status": None, "body": f"{type(exc).__name__}: {exc}"}
+        return {"status": response.status_code, "body": response.text[:300]}
 
     async def me(self) -> dict[str, Any]:
         return await self._get("/users/me")
