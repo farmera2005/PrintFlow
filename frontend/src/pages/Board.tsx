@@ -12,14 +12,37 @@ import { Alert, Badge, EmptyState, Spinner, cx } from '../components/ui'
 
 const REFRESH_MS = 20_000
 
-function flatten(lines: OrderLine[]): OrderLine[] {
-  return lines.flatMap((line) => [line, ...flatten(line.children)])
+/** A component line, with the options the buyer chose for the item it came from.
+ *
+ * Options live on the ordered line — the bundle — while the card lists what
+ * actually gets made, which is its components. Carrying them down is what lets
+ * a card say "Red" next to the filament it is going to pull.
+ */
+interface Leaf {
+  line: OrderLine
+  options: OrderLine['variations']
+  /** Which ordered item this came from, so the options print once per item. */
+  group: string
+}
+
+function leaves(lines: OrderLine[], inherited: OrderLine['variations'] = [], group = ''): Leaf[] {
+  return lines.flatMap((line) => {
+    const options = line.variations?.length ? line.variations : inherited
+    const key = line.variations?.length ? line.id : group
+    if (line.children.length) return leaves(line.children, options, key)
+    return [{ line, options, group: key || line.id }]
+  })
+}
+
+function summariseOptions(options: OrderLine['variations']): string {
+  return options.map((option) => `${option.name}: ${option.value}`).join(' · ')
 }
 
 function OrderCard({ order, onOpen }: { order: Order; onOpen: () => void }) {
-  const leaves = flatten(order.lines).filter(
-    (line) => !line.is_bundle && line.state !== 'cancelled',
+  const rows = leaves(order.lines).filter(
+    (leaf) => !leaf.line.is_bundle && leaf.line.state !== 'cancelled',
   )
+  const visible = rows.slice(0, 4)
   const attention = order.summary.needs_attention
 
   return (
@@ -63,19 +86,31 @@ function OrderCard({ order, onOpen }: { order: Order; onOpen: () => void }) {
       </div>
 
       <ul className="mt-2 space-y-1">
-        {leaves.slice(0, 4).map((line) => (
-          <li key={line.id} className="flex items-center gap-1.5 text-xs">
-            <span className="shrink-0 text-ink-400">{line.quantity}×</span>
-            <span className="min-w-0 flex-1 truncate font-mono text-ink-700">
-              {line.sku ?? line.sku_raw ?? '—'}
-            </span>
-            <Badge className={LINE_STATE_CLASSES[line.state]}>
-              {LINE_STATE_LABELS[line.state]}
-            </Badge>
-          </li>
-        ))}
-        {leaves.length > 4 ? (
-          <li className="text-xs text-ink-400">+{leaves.length - 4} more</li>
+        {visible.map((leaf, index) => {
+          // Once per ordered item, above the components it turns into — the
+          // options describe the thing that was bought, not each part of it.
+          const heads = leaf.options.length && leaf.group !== visible[index - 1]?.group
+          return (
+            <li key={leaf.line.id}>
+              {heads ? (
+                <p className="truncate text-[11px] text-violet-700" title={summariseOptions(leaf.options)}>
+                  {summariseOptions(leaf.options)}
+                </p>
+              ) : null}
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="shrink-0 text-ink-400">{leaf.line.quantity}×</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-ink-700">
+                  {leaf.line.sku ?? leaf.line.sku_raw ?? '—'}
+                </span>
+                <Badge className={LINE_STATE_CLASSES[leaf.line.state]}>
+                  {LINE_STATE_LABELS[leaf.line.state]}
+                </Badge>
+              </div>
+            </li>
+          )
+        })}
+        {rows.length > 4 ? (
+          <li className="text-xs text-ink-400">+{rows.length - 4} more</li>
         ) : null}
       </ul>
 
