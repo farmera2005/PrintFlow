@@ -354,131 +354,143 @@ export default function OrderDrawer({
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-ink-900/40" onClick={onClose}>
+    <>
       <div
-        className="flex h-full w-full max-w-2xl flex-col bg-ink-50 shadow-xl"
-        onClick={(event) => event.stopPropagation()}
+        className="fixed inset-0 z-40 flex justify-end bg-ink-900/40"
+        // Only a click on the backdrop itself closes the drawer.
+        // Comparing target to currentTarget rather than stopping
+        // propagation on the panel: stopPropagation silences every
+        // descendant, which is what made clicking inside a dialog close
+        // the whole drawer.
+        onClick={(event) => {
+          if (event.target === event.currentTarget) onClose()
+        }}
       >
-        <header className="flex items-center gap-3 border-b border-ink-200 bg-white px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="font-mono text-base font-semibold text-ink-900">
-              #{order?.order_number ?? '…'}
-            </h2>
-            <p className="truncate text-sm text-ink-500">
-              {order?.buyer_name ?? ''}
-              {order ? ` · ${COLUMN_LABELS[order.status]}` : ''}
-            </p>
-          </div>
-          <Button variant="ghost" className="ml-auto" onClick={onClose}>
-            Close
-          </Button>
-        </header>
-
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
-          {error ? <Alert tone="error">{error}</Alert> : null}
-          {!order ? (
-            <div className="flex justify-center py-10">
-              <Spinner className="h-6 w-6" />
+        <div className="flex h-full w-full max-w-2xl flex-col bg-ink-50 shadow-xl">
+          <header className="flex items-center gap-3 border-b border-ink-200 bg-white px-4 py-3">
+            <div className="min-w-0">
+              <h2 className="font-mono text-base font-semibold text-ink-900">
+                #{order?.order_number ?? '…'}
+              </h2>
+              <p className="truncate text-sm text-ink-500">
+                {order?.buyer_name ?? ''}
+                {order ? ` · ${COLUMN_LABELS[order.status]}` : ''}
+              </p>
             </div>
-          ) : (
-            <>
-              <section>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
-                  Lines
-                </h3>
-                <ul className="space-y-1.5">
-                  {order.lines.map((line) => (
-                    <LineRow
-                      key={line.id}
-                      line={line}
-                      depth={0}
-                      bambuddyBase={order.bambuddy_base_url}
-                      onAction={handleAction}
-                    />
-                  ))}
-                </ul>
-              </section>
+            <Button variant="ghost" className="ml-auto" onClick={onClose}>
+              Close
+            </Button>
+          </header>
 
-              <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-                  Shipping
-                </h3>
-                {order.tracking_number ? (
-                  <div className="mt-2 space-y-1 text-sm">
-                    <p className="text-ink-800">
-                      Tracking <span className="font-mono">{order.tracking_number}</span>
-                    </p>
-                    <p className="text-xs text-ink-500">
-                      Label created {formatDateTime(order.label_created_at)} ·{' '}
-                      {order.carrier_code} / {order.service_code}
-                    </p>
-                    <p className="text-xs text-ink-500">
-                      ShipStation pushes this tracking number back to Etsy.
-                    </p>
-                    {order.has_label_pdf ? (
-                      <a
-                        className="inline-block pt-1 text-sm text-ink-700 underline"
-                        href={`/api/orders/${order.id}/label.pdf`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open label PDF
-                      </a>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-sm text-ink-600">
-                      {order.shipstation_order_id
-                        ? `Matched in ShipStation (order ${order.shipstation_order_id}).`
-                        : 'Not matched in ShipStation yet — its Etsy import can lag by up to an hour.'}
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {!order.shipstation_order_id ? (
-                        <Button size="sm" onClick={matchShipStation} disabled={matching}>
-                          {matching ? 'Checking…' : 'Check ShipStation now'}
-                        </Button>
-                      ) : null}
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        disabled={!order.shipstation_order_id}
-                        onClick={() => setLabelOpen(true)}
-                      >
-                        Create label
-                      </Button>
-                    </div>
-                    {order.status !== 'ready_to_ship' ? (
-                      <p className="text-xs text-ink-500">
-                        This order is not Ready to Ship yet. Labels cost money, so they are
-                        never bought automatically.
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+            {error ? <Alert tone="error">{error}</Alert> : null}
+            {!order ? (
+              <div className="flex justify-center py-10">
+                <Spinner className="h-6 w-6" />
+              </div>
+            ) : (
+              <>
+                <section>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
+                    Lines
+                  </h3>
+                  <ul className="space-y-1.5">
+                    {order.lines.map((line) => (
+                      <LineRow
+                        key={line.id}
+                        line={line}
+                        depth={0}
+                        bambuddyBase={order.bambuddy_base_url}
+                        onAction={handleAction}
+                      />
+                    ))}
+                  </ul>
+                </section>
+
+                <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+                    Shipping
+                  </h3>
+                  {order.tracking_number ? (
+                    <div className="mt-2 space-y-1 text-sm">
+                      <p className="text-ink-800">
+                        Tracking <span className="font-mono">{order.tracking_number}</span>
                       </p>
-                    ) : null}
-                  </div>
-                )}
-              </section>
+                      <p className="text-xs text-ink-500">
+                        Label created {formatDateTime(order.label_created_at)} ·{' '}
+                        {order.carrier_code} / {order.service_code}
+                      </p>
+                      <p className="text-xs text-ink-500">
+                        ShipStation pushes this tracking number back to Etsy.
+                      </p>
+                      {order.has_label_pdf ? (
+                        <a
+                          className="inline-block pt-1 text-sm text-ink-700 underline"
+                          href={`/api/orders/${order.id}/label.pdf`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open label PDF
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      <p className="text-sm text-ink-600">
+                        {order.shipstation_order_id
+                          ? `Matched in ShipStation (order ${order.shipstation_order_id}).`
+                          : 'Not matched in ShipStation yet — its Etsy import can lag by up to an hour.'}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {!order.shipstation_order_id ? (
+                          <Button size="sm" onClick={matchShipStation} disabled={matching}>
+                            {matching ? 'Checking…' : 'Check ShipStation now'}
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          disabled={!order.shipstation_order_id}
+                          onClick={() => setLabelOpen(true)}
+                        >
+                          Create label
+                        </Button>
+                      </div>
+                      {order.status !== 'ready_to_ship' ? (
+                        <p className="text-xs text-ink-500">
+                          This order is not Ready to Ship yet. Labels cost money, so they are
+                          never bought automatically.
+                        </p>
+                      ) : null}
+                    </div>
+                  )}
+                </section>
 
-              <section className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => apply(api.post(`/api/orders/${orderId}/reprocess`))}
-                >
-                  Re-run intake
-                </Button>
-                <a
-                  className="inline-flex items-center rounded-md px-2.5 py-1 text-xs text-ink-600 underline"
-                  href={`/api/orders/${order.id}/raw`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  View raw Etsy payload
-                </a>
-              </section>
-            </>
-          )}
+                <section className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => apply(api.post(`/api/orders/${orderId}/reprocess`))}
+                  >
+                    Re-run intake
+                  </Button>
+                  <a
+                    className="inline-flex items-center rounded-md px-2.5 py-1 text-xs text-ink-600 underline"
+                    href={`/api/orders/${order.id}/raw`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View raw Etsy payload
+                  </a>
+                </section>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
+      {/* Siblings of the backdrop, not children of it. A dialog nested
+          inside a surface that closes on click is one stray bubbling
+          event away from closing the thing it sits on. */}
       <ProductPicker
         open={pickerLine !== null}
         skuHint={pickerLine?.sku_raw ?? null}
@@ -506,6 +518,6 @@ export default function OrderDrawer({
           }}
         />
       ) : null}
-    </div>
+    </>
   )
 }
