@@ -73,6 +73,10 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             # "Color: Red" without opening Etsy.
             "variations": line.variations or [],
             "option_effects": line.option_effects or [],
+            # The listing this came from, so an unmatched line can offer to
+            # remember the link — a listing with no SKU has nothing else.
+            "etsy_listing_id": line.etsy_listing_id,
+            "etsy_product_id": line.etsy_product_id,
             "assembled_at": line.assembled_at,
             "is_bundle": bool(kids),
             "print_jobs": [_job(job) for job in sorted(line.print_jobs, key=lambda j: j.created_at)],

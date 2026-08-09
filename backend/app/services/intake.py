@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from ..models import (
     BomOptionRule,
+    EtsyProductLink,
     LINE_EXPLODED,
     LINE_NEW,
     LINE_UNMATCHED,
@@ -132,6 +133,121 @@ async def match_product(session: AsyncSession, sku: str | None) -> Product | Non
     ).scalar_one_or_none()
 
 
+async def match_by_etsy_ids(
+    session: AsyncSession, listing_id: int | None, etsy_product_id: int | None
+) -> tuple[Product | None, str | None]:
+    """Match on the listing itself, for listings that carry no SKU.
+
+    Most specific first: a link to this exact variant beats one covering the
+    whole listing. Returns (product, how) so the line can say what it matched
+    on — "matched by SKU" and "matched because you linked this listing" are
+    different claims and the operator should be able to tell them apart.
+    """
+    if not listing_id:
+        return None, None
+
+    if etsy_product_id:
+        link = (
+            await session.execute(
+                select(EtsyProductLink).where(
+                    EtsyProductLink.etsy_listing_id == listing_id,
+                    EtsyProductLink.etsy_product_id == etsy_product_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if link is not None:
+            product = await session.get(Product, link.product_id)
+            if product is not None:
+                return product, "etsy_variant"
+
+    link = (
+        await session.execute(
+            select(EtsyProductLink).where(
+                EtsyProductLink.etsy_listing_id == listing_id,
+                EtsyProductLink.etsy_product_id.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if link is not None:
+        product = await session.get(Product, link.product_id)
+        if product is not None:
+            return product, "etsy_listing"
+    return None, None
+
+
+LINK_SCOPE_LISTING = "listing"
+LINK_SCOPE_VARIANT = "variant"
+
+
+async def remember_etsy_link(
+    session: AsyncSession, line: OrderLine, product: Product, scope: str
+) -> EtsyProductLink | None:
+    """Record "this Etsy listing is this product" so the next order matches itself.
+
+    Returns None when the line has no listing id to hang the link on — a manual
+    order, or a receipt from before listing ids were captured.
+    """
+    listing_id = line.etsy_listing_id
+    if not listing_id:
+        return None
+
+    # A variant-scoped link needs a variant to pin to. Without one the only
+    # honest thing to record is the listing.
+    variant = line.etsy_product_id if scope == LINK_SCOPE_VARIANT else None
+
+    stmt = select(EtsyProductLink).where(EtsyProductLink.etsy_listing_id == listing_id)
+    stmt = (
+        stmt.where(EtsyProductLink.etsy_product_id == variant)
+        if variant is not None
+        else stmt.where(EtsyProductLink.etsy_product_id.is_(None))
+    )
+    link = (await session.execute(stmt)).scalar_one_or_none()
+    if link is None:
+        link = EtsyProductLink(
+            product_id=product.id,
+            etsy_listing_id=listing_id,
+            etsy_product_id=variant,
+            listing_title=line.title,
+        )
+        session.add(link)
+    else:
+        # Re-linking is how an operator corrects a wrong link, so the newest
+        # answer wins rather than raising a duplicate.
+        link.product_id = product.id
+        link.listing_title = line.title or link.listing_title
+    await session.flush()
+    return link
+
+
+async def apply_etsy_link(session: AsyncSession, link: EtsyProductLink) -> int:
+    """Re-resolve unmatched lines the new link now covers. Returns how many moved.
+
+    One listing usually sells more than once before anyone notices it never
+    matched, so linking it should clear the backlog, not just the line the
+    operator happened to be looking at.
+    """
+    stmt = select(OrderLine).where(
+        OrderLine.state == LINE_UNMATCHED,
+        OrderLine.etsy_listing_id == link.etsy_listing_id,
+    )
+    if link.etsy_product_id is not None:
+        stmt = stmt.where(OrderLine.etsy_product_id == link.etsy_product_id)
+    lines = (await session.execute(stmt)).scalars().all()
+
+    fixed = 0
+    for line in lines:
+        produced = await _resolve_line(session, line)
+        if not produced:
+            continue
+        fixed += 1
+        await allocation.decide_lines(session, produced)
+        await printing.plan_jobs(session, produced)
+        order = await session.get(Order, line.order_id)
+        if order is not None:
+            await recompute_order(session, order)
+    return fixed
+
+
 async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tuple[Order, bool]:
     """Upsert an Etsy receipt. Returns (order, created). Idempotent (§6)."""
     receipt_id = receipt.get("receipt_id")
@@ -180,6 +296,7 @@ async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tupl
             title=transaction.get("title"),
             quantity=max(1, quantity),
             etsy_listing_id=_as_int(transaction.get("listing_id")),
+            etsy_product_id=_as_int(transaction.get("product_id")),
             etsy_transaction_id=_as_int(transaction.get("transaction_id")),
             variations=extract_variations(transaction),
             state=LINE_NEW,
@@ -226,14 +343,27 @@ async def backfill_variations(session: AsyncSession, order: Order) -> int:
     )
     filled = 0
     for line in lines:
-        if line.variations:
+        if line.variations and line.etsy_product_id is not None:
             continue
         transaction = transactions.get(line.etsy_transaction_id)
         if not transaction:
             continue
-        found = extract_variations(transaction)
-        if found:
-            line.variations = found
+        # Each field is filled in only if it is actually missing. Assigning a
+        # value it already holds would count as a change, and every open order
+        # would then be re-processed on every poll — a listing that sends no
+        # product_id would never stop looking new.
+        changed = False
+        if not line.variations:
+            found = extract_variations(transaction)
+            if found:
+                line.variations = found
+                changed = True
+        if line.etsy_product_id is None:
+            variant = _as_int(transaction.get("product_id"))
+            if variant is not None:
+                line.etsy_product_id = variant
+                changed = True
+        if changed:
             filled += 1
     if filled:
         await session.flush()
@@ -273,6 +403,12 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
     """
     if line.product_id is None:
         product = await match_product(session, line.sku_raw)
+        if product is None:
+            # No SKU, or a SKU nobody has a product for. Etsy does not require
+            # one, so fall back to the listing the order came from.
+            product, _how = await match_by_etsy_ids(
+                session, line.etsy_listing_id, line.etsy_product_id
+            )
         if product is None:
             line.state = LINE_UNMATCHED
             await session.flush()

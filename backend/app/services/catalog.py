@@ -8,6 +8,8 @@ comparison can be made up front, while there is time to fix it.
 The reconciliation is deliberately three-sided:
 
 * **matched** — Etsy sells it, PrintFlow can make it.
+* **linked** — no SKU on Etsy, but the listing has been pointed at a product by
+  hand. It matches; it just does not match on a SKU.
 * **missing** — Etsy sells it, PrintFlow has never heard of it. These are the
   orders that will stall.
 * **unused** — PrintFlow has a product no live listing sells under that SKU.
@@ -25,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..integrations import etsy as etsy_api
 from ..integrations.base import IntegrationError
-from ..models import Product
+from ..models import EtsyProductLink, Product
 
 log = logging.getLogger("printflow.catalog")
 
@@ -93,10 +95,24 @@ async def reconcile(
     """Line up every SKU Etsy sells against the product table."""
     products = (await session.execute(select(Product))).scalars().all()
     by_sku = {normalize_sku(p.sku): p for p in products}
+    by_id = {product.id: product for product in products}
     seen_skus: set[str] = set()
+
+    # The other way a listing reaches a product: named by hand, for listings
+    # that carry no SKU at all.
+    links = (await session.execute(select(EtsyProductLink))).scalars().all()
+    by_variant = {
+        (link.etsy_listing_id, link.etsy_product_id): link
+        for link in links
+        if link.etsy_product_id is not None
+    }
+    by_listing = {
+        link.etsy_listing_id: link for link in links if link.etsy_product_id is None
+    }
 
     rows: list[dict[str, Any]] = []
     for listing in listings:
+        listing_id = listing.get("listing_id")
         inventory = etsy_api.listing_inventory_of(listing)
         variants = etsy_api.listing_variants(listing, inventory)
         options = etsy_api.listing_options(variants)
@@ -105,9 +121,21 @@ async def reconcile(
             product = by_sku.get(key) if key else None
             if key:
                 seen_skus.add(key)
+
+            linked = False
+            if product is None and listing_id is not None:
+                # Same order of preference intake uses: the exact variant first,
+                # then the listing as a whole.
+                link = by_variant.get(
+                    (listing_id, variant.get("product_id"))
+                ) or by_listing.get(listing_id)
+                if link is not None:
+                    product = by_id.get(link.product_id)
+                    linked = product is not None
+
             rows.append(
                 {
-                    "listing_id": listing.get("listing_id"),
+                    "listing_id": listing_id,
                     "title": listing.get("title"),
                     "state": listing.get("state"),
                     "url": listing.get("url"),
@@ -119,7 +147,7 @@ async def reconcile(
                     "product_name": product.name if product else None,
                     "fulfillment": product.fulfillment if product else None,
                     "qbo_item_id": product.qbo_item_id if product else None,
-                    "status": _status(variant.get("sku"), product),
+                    "status": _status(variant.get("sku"), product, linked),
                 }
             )
 
@@ -139,6 +167,7 @@ async def reconcile(
         "listings": len({row["listing_id"] for row in rows if row["listing_id"]}),
         "variants": len(rows),
         "matched": sum(1 for row in rows if row["status"] == "matched"),
+        "linked": sum(1 for row in rows if row["status"] == "linked"),
         "missing": sum(1 for row in rows if row["status"] == "missing"),
         "no_sku": sum(1 for row in rows if row["status"] == "no_sku"),
         "unused_products": len(unused),
@@ -146,9 +175,14 @@ async def reconcile(
     return {"rows": rows, "unused_products": unused, "counts": counts}
 
 
-def _status(sku: str | None, product: Product | None) -> str:
+def _status(sku: str | None, product: Product | None, linked: bool) -> str:
+    if linked:
+        # Reached through an Etsy link rather than a SKU. Worth saying so: the
+        # link is a local decision, and if the listing is ever given a real SKU
+        # the SKU takes over.
+        return "linked"
     if not (sku or "").strip():
-        # An Etsy listing with no SKU cannot be matched at all: intake has
-        # nothing to look up, and the order will land unmatched.
+        # No SKU and no link: intake has nothing to look up, and the order will
+        # land unmatched.
         return "no_sku"
     return "matched" if product else "missing"

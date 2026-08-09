@@ -20,6 +20,7 @@ import {
   Field,
   Modal,
   Spinner,
+  cx,
   inputClass,
 } from '../components/ui'
 
@@ -134,7 +135,11 @@ export default function Products() {
       </div>
 
       {checking ? (
-        <CatalogCheck onClose={() => setChecking(false)} onChanged={load} />
+        <CatalogCheck
+          allProducts={products ?? []}
+          onClose={() => setChecking(false)}
+          onChanged={load}
+        />
       ) : null}
 
       {editing ? (
@@ -325,6 +330,8 @@ function ProductEditor({
             onOpenPicker={() => setArchivePickerOpen(true)}
           />
         ) : null}
+
+        {product ? <EtsyLinksEditor product={product} onSaved={onSaved} /> : null}
 
         {!product ? (
           <Alert tone="info">
@@ -1028,11 +1035,142 @@ function OptionRulesEditor({
   )
 }
 
+/** Etsy listings that resolve to this product without a SKU.
+ *
+ * Etsy does not require sellers to set a SKU, and a listing without one has
+ * nothing for intake to match on. Naming the listing here is the substitute.
+ */
+function EtsyLinksEditor({
+  product,
+  onSaved,
+}: {
+  product: Product
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const [listingId, setListingId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const add = async () => {
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<Product & { also_fixed?: number }>(
+        `/api/products/${product.id}/etsy-links`,
+        { etsy_listing_id: Number(listingId) },
+      )
+      await onSaved(saved)
+      setListingId('')
+      const fixed = saved.also_fixed ?? 0
+      if (fixed > 0) {
+        setNotice(
+          `${fixed} order line${fixed === 1 ? '' : 's'} that were waiting on this ` +
+            'listing now match.',
+        )
+      }
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (linkId: string) => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      await onSaved(
+        await api.del<Product>(`/api/products/${product.id}/etsy-links/${linkId}`),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-ink-200 p-3">
+      <div>
+        <h3 className="text-sm font-semibold text-ink-800">Etsy listings</h3>
+        <p className="text-xs text-ink-500">
+          For listings with no SKU. The listing id is the number at the end of its
+          Etsy URL. Links are also created from the order drawer when you match a
+          line and tick “remember this listing”.
+        </p>
+      </div>
+
+      {product.etsy_links.length === 0 ? (
+        <p className="text-sm text-ink-500">
+          No listings linked — orders reach this product by SKU.
+        </p>
+      ) : (
+        <ul className="space-y-1 text-sm">
+          {product.etsy_links.map((link) => (
+            <li
+              key={link.id}
+              className="flex flex-wrap items-center gap-2 border-b border-ink-100 pb-1"
+            >
+              <a
+                className="font-mono text-ink-800 underline"
+                href={`https://www.etsy.com/listing/${link.etsy_listing_id}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {link.etsy_listing_id}
+              </a>
+              {link.etsy_product_id ? (
+                <span className="text-ink-600">
+                  variation {link.etsy_product_id} only
+                </span>
+              ) : null}
+              <span className="min-w-0 flex-1 truncate text-ink-500">
+                {link.listing_title ?? ''}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => remove(link.id)}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {notice ? <Alert tone="success">{notice}</Alert> : null}
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-40 flex-1">
+          <Field label="Listing id">
+            <input
+              className={inputClass}
+              inputMode="numeric"
+              placeholder="1895497697"
+              value={listingId}
+              onChange={(e) => setListingId(e.target.value.replace(/\D/g, ''))}
+            />
+          </Field>
+        </div>
+        <Button onClick={add} disabled={busy || !listingId}>
+          {busy ? 'Linking…' : 'Link listing'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 const CATALOG_STATUS: Record<
   CatalogRow['status'],
   { label: string; className: string }
 > = {
   matched: { label: 'matched', className: 'bg-emerald-100 text-emerald-800 ring-emerald-300' },
+  linked: { label: 'linked listing', className: 'bg-sky-100 text-sky-800 ring-sky-300' },
   missing: { label: 'no product', className: 'bg-red-100 text-red-800 ring-red-300' },
   no_sku: { label: 'no SKU on Etsy', className: 'bg-amber-100 text-amber-800 ring-amber-300' },
 }
@@ -1044,9 +1182,11 @@ const CATALOG_STATUS: Record<
  * is still time to fix it.
  */
 function CatalogCheck({
+  allProducts,
   onClose,
   onChanged,
 }: {
+  allProducts: Product[]
   onClose: () => void
   onChanged: () => void | Promise<void>
 }) {
@@ -1091,8 +1231,27 @@ function CatalogCheck({
     }
   }
 
+  /** Point a SKU-less listing at an existing product, so its orders match. */
+  const link = async (row: CatalogRow, productId: string) => {
+    if (!row.listing_id || !productId) return
+    setBusy(String(row.listing_id))
+    setError(null)
+    try {
+      await api.post<Product>(`/api/products/${productId}/etsy-links`, {
+        etsy_listing_id: row.listing_id,
+        listing_title: row.title,
+      })
+      await onChanged()
+      await load()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const rows = (catalog?.rows ?? []).filter(
-    (row) => filter === 'all' || row.status !== 'matched',
+    (row) => filter === 'all' || !(row.status === 'matched' || row.status === 'linked'),
   )
 
   return (
@@ -1128,6 +1287,11 @@ function CatalogCheck({
               <Badge className={CATALOG_STATUS.matched.className}>
                 {catalog.counts.matched ?? 0} matched
               </Badge>
+              {catalog.counts.linked ? (
+                <Badge className={CATALOG_STATUS.linked.className}>
+                  {catalog.counts.linked} by linked listing
+                </Badge>
+              ) : null}
               {catalog.counts.missing ? (
                 <Badge className={CATALOG_STATUS.missing.className}>
                   {catalog.counts.missing} with no product
@@ -1164,8 +1328,8 @@ function CatalogCheck({
 
             {rows.length === 0 ? (
               <Alert tone="success">
-                Every SKU Etsy sells has a product here. Orders will match on
-                arrival.
+                Every listing Etsy sells reaches a product here, by SKU or by a
+                linked listing. Orders will match on arrival.
               </Alert>
             ) : (
               <div className="overflow-x-auto">
@@ -1222,10 +1386,23 @@ function CatalogCheck({
                                 Create stocked
                               </Button>
                             </div>
-                          ) : row.status === 'no_sku' ? (
-                            <span className="text-xs text-ink-500">
-                              Add a SKU in Etsy — orders cannot match without one
-                            </span>
+                          ) : row.status === 'no_sku' && row.listing_id ? (
+                            // Etsy does not require a SKU, so "go add one" is
+                            // advice, not a fix. Naming the product here makes
+                            // the listing match as it stands.
+                            <select
+                              className={cx(inputClass, 'text-xs')}
+                              value=""
+                              disabled={busy === String(row.listing_id)}
+                              onChange={(e) => link(row, e.target.value)}
+                            >
+                              <option value="">Link to a product…</option>
+                              {allProducts.map((product) => (
+                                <option key={product.id} value={product.id}>
+                                  {product.sku} — {product.name}
+                                </option>
+                              ))}
+                            </select>
                           ) : null}
                         </td>
                       </tr>

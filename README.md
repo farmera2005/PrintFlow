@@ -17,7 +17,9 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 ## The workflow
 
 1. An order arrives from Etsy and is polled in.
-2. Line items are matched to products by SKU (case-insensitive, trimmed).
+2. Line items are matched to products by SKU (case-insensitive, trimmed), and
+   failing that by the Etsy listing they came from (see
+   [Listings with no SKU](#listings-with-no-sku)).
 3. Bundle SKUs explode into component SKUs using the BOM table, adjusted by
    whatever options the buyer picked on Etsy (see below).
 4. For each component, QuickBooks quantity on hand decides print-or-pull:
@@ -41,13 +43,15 @@ SKU Etsy sells up against the product table, before any order depends on it.
 Intake already reports an unmatched SKU, but only once a real order has arrived
 and stalled on it; this is the same comparison made while there is still time.
 
-Three answers, and all three are worth seeing:
+Four answers, and all four are worth seeing:
 
 * **matched** — Etsy sells it, PrintFlow can make it.
+* **linked listing** — no SKU on Etsy, but the listing has been pointed at a
+  product by hand. It matches; it just does not match on a SKU.
 * **no product** — an order for this will stall on arrival. Create the product
   from the row, printed or stocked, without leaving the screen.
-* **no SKU on Etsy** — the listing has no SKU at all, so nothing can match it.
-  That one has to be fixed in Etsy.
+* **no SKU on Etsy** — the listing has no SKU and no link, so nothing can match
+  it. Pick a product from the row's dropdown to link it.
 
 Products no live listing sells are listed separately. Usually those are bundle
 components, which is expected — a finished good sitting there is worth a look.
@@ -62,6 +66,39 @@ granted. Order polling is unaffected and keeps working; only this screen needs
 it. If yours predates it, the screen says so and asks you to reconnect Etsy from
 **Settings → Etsy** — the authorisation page now requests listing access along
 with orders.
+
+## Listings with no SKU
+
+Etsy does not require a seller to fill in a SKU, and plenty of shops never have.
+A receipt for such a listing carries no SKU at all, so there is nothing for
+intake to look up and the line lands **unmatched** — every time, forever.
+
+So PrintFlow matches on what Etsy always sends instead: the **listing id**, and
+the **product id** of the exact variation the buyer bought. The order of
+preference is:
+
+1. the SKU, if the receipt has one;
+2. a link to that exact variation;
+3. a link to the listing as a whole.
+
+The SKU comes first deliberately. A link is a local decision about one listing,
+and if the seller later fills the SKU in, the SKU takes over on its own — nobody
+has to remember to remove the link.
+
+Links are made in two places:
+
+* **From an order.** Match the line as usual and tick *"Remember this
+  listing"*. Every other line already waiting on the same listing matches at the
+  same time, and the drawer says how many.
+* **From a product.** **Products → (a product) → Etsy listings**, or straight
+  from a *no SKU on Etsy* row in **Check against Etsy**.
+
+Prefer the whole listing over a single variation. Etsy issues a **new product id
+for a variation whenever the seller edits the listing's options**, so a
+variation-scoped link quietly stops matching after the next edit. Differences
+between variations belong in
+[option rules](#etsy-options-that-change-the-bom), which match on the option
+values themselves and survive an edit.
 
 ## Etsy options that change the BOM
 

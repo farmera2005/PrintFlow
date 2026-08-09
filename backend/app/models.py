@@ -206,6 +206,9 @@ class Product(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    etsy_links: Mapped[list[EtsyProductLink]] = relationship(
+        back_populates="product", cascade="all, delete-orphan", lazy="selectin"
+    )
 
 
 class BomLine(Base):
@@ -234,6 +237,61 @@ class BomLine(Base):
         back_populates="bom_lines", foreign_keys=[bundle_id]
     )
     component: Mapped[Product] = relationship(foreign_keys=[component_id], lazy="selectin")
+
+
+class EtsyProductLink(Base):
+    """An Etsy listing (or one variant of it) that means a given product.
+
+    SKU matching only works when the seller put a SKU on the listing, and
+    plenty of listings have none — Etsy does not require one. Those orders
+    arrive with nothing to match on and stall as unmatched forever, which is no
+    good when the shop plainly knows what the listing is.
+
+    A link records that identity so the next order matches by itself:
+
+    * `etsy_product_id` set — this exact variant of the listing.
+    * `etsy_product_id` null — the whole listing, whatever the buyer picked.
+      Usually the right one: options change the BOM through a rule, not the
+      product, and Etsy regenerates product ids whenever the seller edits the
+      listing's variations, so a listing id outlives a product id.
+    """
+
+    __tablename__ = "etsy_product_links"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    etsy_listing_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    etsy_product_id: Mapped[int | None] = mapped_column(BigInteger)
+    # What the listing was called when the link was made, so the Products screen
+    # can show something a human recognises rather than a bare number.
+    listing_title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        # One Etsy identity points at one product. Two partial indexes rather
+        # than a single constraint, because a plain unique over both columns
+        # would let a listing-wide link be added twice: NULLs never collide.
+        Index(
+            "uq_etsy_link_variant",
+            "etsy_listing_id",
+            "etsy_product_id",
+            unique=True,
+            postgresql_where=text("etsy_product_id is not null"),
+            sqlite_where=text("etsy_product_id is not null"),
+        ),
+        Index(
+            "uq_etsy_link_listing",
+            "etsy_listing_id",
+            unique=True,
+            postgresql_where=text("etsy_product_id is null"),
+            sqlite_where=text("etsy_product_id is null"),
+        ),
+    )
+
+    product: Mapped[Product] = relationship(back_populates="etsy_links")
 
 
 class BomOptionRule(Base):
@@ -382,6 +440,10 @@ class OrderLine(Base):
         ForeignKey("products.id", ondelete="RESTRICT"), index=True
     )
     etsy_listing_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Etsy's inventory product: the exact variant the buyer bought. Kept so a
+    # listing with no SKU can still be matched, and so a link can be narrowed
+    # to one variant.
+    etsy_product_id: Mapped[int | None] = mapped_column(BigInteger)
     etsy_transaction_id: Mapped[int | None] = mapped_column(BigInteger)
     sku_raw: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)

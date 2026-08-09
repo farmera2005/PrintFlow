@@ -53,6 +53,8 @@ export interface OrderLine {
   stock_note: string | null
   variations: { name: string; value: string; free_text?: boolean }[]
   option_effects: string[]
+  etsy_listing_id: number | null
+  etsy_product_id: number | null
   assembled_at: string | null
   is_bundle: boolean
   print_jobs: PrintJob[]
@@ -142,7 +144,7 @@ export interface CatalogRow {
   product_name: string | null
   fulfillment: Fulfillment | null
   qbo_item_id: string | null
-  status: 'matched' | 'missing' | 'no_sku'
+  status: 'matched' | 'linked' | 'missing' | 'no_sku'
 }
 
 export interface Catalog {
@@ -178,6 +180,15 @@ export interface Product {
   print_mapping: PrintMapping | null
   bom: BomEntry[]
   option_rules: OptionRule[]
+  etsy_links: EtsyLink[]
+}
+
+/** An Etsy listing that resolves to this product without going through a SKU. */
+export interface EtsyLink {
+  id: string
+  etsy_listing_id: number
+  etsy_product_id: number | null
+  listing_title: string | null
 }
 
 export interface QboItem {

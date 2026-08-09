@@ -11,20 +11,42 @@ import type { Order, OrderLine, Product } from '../lib/types'
 import LabelDialog from './LabelDialog'
 import { Alert, Badge, Button, Modal, Spinner, cx, inputClass } from './ui'
 
+/** What to remember about the Etsy listing when a product is picked. */
+export interface RememberChoice {
+  remember: boolean
+  remember_scope: 'listing' | 'variant'
+}
+
 function ProductPicker({
   open,
   onClose,
   onPick,
-  skuHint,
+  line,
 }: {
   open: boolean
   onClose: () => void
-  onPick: (product: Product) => void
-  skuHint: string | null
+  onPick: (product: Product, remember: RememberChoice) => void
+  line: OrderLine | null
 }) {
+  const skuHint = line?.sku_raw ?? null
+  const listingId = line?.etsy_listing_id ?? null
+  const variantId = line?.etsy_product_id ?? null
+
   const [query, setQuery] = useState(skuHint ?? '')
   const [products, setProducts] = useState<Product[]>([])
   const [busy, setBusy] = useState(false)
+  // A listing with no SKU has nothing else to match on, so remembering is the
+  // only way it ever matches by itself — default it on. When Etsy did send a
+  // SKU, the SKU is the better key and the operator has to opt in.
+  const [remember, setRemember] = useState(false)
+  const [scope, setScope] = useState<'listing' | 'variant'>('listing')
+
+  useEffect(() => {
+    if (!open) return
+    setQuery(skuHint ?? '')
+    setRemember(Boolean(listingId) && !skuHint)
+    setScope('listing')
+  }, [open, skuHint, listingId])
 
   useEffect(() => {
     if (!open) return
@@ -37,16 +59,63 @@ function ProductPicker({
 
   return (
     <Modal open={open} title="Link a product to this line" onClose={onClose}>
-      <p className="mb-3 text-sm text-ink-600">
-        Etsy sent SKU <code className="font-mono">{skuHint ?? '(none)'}</code>. Pick the
-        product it should map to — intake re-runs for this line immediately.
-      </p>
+      {skuHint ? (
+        <p className="mb-3 text-sm text-ink-600">
+          Etsy sent SKU <code className="font-mono">{skuHint}</code>. Pick the product it
+          should map to — intake re-runs for this line immediately.
+        </p>
+      ) : (
+        <p className="mb-3 text-sm text-ink-600">
+          Etsy sent no SKU for this line
+          {listingId ? (
+            <>
+              , only listing <code className="font-mono">{listingId}</code>
+            </>
+          ) : null}
+          . Pick the product it should map to — intake re-runs for this line immediately.
+        </p>
+      )}
       <input
         className={inputClass}
         placeholder="Search by SKU or name…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
+
+      {listingId ? (
+        <div className="mt-3 rounded-md bg-ink-100 p-2.5">
+          <label className="flex items-start gap-2 text-sm text-ink-700">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+            />
+            <span>
+              Remember this listing, so future orders match on their own — and clear any
+              orders already waiting on it.
+            </span>
+          </label>
+          {remember && variantId ? (
+            <select
+              className={cx(inputClass, 'mt-2')}
+              value={scope}
+              onChange={(e) => setScope(e.target.value as 'listing' | 'variant')}
+            >
+              <option value="listing">The whole listing ({listingId})</option>
+              <option value="variant">Only this variation ({variantId})</option>
+            </select>
+          ) : null}
+          {remember && variantId && scope === 'variant' ? (
+            <p className="mt-1.5 text-xs text-ink-500">
+              Etsy issues a new id for a variation whenever the listing's options are
+              edited, so a variation link stops matching after the next edit. Prefer the
+              whole listing and let option rules handle the differences.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="mt-3 max-h-72 space-y-1 overflow-y-auto">
         {busy ? <Spinner /> : null}
         {!busy && products.length === 0 ? (
@@ -58,7 +127,7 @@ function ProductPicker({
           <button
             key={product.id}
             type="button"
-            onClick={() => onPick(product)}
+            onClick={() => onPick(product, { remember, remember_scope: scope })}
             className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
           >
             <span className="font-mono text-sm text-ink-800">{product.sku}</span>
@@ -285,6 +354,7 @@ export default function OrderDrawer({
 }) {
   const [order, setOrder] = useState<Order | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [pickerLine, setPickerLine] = useState<OrderLine | null>(null)
   const [labelOpen, setLabelOpen] = useState(false)
   const [matching, setMatching] = useState(false)
@@ -384,6 +454,7 @@ export default function OrderDrawer({
 
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
             {error ? <Alert tone="error">{error}</Alert> : null}
+            {notice ? <Alert tone="info">{notice}</Alert> : null}
             {!order ? (
               <div className="flex justify-center py-10">
                 <Spinner className="h-6 w-6" />
@@ -493,16 +564,32 @@ export default function OrderDrawer({
           event away from closing the thing it sits on. */}
       <ProductPicker
         open={pickerLine !== null}
-        skuHint={pickerLine?.sku_raw ?? null}
+        line={pickerLine}
         onClose={() => setPickerLine(null)}
-        onPick={async (product) => {
+        onPick={async (product, remember) => {
           const line = pickerLine
           setPickerLine(null)
+          setNotice(null)
           if (!line) return
           await apply(
-            api.post(`/api/orders/${orderId}/lines/${line.id}/link-product`, {
-              product_id: product.id,
-            }),
+            api
+              .post<Order & { also_fixed?: number }>(
+                `/api/orders/${orderId}/lines/${line.id}/link-product`,
+                { product_id: product.id, ...remember },
+              )
+              .then((updated) => {
+                // This line was already matched before the rule was applied, so
+                // the count is other lines only — and they are on a different
+                // screen, so say so, otherwise the work is invisible.
+                const others = updated.also_fixed ?? 0
+                if (remember.remember && others > 0) {
+                  setNotice(
+                    `Linked. ${others} other line${others === 1 ? '' : 's'} waiting on ` +
+                      'this listing matched too.',
+                  )
+                }
+                return updated
+              }),
           )
         }}
       />

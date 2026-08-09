@@ -18,12 +18,13 @@ from ..models import (
     FULFILLMENT_TYPES,
     BomLine,
     BomOptionRule,
+    EtsyProductLink,
     OrderLine,
     PrintMapping,
     Product,
     User,
 )
-from ..services import audit
+from ..services import audit, intake
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
@@ -79,6 +80,16 @@ def _serialize(product: Product) -> dict[str, Any]:
             }
             for rule in sorted(product.option_rules, key=lambda rule: rule.created_at)
         ],
+        # Etsy listings that resolve to this product without a SKU.
+        "etsy_links": [
+            {
+                "id": link.id,
+                "etsy_listing_id": link.etsy_listing_id,
+                "etsy_product_id": link.etsy_product_id,
+                "listing_title": link.listing_title,
+            }
+            for link in sorted(product.etsy_links, key=lambda link: link.created_at)
+        ],
     }
 
 
@@ -92,6 +103,7 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
                 selectinload(Product.bom_lines).selectinload(BomLine.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
+                selectinload(Product.etsy_links),
             )
             # Sessions do not expire on commit, so without this the identity map
             # would hand back the collections as they were before the write.
@@ -117,6 +129,7 @@ async def list_products(
         selectinload(Product.bom_lines).selectinload(BomLine.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
+        selectinload(Product.etsy_links),
     )
     if q.strip():
         needle = f"%{q.strip().lower()}%"
@@ -579,5 +592,82 @@ async def delete_option_rule(
     if rule is None or rule.bundle_id != product_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Rule not found")
     await session.delete(rule)
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+# --------------------------------------------------------------------------
+# Etsy listing links — for listings that carry no SKU
+# --------------------------------------------------------------------------
+
+
+class EtsyLinkRequest(BaseModel):
+    etsy_listing_id: int = Field(gt=0)
+    # Leave unset to cover the whole listing, which is usually what you want:
+    # Etsy regenerates a variant's product id whenever the seller edits the
+    # listing's options, and per-variant differences belong in option rules.
+    etsy_product_id: int | None = None
+    listing_title: str | None = None
+
+
+@router.post("/{product_id}/etsy-links", status_code=status.HTTP_201_CREATED)
+async def add_etsy_link(
+    product_id: uuid.UUID,
+    body: EtsyLinkRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    product = await _get(session, product_id)
+    link = EtsyProductLink(
+        product_id=product.id,
+        etsy_listing_id=body.etsy_listing_id,
+        etsy_product_id=body.etsy_product_id,
+        listing_title=(body.listing_title or "").strip() or None,
+    )
+    session.add(link)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Etsy listing {body.etsy_listing_id} is already linked to a product. "
+            "Remove that link first.",
+        ) from exc
+
+    # Orders already sitting unmatched on this listing are the reason someone
+    # adds a link by hand, so clear them here rather than making them go find
+    # each one.
+    fixed = await intake.apply_etsy_link(session, link)
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product.id,
+        action="etsy_link_add",
+        detail={
+            "etsy_listing_id": body.etsy_listing_id,
+            "etsy_product_id": body.etsy_product_id,
+            "also_fixed": fixed,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    result = _serialize(await _get(session, product_id))
+    result["also_fixed"] = fixed
+    return result
+
+
+@router.delete("/{product_id}/etsy-links/{link_id}")
+async def delete_etsy_link(
+    product_id: uuid.UUID,
+    link_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    link = await session.get(EtsyProductLink, link_id)
+    if link is None or link.product_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
+    await session.delete(link)
     await session.commit()
     return _serialize(await _get(session, product_id))

@@ -139,6 +139,10 @@ async def reprocess_order(
 
 class LinkProductRequest(BaseModel):
     product_id: uuid.UUID
+    # Etsy does not require a SKU, so some listings have nothing to match on.
+    # Remembering the listing turns a one-off fix into a rule.
+    remember: bool = False
+    remember_scope: str = Field(default="listing", pattern="^(listing|variant)$")
 
 
 @router.post("/orders/{order_id}/lines/{line_id}/link-product")
@@ -155,16 +159,36 @@ async def link_product(
     if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
     await intake.relink_line(session, line, product)
+
+    remembered = None
+    also_fixed = 0
+    if body.remember:
+        link = await intake.remember_etsy_link(
+            session, line, product, body.remember_scope
+        )
+        if link is not None:
+            remembered = link.etsy_product_id or link.etsy_listing_id
+            also_fixed = await intake.apply_etsy_link(session, link)
+
     await audit.record(
         session,
         entity_type="order_line",
         entity_id=line.id,
         action="link_product",
-        detail={"sku_raw": line.sku_raw, "linked_sku": product.sku},
+        detail={
+            "sku_raw": line.sku_raw,
+            "linked_sku": product.sku,
+            "etsy_listing_id": line.etsy_listing_id,
+            "remembered": remembered,
+            "remember_scope": body.remember_scope if remembered else None,
+            "also_fixed": also_fixed,
+        },
         actor=user.username,
     )
     await session.commit()
-    return await board.load_order_detail(session, order_id)
+    detail = await board.load_order_detail(session, order_id)
+    detail["also_fixed"] = also_fixed
+    return detail
 
 
 class OverrideRequest(BaseModel):
