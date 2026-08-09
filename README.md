@@ -106,9 +106,25 @@ process, so there is no second container to wire up.
 **Named tunnel** (the one to use). In Cloudflare Zero Trust → Networks →
 Tunnels, create a tunnel, add a public hostname routed to
 `http://localhost:8000`, and paste the connector token into the wizard along
-with the hostname. Then click **Use as public base URL**, and the redirect URIs
-shown on the Etsy and QuickBooks steps become
-`https://printflow.example.com/api/integrations/…/callback` — register those.
+with the hostname.
+
+The callback URLs follow the tunnel automatically. Once it is configured, its
+hostname *is* PrintFlow's public address, and **Access & security → Address &
+callback URLs** shows the two URIs to register verbatim:
+
+```
+https://printflow.example.com/api/integrations/etsy/callback
+https://printflow.example.com/api/integrations/qbo/callback
+```
+
+That precedence is deliberate. A redirect URI has to match what you registered
+character for character, and the alternative — deriving it from whichever
+address you happen to be browsing — means opening PrintFlow on the LAN and
+clicking Connect sends Etsy a `https://192.168.1.50:8443/...` redirect that was
+never registered. The tunnel hostname wins over the manual **Public base URL**
+for the same reason, so a stale value left over from before the tunnel cannot
+quietly break authorisation. Turn the tunnel off and the manual value applies
+again.
 
 **Quick tunnel** is a throwaway `*.trycloudflare.com` address needing no
 account. It is genuinely useful for testing the OAuth round-trip and genuinely

@@ -40,6 +40,10 @@ export interface TunnelInfo {
 export interface SecurityStatus {
   certificate: CertificateInfo | null
   tunnel: TunnelInfo
+  effective_base_url: string
+  base_url_source: 'tunnel_live' | 'tunnel_config' | 'manual' | 'request'
+  base_url_source_label: string
+  redirect_uris: Record<string, string>
   https: { running: boolean; port: number; fingerprint_sha256?: string | null; last_error?: string | null }
   https_port: number
   http_port: number
@@ -210,6 +214,9 @@ export default function SecurityPanel({
     )
   }
 
+  const tunnelDrivesAddress =
+    status.base_url_source === 'tunnel_live' || status.base_url_source === 'tunnel_config'
+
   return (
     <div className="space-y-5">
       {!compact ? (
@@ -221,12 +228,50 @@ export default function SecurityPanel({
         </p>
       ) : null}
 
-      {/* --- Address ---------------------------------------------------- */}
-      <section className="space-y-2">
-        <h3 className="text-sm font-semibold text-ink-800">Address</h3>
+      {/* --- Address & callback URLs ------------------------------------ */}
+      <section className="space-y-3">
+        <h3 className="text-sm font-semibold text-ink-800">Address & callback URLs</h3>
+
+        <div className="rounded-md bg-ink-50 p-3">
+          <p className="text-xs uppercase tracking-wide text-ink-500">
+            Callbacks resolve to
+          </p>
+          <p className="mt-0.5 break-all font-mono text-sm text-ink-900">
+            {status.effective_base_url || '—'}
+          </p>
+          <p className="mt-1 text-xs text-ink-500">
+            Taken from {status.base_url_source_label}.
+          </p>
+
+          <p className="mt-3 text-xs text-ink-600">
+            Register these exactly, in your Etsy and Intuit app settings:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {Object.entries(status.redirect_uris ?? {}).map(([provider, uri]) => (
+              <li key={provider}>
+                <span className="mr-1 text-xs uppercase text-ink-400">
+                  {provider === 'qbo' ? 'QuickBooks' : provider}
+                </span>
+                <code className="break-all text-xs text-ink-800">{uri}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {tunnelDrivesAddress ? (
+          <Alert tone="info">
+            The Cloudflare Tunnel sets this automatically — callbacks always come
+            back through it, so nothing to fill in below.
+          </Alert>
+        ) : null}
+
         <Field
           label="Public base URL"
-          hint="How you reach PrintFlow in the browser. OAuth redirect URIs are built from this, so it must match exactly."
+          hint={
+            tunnelDrivesAddress
+              ? 'Only used if you turn the tunnel off — the tunnel hostname takes precedence.'
+              : 'How you reach PrintFlow in the browser. OAuth redirect URIs are built from this, so it must match exactly.'
+          }
         >
           <input
             className={inputClass}
@@ -249,19 +294,7 @@ export default function SecurityPanel({
       {/* The tunnel decides what the public address *is*, so it belongs next to
           the address field — above the certificate, which only matters for
           reaching PrintFlow directly on the LAN. */}
-      <TunnelSection
-        tunnel={status.tunnel}
-        onApplied={load}
-        onUseAsBaseUrl={async (url) => {
-          setBaseUrl(url)
-          await run('base-url', async () => {
-            await api.post('/api/security/base-url', { public_base_url: url })
-            setNote(
-              `Base URL set to ${url}. Register the redirect URIs shown on the Etsy and QuickBooks steps.`,
-            )
-          })
-        }}
-      />
+      <TunnelSection tunnel={status.tunnel} onApplied={load} />
 
       {/* --- Certificate ------------------------------------------------ */}
       <section className="space-y-3 border-t border-ink-200 pt-4">

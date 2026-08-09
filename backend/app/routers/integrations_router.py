@@ -28,9 +28,8 @@ from ..models import (
     OAuthState,
     User,
 )
-from ..services import credentials
+from ..services import credentials, public_url
 from ..services.credentials import IntegrationNotConfigured
-from ..services.settings_store import KEY_PUBLIC_BASE_URL, get_setting
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -38,14 +37,13 @@ OAUTH_STATE_TTL = timedelta(minutes=30)
 
 
 async def _base_url(request: Request, session: AsyncSession) -> str:
-    configured = await get_setting(session, KEY_PUBLIC_BASE_URL)
-    if configured:
-        return str(configured).rstrip("/")
-    return str(request.base_url).rstrip("/")
+    """The one public address, with the tunnel winning (see services/public_url)."""
+    base, _source = await public_url.resolve_base_url(session, request)
+    return base
 
 
 async def _redirect_uri(request: Request, session: AsyncSession, provider: str) -> str:
-    return f"{await _base_url(request, session)}/api/integrations/{provider}/callback"
+    return public_url.redirect_uri(await _base_url(request, session), provider)
 
 
 async def _new_state(

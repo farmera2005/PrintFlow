@@ -16,7 +16,7 @@ from ..auth import require_user
 from ..config import get_config
 from ..db import get_session
 from ..models import User
-from ..services import audit, tls, tunnel
+from ..services import audit, public_url, tls, tunnel
 from ..services.settings_store import (
     KEY_HTTPS_REDIRECT,
     KEY_PUBLIC_BASE_URL,
@@ -81,8 +81,16 @@ async def _payload(request: Request, session: AsyncSession) -> dict[str, Any]:
         if tunnel_supervisor is not None
         else {"binary_available": tunnel.available(), "running": False, "supervised": False}
     )
+
+    # The address OAuth callbacks actually resolve to, and the exact URIs that
+    # have to be registered with Etsy and Intuit.
+    effective_base_url, base_url_source = await public_url.resolve_base_url(session, request)
     return {
         "certificate": certificate,
+        "effective_base_url": effective_base_url,
+        "base_url_source": base_url_source,
+        "base_url_source_label": public_url.SOURCE_LABELS.get(base_url_source, ""),
+        "redirect_uris": await public_url.redirect_uris(session, request),
         "tunnel": {
             **tunnel.public_config(tunnel_config),
             "status": tunnel_status,

@@ -20,11 +20,9 @@ const MODES: { value: TunnelInfo['mode']; label: string; hint: string }[] = [
 export default function TunnelSection({
   tunnel,
   onApplied,
-  onUseAsBaseUrl,
 }: {
   tunnel: TunnelInfo
   onApplied: () => Promise<void>
-  onUseAsBaseUrl: (url: string) => void
 }) {
   const [mode, setMode] = useState<TunnelInfo['mode']>(tunnel.mode)
   const [token, setToken] = useState('')
@@ -177,9 +175,10 @@ export default function TunnelSection({
               {liveUrl}
             </a>
           </p>
-          <Button size="sm" className="mt-2" onClick={() => onUseAsBaseUrl(liveUrl)}>
-            Use as public base URL
-          </Button>
+          <p className="mt-1 text-xs text-emerald-800">
+            OAuth callback URLs use this automatically — see “Callbacks resolve to”
+            above for the exact URIs to register.
+          </p>
         </div>
       ) : null}
 
