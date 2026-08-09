@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +31,8 @@ from ..models import (
 )
 from ..services import credentials, public_url
 from ..services.credentials import IntegrationNotConfigured
+
+log = logging.getLogger("printflow.integrations")
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -201,18 +204,14 @@ async def etsy_callback(
         )
         payload.update(tokens)
         await credentials.save(session, PROVIDER_ETSY, payload)
-
-        # Pre-select the shop when the account only has one.
-        client = etsy_api.EtsyClient(session, payload)
-        me = await client.me()
-        user_id = me.get("user_id") or me.get("shop_id")
-        payload["user_id"] = user_id
-        shops = await client.shops_for_user(user_id) if user_id else []
-        if len(shops) == 1:
-            payload["shop_id"] = shops[0].get("shop_id")
-            payload["shop_name"] = shops[0].get("shop_name")
-        await credentials.save(session, PROVIDER_ETSY, payload)
         await session.commit()
+
+        # Everything past this point is convenience: the tokens are already
+        # stored, so Etsy IS connected. Pre-selecting the shop must not be able
+        # to undo that — a 403 on a lookup used to fail the whole handshake and
+        # report it as "authorisation was rejected" when authorisation had in
+        # fact succeeded.
+        await _try_preselect_etsy_shop(session, payload)
     except (IntegrationError, HTTPException) as exc:
         await session.rollback()
         await credentials.mark_error(session, PROVIDER_ETSY, str(exc))
@@ -261,6 +260,36 @@ async def etsy_select_shop(
     await credentials.mark_ok(session, PROVIDER_ETSY)
     await session.commit()
     return {"shop_id": body.shop_id}
+
+
+async def _try_preselect_etsy_shop(session: AsyncSession, payload: dict) -> None:
+    """Best effort: fill in the shop when the account has exactly one."""
+    user_id = etsy_api.user_id_from_token(payload.get("access_token"))
+    client = etsy_api.EtsyClient(session, payload)
+    try:
+        if not user_id:
+            me = await client.me()
+            user_id = me.get("user_id") or me.get("shop_id")
+        if not user_id:
+            return
+        payload["user_id"] = user_id
+        shops = await client.shops_for_user(user_id)
+        if len(shops) == 1:
+            payload["shop_id"] = shops[0].get("shop_id")
+            payload["shop_name"] = shops[0].get("shop_name")
+        await credentials.save(session, PROVIDER_ETSY, payload)
+        await session.commit()
+    except (IntegrationError, Exception) as exc:  # noqa: B014 - never fail the connect
+        await session.rollback()
+        log.warning("Etsy connected, but the shop lookup failed: %s", exc)
+        # Surface it without blocking: the Settings screen shows a shop picker.
+        await credentials.mark_error(
+            session,
+            PROVIDER_ETSY,
+            f"Connected, but could not list your shops automatically: {exc}. "
+            "Pick the shop manually below.",
+        )
+        await session.commit()
 
 
 async def _etsy_client(session: AsyncSession) -> etsy_api.EtsyClient:

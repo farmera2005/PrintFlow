@@ -36,6 +36,13 @@ class IntegrationError(RuntimeError):
         base = super().__str__()
         if self.status_code:
             base = f"{base} (HTTP {self.status_code})"
+        # Include what the provider actually said. Swallowing it leaves the
+        # operator with "rejected" and nothing to act on, when the body usually
+        # names the reason outright — a missing scope, an unknown API key, an
+        # expired grant.
+        detail = _compact(self.body)
+        if detail:
+            base = f"{base} — {provider_said(self.provider)}: {detail}"
         return base
 
 
@@ -99,6 +106,34 @@ async def request(
         attempt += 1
 
     raise last_exc or IntegrationError(provider, "Request failed")
+
+
+def provider_said(provider: str) -> str:
+    return f"{provider} said"
+
+
+def _compact(body: str | None, limit: int = 300) -> str:
+    """One-line, readable summary of a response body.
+
+    Error pages from an edge proxy are megabytes of markup; the useful part of
+    an API error is a short JSON document. Collapse whitespace, and say plainly
+    when the body was an HTML page rather than dumping tags into a toast.
+    """
+    if not body:
+        return ""
+    text = " ".join(body.split())
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered.startswith("<!doctype") or lowered.startswith("<html"):
+        title = ""
+        start = lowered.find("<title>")
+        if start != -1:
+            end = lowered.find("</title>", start)
+            if end != -1:
+                title = text[start + 7 : end].strip()
+        return f"an HTML error page{f' ({title})' if title else ''}"
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _retry_after(response: httpx.Response) -> float | None:

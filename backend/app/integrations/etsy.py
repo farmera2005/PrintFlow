@@ -98,6 +98,18 @@ def _token_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def user_id_from_token(access_token: str | None) -> str | None:
+    """Etsy access tokens are `<user_id>.<random>`.
+
+    Reading the id straight off the token avoids a call to /users/me, which is
+    one more endpoint that can 403 on a scope we do not otherwise need.
+    """
+    if not access_token:
+        return None
+    prefix = str(access_token).split(".", 1)[0]
+    return prefix if prefix.isdigit() else None
+
+
 class EtsyClient:
     def __init__(self, session: AsyncSession, payload: dict[str, Any]) -> None:
         self.session = session
