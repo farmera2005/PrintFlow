@@ -979,7 +979,9 @@ function OptionRulesEditor({
   const [componentId, setComponentId] = useState('')
   const [quantity, setQuantity] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [qboOpen, setQboOpen] = useState(false)
 
   /* Two sources, merged: what past orders carried, and what the Etsy listing
      offers. The listing is the one that works before a single order has
@@ -1050,6 +1052,45 @@ function OptionRulesEditor({
       setOptionValue('')
       setComponentId('')
       setQuantity('')
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Bring in a QuickBooks item for this option.
+   *
+   * A variation exists because it needs something the base build does not — the
+   * fan, the bigger magnet, the second colour. That thing is by definition not
+   * on the BOM, so a list of what is already there is the wrong list. */
+  const addFromQbo = async (item: QboItem) => {
+    setQboOpen(false)
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<Product & { created_product: boolean }>(
+        `/api/products/${product.id}/option-rules/from-qbo`,
+        {
+          option_name: optionName.trim(),
+          option_value: optionValue.trim(),
+          replaces_id: replacesId || null,
+          quantity: quantity ? Number(quantity) : null,
+          qbo_item_id: item.id,
+          qbo_item_name: item.name,
+        },
+      )
+      await onSaved(saved)
+      setOptionValue('')
+      setComponentId('')
+      setQuantity('')
+      if (saved.created_product) {
+        setNotice(
+          `“${item.name}” was added as a stocked product, linked to that ` +
+            'QuickBooks item so its stock is checked from there.',
+        )
+      }
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -1189,7 +1230,10 @@ function OptionRulesEditor({
             ))}
           </select>
         </Field>
-        <Field label="Use this component">
+        <Field
+          label="Use this component"
+          hint="Or take it straight from QuickBooks, below — a variation usually needs something the BOM does not have."
+        >
           <select
             className={inputClass}
             value={componentId}
@@ -1218,12 +1262,26 @@ function OptionRulesEditor({
       </div>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
-      <Button
-        onClick={add}
-        disabled={busy || !optionName.trim() || !optionValue.trim() || !componentId}
-      >
-        {busy ? 'Adding…' : 'Add rule'}
-      </Button>
+      {notice ? <Alert tone="info">{notice}</Alert> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          onClick={add}
+          disabled={busy || !optionName.trim() || !optionValue.trim() || !componentId}
+        >
+          {busy ? 'Adding…' : 'Add rule'}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => setQboOpen(true)}
+          disabled={busy || !optionName.trim() || !optionValue.trim()}
+        >
+          Add from QuickBooks…
+        </Button>
+      </div>
+
+      {qboOpen ? (
+        <QboItemPicker onClose={() => setQboOpen(false)} onPick={addFromQbo} />
+      ) : null}
     </div>
   )
 }

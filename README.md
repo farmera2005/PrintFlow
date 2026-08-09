@@ -231,6 +231,12 @@ products you already have, or — **From QuickBooks…** — straight out of
 QuickBooks inventory, which is where the materials already live and the copy the
 stock check actually reads.
 
+The same is true of a [BOM option rule](#etsy-options-that-change-the-bom):
+**Add from QuickBooks…** next to *Add rule*. A variation exists precisely
+because it needs something the base build does not — the fan, the bigger magnet,
+the second colour — so the thing it needs is by definition *not* on the BOM, and
+a list of what is already there is the wrong list to be offered.
+
 Picking an item finds the product that already points at it, or makes a stocked
 one for it. Components stay products underneath because that is what the rest of
 the pipeline works in: allocation reads a product's QuickBooks item, printing

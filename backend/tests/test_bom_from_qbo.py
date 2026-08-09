@@ -164,3 +164,237 @@ class TestItFlowsThroughAnOrder:
         entry = (await db.execute(select(BomLine))).scalar_one()
         component = await db.get(Product, entry.component_id)
         assert component.qbo_item_id == "42"
+
+
+# --------------------------------------------------------------------------
+# A variation of a bundle, needing something the BOM does not have
+# --------------------------------------------------------------------------
+
+
+class TestOptionRulesFromQuickBooks:
+    """A variation exists because it needs something the base build does not.
+
+    The fan, the bigger magnet, the second colour — by definition not on the
+    BOM, and often not a product yet either. Offering only what is already on
+    the BOM, or only what is already a product, is offering the wrong list.
+    """
+
+    async def test_a_rule_can_bring_in_an_item_that_is_not_a_product(
+        self, signed_in, db
+    ):
+        bundle = await _bundle(db)
+        body = (
+            await signed_in.post(
+                f"/api/products/{bundle.id}/option-rules/from-qbo",
+                json={
+                    "option_name": "Bin Fan",
+                    "option_value": "Yes",
+                    "qbo_item_id": "9",
+                    "qbo_item_name": "40mm fan",
+                    "quantity": 1,
+                },
+            )
+        ).json()
+
+        assert body["created_product"] is True
+        rule = body["option_rules"][0]
+        assert (rule["option_name"], rule["option_value"]) == ("Bin Fan", "Yes")
+        component = (
+            await db.execute(select(Product).where(Product.qbo_item_id == "9"))
+        ).scalar_one()
+        assert component.name == "40mm fan"
+        assert component.fulfillment == "stocked"
+
+    async def test_it_reuses_a_product_that_already_has_the_item(self, signed_in, db):
+        bundle = await _bundle(db)
+        existing = Product(
+            sku="FAN-40", name="Fan, 40mm", fulfillment="stocked", qbo_item_id="9"
+        )
+        db.add(existing)
+        await db.commit()
+
+        body = (
+            await signed_in.post(
+                f"/api/products/{bundle.id}/option-rules/from-qbo",
+                json={"option_name": "Bin Fan", "option_value": "Yes", "qbo_item_id": "9"},
+            )
+        ).json()
+        assert body["created_product"] is False
+        assert body["option_rules"][0]["component_sku"] == "FAN-40"
+
+    async def test_it_can_swap_something_already_on_the_bom(self, signed_in, db):
+        bundle = await _bundle(db)
+        await signed_in.post(
+            f"/api/products/{bundle.id}/bom/from-qbo",
+            json={"qbo_item_id": "1", "qbo_item_name": "PLA Black 1kg"},
+        )
+        grey = (
+            await db.execute(select(Product).where(Product.qbo_item_id == "1"))
+        ).scalar_one()
+
+        body = (
+            await signed_in.post(
+                f"/api/products/{bundle.id}/option-rules/from-qbo",
+                json={
+                    "option_name": "Colour",
+                    "option_value": "Red",
+                    "replaces_id": str(grey.id),
+                    "qbo_item_id": "2",
+                    "qbo_item_name": "PLA Red 1kg",
+                },
+            )
+        ).json()
+        rule = body["option_rules"][0]
+        assert rule["replaces_sku"] == grey.sku
+        assert rule["component_sku"] != grey.sku
+
+    async def test_it_will_not_swap_something_the_bundle_does_not_have(
+        self, signed_in, db
+    ):
+        """The rule would be skipped at intake and the order built wrong."""
+        bundle = await _bundle(db)
+        stranger = Product(
+            sku="STRANGER", name="Stranger", fulfillment="stocked", qbo_item_id=None
+        )
+        db.add(stranger)
+        await db.commit()
+
+        response = await signed_in.post(
+            f"/api/products/{bundle.id}/option-rules/from-qbo",
+            json={
+                "option_name": "Colour",
+                "option_value": "Red",
+                "replaces_id": str(stranger.id),
+                "qbo_item_id": "2",
+            },
+        )
+        assert response.status_code == 400
+        assert "not on this bundle's BOM" in response.json()["detail"]
+
+    async def test_only_a_bundle_has_options_that_change_a_bom(self, signed_in, db):
+        product = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(product)
+        await db.commit()
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-rules/from-qbo",
+            json={"option_name": "Colour", "option_value": "Red", "qbo_item_id": "2"},
+        )
+        assert response.status_code == 400
+
+    async def test_the_same_rule_cannot_be_added_twice(self, signed_in, db):
+        bundle = await _bundle(db)
+        payload = {"option_name": "Bin Fan", "option_value": "Yes", "qbo_item_id": "9"}
+        assert (
+            await signed_in.post(
+                f"/api/products/{bundle.id}/option-rules/from-qbo", json=payload
+            )
+        ).status_code == 201
+        again = await signed_in.post(
+            f"/api/products/{bundle.id}/option-rules/from-qbo", json=payload
+        )
+        assert again.status_code == 409
+
+
+class TestTheVariationGetsItsMaterial:
+    async def test_an_order_for_that_variation_pulls_the_extra_item(
+        self, signed_in, db
+    ):
+        """End to end: the buyer picks the option, the fan comes off the shelf."""
+        bundle = await _bundle(db)
+        await signed_in.post(
+            f"/api/products/{bundle.id}/bom/from-qbo",
+            json={"qbo_item_id": "1", "qbo_item_name": "PLA Black 1kg", "quantity": 1},
+        )
+        await signed_in.post(
+            f"/api/products/{bundle.id}/option-rules/from-qbo",
+            json={
+                "option_name": "Bin Fan",
+                "option_value": "Yes",
+                "qbo_item_id": "9",
+                "qbo_item_name": "40mm fan",
+                "quantity": 2,
+            },
+        )
+
+        await intake.ingest_receipt(
+            db,
+            {
+                "receipt_id": 5,
+                "name": "Ada",
+                "transactions": [
+                    {
+                        "transaction_id": 5,
+                        "sku": "KIT",
+                        "quantity": 1,
+                        "variations": [
+                            {"formatted_name": "Bin Fan", "formatted_value": "Yes"}
+                        ],
+                    }
+                ],
+            },
+        )
+        await db.commit()
+
+        children = (
+            (
+                await db.execute(
+                    select(OrderLine).where(OrderLine.parent_line_id.isnot(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_name = {
+            (await db.get(Product, child.product_id)).name: child for child in children
+        }
+        assert set(by_name) == {"PLA Black 1kg", "40mm fan"}
+        assert by_name["40mm fan"].quantity == 2
+        # Drawn from the stock QuickBooks reports for that item.
+        assert by_name["40mm fan"].qty_from_stock == 2
+
+    async def test_the_other_variation_does_not_get_it(self, signed_in, db):
+        bundle = await _bundle(db)
+        await signed_in.post(
+            f"/api/products/{bundle.id}/bom/from-qbo",
+            json={"qbo_item_id": "1", "qbo_item_name": "PLA Black 1kg"},
+        )
+        await signed_in.post(
+            f"/api/products/{bundle.id}/option-rules/from-qbo",
+            json={
+                "option_name": "Bin Fan",
+                "option_value": "Yes",
+                "qbo_item_id": "9",
+                "qbo_item_name": "40mm fan",
+            },
+        )
+
+        await intake.ingest_receipt(
+            db,
+            {
+                "receipt_id": 6,
+                "name": "Ada",
+                "transactions": [
+                    {
+                        "transaction_id": 6,
+                        "sku": "KIT",
+                        "quantity": 1,
+                        "variations": [
+                            {"formatted_name": "Bin Fan", "formatted_value": "No"}
+                        ],
+                    }
+                ],
+            },
+        )
+        await db.commit()
+
+        children = (
+            (
+                await db.execute(
+                    select(OrderLine).where(OrderLine.parent_line_id.isnot(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        names = {(await db.get(Product, c.product_id)).name for c in children}
+        assert names == {"PLA Black 1kg"}

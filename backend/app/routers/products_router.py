@@ -530,6 +530,42 @@ async def add_bom_line(
     return _serialize(await _get(session, product_id))
 
 
+async def _component_for_qbo_item(
+    session: AsyncSession, item_id: str, item_name: str | None
+) -> tuple[Product, bool]:
+    """The product standing for a QuickBooks inventory item, made if need be.
+
+    Components are products all the way down, because that is what the rest of
+    the pipeline works in: allocation reads a product's QuickBooks item,
+    printing reads its mapping, a made-items sheet rolls up its BOM. What this
+    saves is the step in the middle — retyping a material as a product and then
+    linking it back to the item you picked it from.
+
+    An item that already has a product reuses it. Two products pointing at one
+    item would be two things competing for the same stock.
+    """
+    item_id = item_id.strip()
+    name = (item_name or "").strip() or f"QuickBooks item {item_id}"
+
+    existing = (
+        await session.execute(select(Product).where(Product.qbo_item_id == item_id))
+    ).scalars().first()
+    if existing is not None:
+        return existing, False
+
+    component = Product(
+        sku=await codes.unique(session, codes.from_name(name)),
+        name=name[:500],
+        fulfillment="stocked",
+        qbo_item_id=item_id,
+        qbo_item_name=name[:500],
+        active=True,
+    )
+    session.add(component)
+    await session.flush()
+    return component, True
+
+
 class BomFromQboRequest(BaseModel):
     qbo_item_id: str = Field(min_length=1)
     qbo_item_name: str | None = None
@@ -563,27 +599,12 @@ async def add_bom_line_from_qbo(
         )
 
     item_id = body.qbo_item_id.strip()
-    name = (body.qbo_item_name or "").strip() or f"QuickBooks item {item_id}"
-
-    component = (
-        await session.execute(select(Product).where(Product.qbo_item_id == item_id))
-    ).scalars().first()
-    created = False
-    if component is None:
-        component = Product(
-            sku=await codes.unique(session, codes.from_name(name)),
-            name=name[:500],
-            fulfillment="stocked",
-            qbo_item_id=item_id,
-            qbo_item_name=name[:500],
-            active=True,
-        )
-        session.add(component)
-        await session.flush()
-        created = True
-    elif component.id == bundle.id:
+    component, created = await _component_for_qbo_item(
+        session, item_id, body.qbo_item_name
+    )
+    if component.id == bundle.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A bundle cannot contain itself.")
-    elif component.fulfillment == "bundle":
+    if component.fulfillment == "bundle":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "BOMs are single-level, and that QuickBooks item is already a bundle here.",
@@ -863,6 +884,108 @@ async def add_option_rule(
     )
     await session.commit()
     return _serialize(await _get(session, product_id))
+
+
+class OptionRuleFromQboRequest(BaseModel):
+    """An option rule whose component comes straight out of QuickBooks."""
+
+    option_name: str = Field(min_length=1, max_length=200)
+    option_value: str = Field(min_length=1, max_length=200)
+    replaces_id: uuid.UUID | None = None
+    quantity: int | None = Field(default=None, gt=0)
+    qbo_item_id: str = Field(min_length=1)
+    qbo_item_name: str | None = None
+
+
+@router.post("/{product_id}/option-rules/from-qbo", status_code=status.HTTP_201_CREATED)
+async def add_option_rule_from_qbo(
+    product_id: uuid.UUID,
+    body: OptionRuleFromQboRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Bring a QuickBooks item in for one variation of a bundle.
+
+    A variation exists precisely because it needs something the base build does
+    not: the fan, the bigger magnet, the second colour. So the thing it needs is
+    by definition *not* on the BOM, and offering only what is already there — or
+    only what is already a product — is offering the wrong list.
+    """
+    bundle = await _get(session, product_id)
+    if bundle.fulfillment != "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Only a bundle has a BOM for an option to change. Model the option-driven "
+            "part as a bundle component first.",
+        )
+
+    component, created = await _component_for_qbo_item(
+        session, body.qbo_item_id, body.qbo_item_name
+    )
+    if component.id == bundle.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A bundle cannot contain itself.")
+    if component.fulfillment == "bundle":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "BOMs are single-level: an option cannot bring in another bundle.",
+        )
+
+    if body.replaces_id is not None:
+        if body.replaces_id == component.id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "A rule cannot swap a component for itself."
+            )
+        on_bom = (
+            await session.execute(
+                select(BomLine.id).where(
+                    BomLine.bundle_id == bundle.id,
+                    BomLine.component_id == body.replaces_id,
+                )
+            )
+        ).first()
+        if not on_bom:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "The component being replaced is not on this bundle's BOM.",
+            )
+
+    session.add(
+        BomOptionRule(
+            bundle_id=bundle.id,
+            option_name=body.option_name.strip(),
+            option_value=body.option_value.strip(),
+            replaces_id=body.replaces_id,
+            component_id=component.id,
+            quantity=body.quantity,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"A rule for {body.option_name.strip()} = {body.option_value.strip()} "
+            "already brings in that component.",
+        ) from exc
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=bundle.id,
+        action="option_rule_add_from_qbo",
+        detail={
+            "option": f"{body.option_name.strip()} = {body.option_value.strip()}",
+            "qbo_item_id": body.qbo_item_id.strip(),
+            "component_sku": component.sku,
+            "created_product": created,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    payload = _serialize(await _get(session, product_id))
+    payload["created_product"] = created
+    return payload
 
 
 @router.delete("/{product_id}/option-rules/{rule_id}")
