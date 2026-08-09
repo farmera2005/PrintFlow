@@ -37,15 +37,20 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def issue_session(response: Response, user: User) -> None:
+def issue_session(response: Response, user: User, request: Request | None = None) -> None:
     token = _serializer().dumps({"uid": str(user.id)})
     config = get_config()
+    # Mark the cookie Secure whenever the session was established over HTTPS —
+    # which is always the case through a Cloudflare tunnel. Doing it
+    # unconditionally would break sign-in over the plain-HTTP fallback port.
+    secure = bool(request is not None and request.url.scheme == "https")
     response.set_cookie(
         config.session_cookie,
         token,
         max_age=config.session_max_age,
         httponly=True,
         samesite="lax",
+        secure=secure,
         path="/",
     )
 

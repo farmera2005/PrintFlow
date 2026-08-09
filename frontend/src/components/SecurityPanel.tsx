@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { formatDateTime } from '../lib/format'
+import TunnelSection from './TunnelSection'
 import { Alert, Badge, Button, Field, Spinner, inputClass } from './ui'
 
 export interface CertificateInfo {
@@ -17,8 +18,28 @@ export interface CertificateInfo {
   source: 'generated' | 'uploaded'
 }
 
+export interface TunnelInfo {
+  mode: 'off' | 'named' | 'quick'
+  enabled: boolean
+  hostname: string | null
+  has_token: boolean
+  token_hint: string | null
+  supervised: boolean
+  status: {
+    binary_available: boolean
+    running: boolean
+    hostname?: string | null
+    public_url?: string | null
+    connections?: number
+    restarts?: number
+    last_error?: string | null
+    pid?: number | null
+  }
+}
+
 export interface SecurityStatus {
   certificate: CertificateInfo | null
+  tunnel: TunnelInfo
   https: { running: boolean; port: number; fingerprint_sha256?: string | null; last_error?: string | null }
   https_port: number
   http_port: number
@@ -353,6 +374,20 @@ export default function SecurityPanel({
           </div>
         ) : null}
       </section>
+
+      <TunnelSection
+        tunnel={status.tunnel}
+        onApplied={load}
+        onUseAsBaseUrl={async (url) => {
+          setBaseUrl(url)
+          await run('base-url', async () => {
+            await api.post('/api/security/base-url', { public_base_url: url })
+            setNote(
+              `Base URL set to ${url}. Register the redirect URIs shown on the Etsy and QuickBooks steps.`,
+            )
+          })
+        }}
+      />
 
       {/* --- Redirect --------------------------------------------------- */}
       <section className="space-y-2 border-t border-ink-200 pt-4">

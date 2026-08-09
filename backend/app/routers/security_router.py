@@ -16,7 +16,7 @@ from ..auth import require_user
 from ..config import get_config
 from ..db import get_session
 from ..models import User
-from ..services import audit, tls
+from ..services import audit, tls, tunnel
 from ..services.settings_store import (
     KEY_HTTPS_REDIRECT,
     KEY_PUBLIC_BASE_URL,
@@ -29,6 +29,10 @@ router = APIRouter(prefix="/api/security", tags=["security"])
 
 def _supervisor(request: Request):
     return getattr(request.app.state, "tls_supervisor", None)
+
+
+def _tunnel(request: Request):
+    return getattr(request.app.state, "tunnel_supervisor", None)
 
 
 def _reload_listener(request: Request) -> dict[str, Any]:
@@ -69,8 +73,21 @@ async def _payload(request: Request, session: AsyncSession) -> dict[str, Any]:
     supervisor = _supervisor(request)
     base_url = await get_setting(session, KEY_PUBLIC_BASE_URL)
     host = request.url.hostname or "localhost"
+
+    tunnel_config = await tunnel.load_config(session)
+    tunnel_supervisor = _tunnel(request)
+    tunnel_status = (
+        tunnel_supervisor.status()
+        if tunnel_supervisor is not None
+        else {"binary_available": tunnel.available(), "running": False, "supervised": False}
+    )
     return {
         "certificate": certificate,
+        "tunnel": {
+            **tunnel.public_config(tunnel_config),
+            "status": tunnel_status,
+            "supervised": tunnel_supervisor is not None,
+        },
         "https": (supervisor.status() if supervisor else {"running": False, "port": config.https_port}),
         "https_port": config.https_port,
         "http_port": config.http_port,
@@ -196,6 +213,112 @@ async def save_base_url(
     await set_setting(session, KEY_PUBLIC_BASE_URL, value)
     await session.commit()
     return {"public_base_url": value}
+
+
+# --------------------------------------------------------------------------
+# Cloudflare Tunnel
+# --------------------------------------------------------------------------
+
+
+class TunnelRequest(BaseModel):
+    mode: str = Field(pattern="^(off|named|quick)$")
+    enabled: bool = True
+    # Blank on an edit means "keep the stored token".
+    token: str | None = None
+    hostname: str | None = None
+
+
+@router.post("/tunnel")
+async def configure_tunnel(
+    body: TunnelRequest,
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Save the tunnel configuration and bring cloudflared in line with it."""
+    try:
+        config = await tunnel.save_config(
+            session,
+            mode=body.mode,
+            token=body.token,
+            hostname=body.hostname,
+            enabled=body.enabled,
+        )
+    except tunnel.TunnelError as exc:
+        await session.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    await audit.record(
+        session,
+        entity_type="tunnel",
+        entity_id=None,
+        action="tunnel_configured",
+        # Never the token.
+        detail={"mode": config["mode"], "enabled": config["enabled"], "hostname": config["hostname"]},
+        actor=user.username,
+    )
+    await session.commit()
+
+    supervisor = _tunnel(request)
+    if supervisor is not None:
+        await supervisor.apply(config)
+    return await _payload(request, session)
+
+
+@router.post("/tunnel/restart")
+async def restart_tunnel(
+    request: Request,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    supervisor = _tunnel(request)
+    if supervisor is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The tunnel is not supervised by this process (development mode).",
+        )
+    await supervisor.restart()
+    return await _payload(request, session)
+
+
+@router.post("/tunnel/stop")
+async def stop_tunnel(
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    config = await tunnel.load_config(session)
+    await tunnel.save_config(
+        session,
+        mode=config["mode"],
+        token=None,
+        hostname=config["hostname"],
+        enabled=False,
+    )
+    await audit.record(
+        session,
+        entity_type="tunnel",
+        entity_id=None,
+        action="tunnel_stopped",
+        actor=user.username,
+    )
+    await session.commit()
+    supervisor = _tunnel(request)
+    if supervisor is not None:
+        await supervisor.stop()
+    return await _payload(request, session)
+
+
+@router.get("/tunnel/logs")
+async def tunnel_logs(
+    request: Request,
+    limit: int = 100,
+    _: User = Depends(require_user),
+) -> dict:
+    supervisor = _tunnel(request)
+    if supervisor is None:
+        return {"lines": []}
+    return {"lines": supervisor.logs(max(1, min(limit, 300)))}
 
 
 class RedirectRequest(BaseModel):

@@ -145,12 +145,17 @@ class TlsSupervisor:
 
 async def serve() -> None:
     from .main import app
+    from .services.tunnel import TunnelSupervisor
 
     config = get_config()
     supervisor = TlsSupervisor(app)
-    # main.py's lifespan starts and stops the supervisor, so the HTTPS listener
-    # comes up only once the app is actually ready to serve.
+    # main.py's lifespan starts and stops the supervisors, so neither the HTTPS
+    # listener nor the tunnel comes up before the app is ready to serve.
     app.state.tls_supervisor = supervisor
+    # cloudflared points at the plain HTTP listener; Cloudflare terminates TLS
+    # at the edge, so tunnelling to the self-signed HTTPS port would only add a
+    # certificate to distrust.
+    app.state.tunnel_supervisor = TunnelSupervisor(local_port=config.http_port)
 
     http = uvicorn.Server(
         uvicorn.Config(

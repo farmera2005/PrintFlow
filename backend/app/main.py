@@ -40,10 +40,19 @@ async def lifespan(app: FastAPI):
     supervisor = getattr(app.state, "tls_supervisor", None)
     if supervisor is not None:
         await supervisor.start()
+    tunnel = getattr(app.state, "tunnel_supervisor", None)
+    if tunnel is not None:
+        try:
+            async with session_scope() as session:
+                await tunnel.start_from_db(session)
+        except Exception as exc:  # a tunnel problem must not block startup
+            log.error("Cloudflare tunnel did not start: %s", exc)
     log.info("PrintFlow started")
     try:
         yield
     finally:
+        if tunnel is not None:
+            await tunnel.stop()
         if supervisor is not None:
             await supervisor.stop()
         await scheduler.shutdown()

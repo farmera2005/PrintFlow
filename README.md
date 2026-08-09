@@ -64,11 +64,12 @@ and no seed scripts — **every** setting is entered in the app.
 ### First-run setup wizard
 
 1. **Admin account** — username + password (bcrypt, session cookie).
-2. **Access & security** — the address you reach PrintFlow on, and the HTTPS
-   certificate: re-issue it for your hostnames and IPs, download it for your
-   trust store, or upload your own certificate and key. Optionally redirect
-   plain HTTP to HTTPS. This step comes before the OAuth steps because Etsy and
-   Intuit both reject an `http://` redirect URI.
+2. **Access & security** — the address you reach PrintFlow on, the HTTPS
+   certificate (re-issue it for your hostnames and IPs, download it for your
+   trust store, or upload your own), and the Cloudflare Tunnel. This step comes
+   before the OAuth steps because Etsy and Intuit both reject an `http://`
+   redirect URI, and Intuit will not accept a private address at all for a
+   production app.
 3. **Etsy** — paste your app's keystring and shared secret; the app runs the
    OAuth 2.0 PKCE flow and you pick the shop. Refresh tokens rotate and the new
    one is persisted on every refresh.
@@ -88,6 +89,49 @@ through a reverse proxy or a hostname other than the one it guesses.
 
 Every integration is reconfigurable later from **Settings**, including full
 re-auth, and the wizard can be re-opened at any time.
+
+### Public callback URLs (Cloudflare Tunnel)
+
+Etsy and QuickBooks send the browser back to PrintFlow after you authorise
+them, and Intuit rejects a private address for a production app. A Cloudflare
+Tunnel solves that without opening a single inbound port — `cloudflared` makes
+only outbound connections — and it is configured in the wizard like everything
+else. The binary is bundled in the image and PrintFlow supervises it as a child
+process, so there is no second container to wire up.
+
+**Named tunnel** (the one to use). In Cloudflare Zero Trust → Networks →
+Tunnels, create a tunnel, add a public hostname routed to
+`http://localhost:8000`, and paste the connector token into the wizard along
+with the hostname. Then click **Use as public base URL**, and the redirect URIs
+shown on the Etsy and QuickBooks steps become
+`https://printflow.example.com/api/integrations/…/callback` — register those.
+
+**Quick tunnel** is a throwaway `*.trycloudflare.com` address needing no
+account. It is genuinely useful for testing the OAuth round-trip and genuinely
+unsuitable for anything else: Cloudflare assigns a new hostname on every
+restart, so a redirect URI registered against it stops working.
+
+The token is encrypted at rest and passed to `cloudflared` through the
+environment, never as a command-line argument — argv is world-readable in `ps`.
+It is never echoed back by the API and is redacted from the captured log the UI
+shows. The tunnel restarts itself with backoff if `cloudflared` dies, and
+starts automatically on boot from the stored configuration.
+
+Two things worth knowing before you expose the app:
+
+- **Put Cloudflare Access in front of it.** A tunnel makes the login page
+  reachable from the internet. An Access policy on the hostname means visitors
+  authenticate at Cloudflare's edge before a request ever reaches PrintFlow.
+  PrintFlow's own single-admin login still applies underneath.
+- Cloudflare terminates TLS at the edge and forwards over plain HTTP to port
+  8000, which is why the tunnel points there rather than at 8443 — tunnelling to
+  the self-signed port would only add a certificate for Cloudflare to distrust.
+  The session cookie is marked `Secure` automatically whenever the request
+  arrives over HTTPS, which through a tunnel it always does.
+
+If the image was built without network access the binary will be missing; the
+UI says so plainly and you can run `cloudflared` yourself against
+`http://<host>:8000` instead.
 
 ### About the certificate
 
@@ -205,7 +249,7 @@ Under plain `uvicorn` there is no TLS supervisor, so saving a certificate says
 
 ```bash
 createdb printflow_test
-cd backend && pytest              # 186 tests
+cd backend && pytest              # 226 tests
 ```
 
 The suite covers the state machine and decisioning maths as pure functions, the
@@ -213,8 +257,10 @@ full intake pipeline against a real PostgreSQL (bundle explosion, soft
 reservations, plate planning, dispatch, reconcile, assembly gate, failure and
 re-queue), the HTTP API including the setup wizard and label purchase, the
 integration clients (credential encryption, PKCE, retry/backoff, rate limiting,
-response parsing), and the security bootstrap (secret-key generation and
-persistence, certificate generation and validation, the security endpoints).
+response parsing), the security bootstrap (secret-key generation and
+persistence, certificate generation and validation, the security endpoints), and
+the tunnel (command building, log parsing, and the supervisor driven against a
+stand-in `cloudflared` to check it starts, restarts and stops cleanly).
 
 `TEST_DATABASE_URL` overrides the test database.
 
@@ -227,6 +273,7 @@ backend/app/
   models.py            schema, state vocabularies
   services/
     tls.py             certificate generation, validation, storage
+    tunnel.py          cloudflared config + supervised child process
     intake.py          receipt → lines → bundle explosion
     allocation.py      QBO print-or-pull decisioning
     printing.py        plate maths, dispatch, reconcile

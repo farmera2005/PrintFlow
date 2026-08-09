@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +71,7 @@ class CreateAdminRequest(BaseModel):
 @router.post("/admin")
 async def create_admin(
     body: CreateAdminRequest,
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -87,7 +88,7 @@ async def create_admin(
     user = User(username=body.username.strip(), password_hash=password_hash)
     session.add(user)
     await session.commit()
-    issue_session(response, user)
+    issue_session(response, user, request)
     return {"username": user.username}
 
 

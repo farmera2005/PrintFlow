@@ -14,9 +14,35 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PRINTFLOW_DATA_DIR=/data
+    PRINTFLOW_DATA_DIR=/data \
+    HOME=/home/printflow
 
 WORKDIR /app
+
+# cloudflared, so a Cloudflare Tunnel can be set up entirely from the wizard
+# rather than needing a second container. Best-effort: if the download fails
+# (offline build, GitHub unreachable) the image still works and the app says
+# plainly that the binary is missing instead of failing to start.
+ARG TARGETARCH=amd64
+ARG CLOUDFLARED_VERSION=latest
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    case "$TARGETARCH" in \
+      amd64|arm64|arm) arch="$TARGETARCH" ;; \
+      *) arch=amd64 ;; \
+    esac; \
+    if [ "$CLOUDFLARED_VERSION" = "latest" ]; then \
+      url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"; \
+    else \
+      url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${arch}"; \
+    fi; \
+    (curl -fsSL --retry 3 -o /usr/local/bin/cloudflared "$url" \
+      && chmod +x /usr/local/bin/cloudflared \
+      && /usr/local/bin/cloudflared --version) \
+      || echo "WARNING: cloudflared was not bundled; configure a tunnel externally"; \
+    apt-get purge -y --auto-remove curl; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

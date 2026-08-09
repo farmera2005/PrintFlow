@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,7 @@ class LoginRequest(BaseModel):
 @router.post("/login")
 async def login(
     body: LoginRequest,
+    request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -35,7 +36,7 @@ async def login(
     if user is None or not verify_password(body.password, user.password_hash):
         # Same message either way — don't leak whether the username exists.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect username or password")
-    issue_session(response, user)
+    issue_session(response, user, request)
     return {"username": user.username}
 
 
