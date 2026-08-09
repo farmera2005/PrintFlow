@@ -455,7 +455,11 @@ export default function OrderDrawer({
   const apply = async (promise: Promise<unknown>) => {
     try {
       const updated = (await promise) as Order
-      if (updated && typeof updated === 'object' && 'lines' in updated) {
+      // Array.isArray, not `'lines' in updated`: a response that carries a
+      // `lines` key of the wrong shape used to be handed straight to the
+      // renderer, which then called .map on it and took the whole drawer down.
+      // Reloading is always a safe answer; a blank screen never is.
+      if (updated && typeof updated === 'object' && Array.isArray(updated.lines)) {
         setOrder(updated)
       } else {
         await load()
@@ -484,12 +488,13 @@ export default function OrderDrawer({
       setNotice(null)
       await apply(
         api
-          .post<Order & { kept_jobs?: number }>(`${base}/unmatch`)
+          .post<Order & { unmatched?: { kept_jobs: number } }>(`${base}/unmatch`)
           .then((updated) => {
-            if (updated.kept_jobs) {
+            const kept = updated.unmatched?.kept_jobs ?? 0
+            if (kept) {
               setNotice(
-                `${updated.kept_jobs} print job${updated.kept_jobs === 1 ? '' : 's'} ` +
-                  'already on the Bambuddy queue were left as they are.',
+                `${kept} print job${kept === 1 ? '' : 's'} already on the Bambuddy ` +
+                  'queue were left as they are.',
               )
             }
             return updated
@@ -683,14 +688,16 @@ export default function OrderDrawer({
                       setNotice(null)
                       await apply(
                         api
-                          .post<Order & { lines?: number; kept_jobs?: number }>(
+                          .post<Order & { reset?: { kept_jobs: number } }>(
                             `/api/orders/${orderId}/reset-matching`,
                           )
                           .then((updated) => {
+                            const kept = updated.reset?.kept_jobs ?? 0
                             setNotice(
-                              `Re-matched from scratch.` +
-                                (updated.kept_jobs
-                                  ? ` ${updated.kept_jobs} job(s) already on the Bambuddy queue were left alone.`
+                              'Re-matched from scratch.' +
+                                (kept
+                                  ? ` ${kept} print job${kept === 1 ? '' : 's'} already on ` +
+                                    'the Bambuddy queue were left alone.'
                                   : ''),
                             )
                             return updated

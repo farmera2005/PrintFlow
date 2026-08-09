@@ -1166,12 +1166,16 @@ function VariationsEditor({
     setNotice(null)
     try {
       const saved = await api.post<
-        Product & { added: number; updated: number; retired: number }
+        Product & {
+          sync: { added: number; updated: number; retired: number; reattached: number }
+        }
       >(`/api/products/${product.id}/variations/sync-etsy`, {})
       await onSaved(saved)
+      const sync = saved.sync
       setNotice(
-        `${saved.added} new, ${saved.updated} refreshed` +
-          (saved.retired ? `, ${saved.retired} no longer sold` : '') +
+        `${sync.added} new, ${sync.updated} refreshed` +
+          (sync.retired ? `, ${sync.retired} no longer sold` : '') +
+          (sync.reattached ? `, ${sync.reattached} open order line(s) re-matched` : '') +
           '. Orders match these on their own.',
       )
     } catch (err) {

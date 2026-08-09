@@ -146,7 +146,7 @@ class TestUnmatching:
         body = (
             await signed_in.post(f"/api/orders/{order.id}/lines/{line.id}/unmatch")
         ).json()
-        assert body["kept_jobs"] == 0
+        assert body["unmatched"]["kept_jobs"] == 0
         assert (await db.execute(select(PrintJob))).scalars().all() == []
 
     async def test_a_plate_already_on_a_printer_is_kept_and_reported(self, signed_in, db):
@@ -170,7 +170,7 @@ class TestUnmatching:
         body = (
             await signed_in.post(f"/api/orders/{order.id}/lines/{line.id}/unmatch")
         ).json()
-        assert body["kept_jobs"] == 1
+        assert body["unmatched"]["kept_jobs"] == 1
         assert len((await db.execute(select(PrintJob))).scalars().all()) == 1
 
     async def test_a_bundle_takes_its_components_with_it(self, signed_in, db):
@@ -186,7 +186,7 @@ class TestUnmatching:
         body = (
             await signed_in.post(f"/api/orders/{order.id}/lines/{line.id}/unmatch")
         ).json()
-        assert body["removed_children"] == 1
+        assert body["unmatched"]["removed_children"] == 1
         assert len((await db.execute(select(OrderLine))).scalars().all()) == 1
 
     async def test_a_component_cannot_be_unmatched_on_its_own(self, signed_in, db):
@@ -228,7 +228,7 @@ class TestResetMatching:
         await db.commit()
 
         body = (await signed_in.post(f"/api/orders/{order.id}/reset-matching")).json()
-        assert body["lines"] == 1
+        assert body["reset"]["lines"] == 1
         line = await _top_line(db, order)
         await db.refresh(line)
         assert line.product_id == product.id
@@ -254,3 +254,80 @@ class TestResetMatching:
         await db.refresh(line)
         assert line.product_id is None
         assert line.state == "unmatched"
+
+
+# --------------------------------------------------------------------------
+# The shape the drawer is handed
+# --------------------------------------------------------------------------
+
+
+class TestResponseShape:
+    """Every endpoint that returns an order must return an *order*.
+
+    Reset matching used to merge its summary into the payload with `dict.update`,
+    and one of its keys was `lines` — the same name as the order's line tree. The
+    array became an integer, the drawer called .map on it, React unmounted, and
+    the screen went blank. Nothing in the type checker or the tests noticed,
+    because both sides agreed on a shape neither of them checked.
+    """
+
+    @staticmethod
+    def _assert_order_shaped(body):
+        assert isinstance(body, dict), body
+        assert isinstance(body["lines"], list), f"lines was {type(body['lines'])}"
+        assert isinstance(body["summary"], dict)
+        assert isinstance(body["status"], str)
+        for line in body["lines"]:
+            assert isinstance(line["print_jobs"], list)
+            assert isinstance(line["children"], list)
+            assert isinstance(line["variations"], list)
+
+    async def test_every_order_endpoint_returns_an_order(self, signed_in, db):
+        await _product(db, "BIN")
+        other = await _product(db, "BIN-OTHER")
+        await db.commit()
+        order, _ = await intake.ingest_receipt(db, _receipt(40))
+        await db.commit()
+        line = await _top_line(db, order)
+        base = f"/api/orders/{order.id}"
+
+        for label, response in [
+            ("detail", await signed_in.get(base)),
+            ("reprocess", await signed_in.post(f"{base}/reprocess")),
+            ("reset-matching", await signed_in.post(f"{base}/reset-matching")),
+            ("unmatch", await signed_in.post(f"{base}/lines/{line.id}/unmatch")),
+            (
+                "link-product",
+                await signed_in.post(
+                    f"{base}/lines/{line.id}/link-product",
+                    json={"product_id": str(other.id)},
+                ),
+            ),
+            (
+                "status",
+                await signed_in.put(f"{base}/status", json={"status": "assembly"}),
+            ),
+            (
+                "override",
+                await signed_in.post(
+                    f"{base}/lines/{line.id}/override", json={"action": "mark_ready"}
+                ),
+            ),
+        ]:
+            assert response.status_code == 200, f"{label}: {response.text}"
+            try:
+                self._assert_order_shaped(response.json())
+            except AssertionError as exc:
+                raise AssertionError(f"{label} did not return an order: {exc}") from exc
+
+    async def test_the_reset_summary_is_nested_where_it_cannot_collide(
+        self, signed_in, db
+    ):
+        await _product(db, "BIN")
+        await db.commit()
+        order, _ = await intake.ingest_receipt(db, _receipt(41))
+        await db.commit()
+
+        body = (await signed_in.post(f"/api/orders/{order.id}/reset-matching")).json()
+        assert body["reset"] == {"lines": 1, "kept_jobs": 0, "removed_children": 0}
+        assert isinstance(body["lines"], list)

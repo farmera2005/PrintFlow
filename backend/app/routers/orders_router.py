@@ -229,7 +229,10 @@ async def reset_matching(
     )
     await session.commit()
     detail = await board.load_order_detail(session, order_id)
-    detail.update(totals)
+    # Nested, not merged: the order payload has a `lines` key of its own — the
+    # line tree the drawer renders — and merging a count called `lines` over it
+    # replaced the array with an integer and blanked the screen.
+    detail["reset"] = totals
     return detail
 
 
@@ -260,7 +263,7 @@ async def unmatch_line(
     )
     await session.commit()
     detail = await board.load_order_detail(session, order_id)
-    detail.update(result)
+    detail["unmatched"] = result
     return detail
 
 

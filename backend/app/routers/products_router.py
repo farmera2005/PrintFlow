@@ -925,7 +925,9 @@ async def sync_variations_from_etsy(
     )
     await session.commit()
     payload = _serialize(await _get(session, product_id))
-    payload.update(result)
+    # Same reason as the order payloads: never merge loose keys into a shape the
+    # UI reads by name.
+    payload["sync"] = result
     return payload
 
 

@@ -390,7 +390,14 @@ class TestProgressToReadyToShip:
         assert stats["dispatched"] == 4
         assert order.status == "in_production"
         # print_options from the mapping ride along with the queue request.
-        assert fake_bambuddy.enqueued[0]["print_options"] == {"filament": "PLA-black"}
+        # Found by archive rather than by position: every plate for this order is
+        # created in one transaction, so they share a created_at and there is no
+        # order between them to rely on.
+        part_x_jobs = [job for job in fake_bambuddy.enqueued if job["archive_id"] == 501]
+        assert part_x_jobs, fake_bambuddy.enqueued
+        assert all(
+            job["print_options"] == {"filament": "PLA-black"} for job in part_x_jobs
+        )
 
         # Bambuddy reports everything finished.
         for item in fake_bambuddy.queue:

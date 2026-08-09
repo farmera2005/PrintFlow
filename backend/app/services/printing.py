@@ -157,6 +157,10 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
                     PrintJob.status == JOB_PENDING,
                     OrderLine.state != LINE_CANCELLED,
                 )
+                # Oldest first. Unordered, the queue went out in whatever order
+                # the database felt like, which is neither what an operator
+                # expects nor stable enough to reason about.
+                .order_by(PrintJob.created_at, PrintJob.id)
                 .limit(limit)
             )
         )
