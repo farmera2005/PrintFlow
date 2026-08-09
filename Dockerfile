@@ -66,7 +66,13 @@ ENV PRINTFLOW_GIT_SHA=$GIT_SHA \
     PRINTFLOW_BUILT_AT=$BUILD_TIME
 
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh \
+# Strip CR before anything tries to exec it. .gitattributes keeps LF endings in
+# git, but a checkout made before that existed — or one copied through a
+# Windows share — still carries CRLF, and the container then dies at start with
+# "exec /entrypoint.sh: no such file or directory" because the kernel is
+# looking for an interpreter called "/bin/sh\r". Cheap insurance.
+RUN sed -i 's/\r$//' /entrypoint.sh \
+    && chmod +x /entrypoint.sh \
     && useradd --create-home --uid 10001 printflow \
     && mkdir -p /data \
     && chown -R printflow /app /data
