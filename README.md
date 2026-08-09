@@ -39,9 +39,20 @@ When you make items into stock rather than against an order, record it on the
 **Manufacturing** tab. A sheet lists what you made and at what unit cost;
 posting it writes **one QuickBooks Expense** carrying:
 
-* a positive item line per product made — quantity on hand goes **up**;
+* a positive item line per thing made — quantity on hand goes **up**;
 * a negative item line per component its BOM consumed — quantity on hand goes
   **down**.
+
+A line names either a PrintFlow product or a **QuickBooks item picked straight
+from the list**, so stock that is not a product here — packaging, supplies,
+sub-assemblies — can still be counted in. A direct item line has no BOM and so
+consumes nothing; its cost is prefilled from the item's own cost in QuickBooks.
+
+Picking an item that a product already maps to files the line against that
+product, BOM and all. Otherwise the same physical act would post two different
+ways depending on which picker you happened to use. Service and non-inventory
+items are greyed out and refused: QuickBooks tracks no quantity on them, so
+such a line would book the expense and move no stock at all.
 
 Costed at the BOM roll-up, the two sides cancel and the expense totals zero: the
 sheet simply moves value out of components and into finished goods. Type a

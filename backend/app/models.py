@@ -21,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -439,7 +440,17 @@ class MadeSheet(Base):
 
 
 class MadeSheetLine(Base):
-    """One product made, in a quantity, at a unit cost."""
+    """One thing made, in a quantity, at a unit cost.
+
+    A line names either a PrintFlow product or a QuickBooks item directly.
+    Plenty of stock is worth counting into QuickBooks without ever being a
+    product here — supplies, sub-assemblies, anything not sold on Etsy — so the
+    sheet can reach straight into the QuickBooks item list.
+
+    When a chosen QuickBooks item *is* mapped to a product, the line is stored
+    against the product. Otherwise the same physical act would post differently
+    depending on which picker was used: no BOM, so no components consumed.
+    """
 
     __tablename__ = "made_sheet_lines"
 
@@ -449,26 +460,83 @@ class MadeSheetLine(Base):
     )
     # RESTRICT: a product named in a posted sheet is part of the accounting
     # record and must not vanish from under it.
-    product_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT")
     )
+    # Set instead of product_id when the line came from the QuickBooks list and
+    # no product maps to it. The name is a snapshot for display; the id is what
+    # posts.
+    qbo_item_id: Mapped[str | None] = mapped_column(Text)
+    qbo_item_name: Mapped[str | None] = mapped_column(Text)
+
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     # Numeric, not float: this is money and it is going into someone's books.
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False, default=0)
-    # True while the cost is still the BOM roll-up; cleared once someone types
-    # over it, so a later BOM change does not silently overwrite their figure.
+    # True while the cost is still the suggested one — a BOM roll-up, or the
+    # item's cost in QuickBooks. Cleared once someone types over it, so a later
+    # BOM change does not silently overwrite their figure.
     cost_from_bom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
     __table_args__ = (
-        UniqueConstraint("sheet_id", "product_id", name="uq_made_sheet_line_product"),
         CheckConstraint("quantity > 0", name="ck_made_sheet_line_quantity_positive"),
         CheckConstraint("unit_cost >= 0", name="ck_made_sheet_line_cost_not_negative"),
+        CheckConstraint(
+            "(product_id is not null) <> (qbo_item_id is not null)",
+            name="ck_made_sheet_line_one_target",
+        ),
+        # Partial indexes rather than one UniqueConstraint: a plain unique over
+        # both columns would let the same thing appear twice, once per column,
+        # because NULLs never collide.
+        Index(
+            "uq_made_sheet_line_product",
+            "sheet_id",
+            "product_id",
+            unique=True,
+            postgresql_where=text("product_id is not null"),
+            sqlite_where=text("product_id is not null"),
+        ),
+        Index(
+            "uq_made_sheet_line_qbo_item",
+            "sheet_id",
+            "qbo_item_id",
+            unique=True,
+            postgresql_where=text("qbo_item_id is not null"),
+            sqlite_where=text("qbo_item_id is not null"),
+        ),
     )
 
     sheet: Mapped[MadeSheet] = relationship(back_populates="lines")
-    product: Mapped[Product] = relationship(lazy="selectin")
+    product: Mapped[Product | None] = relationship(lazy="selectin")
+
+    # ----------------------------------------------------------------
+    # One shape for both kinds of line, so callers never branch on which
+    # column happens to be set.
+    # ----------------------------------------------------------------
+
+    @property
+    def item_id(self) -> str | None:
+        """The QuickBooks item this line moves, however the line was made."""
+        return self.product.qbo_item_id if self.product else self.qbo_item_id
+
+    @property
+    def item_label(self) -> str:
+        """What to call this line in an error message or a description."""
+        if self.product:
+            return self.product.sku
+        return self.qbo_item_name or f"QuickBooks item {self.qbo_item_id}"
+
+    @property
+    def item_name(self) -> str:
+        if self.product:
+            return self.product.name
+        return self.qbo_item_name or ""
+
+    @property
+    def bom_lines(self) -> list[BomLine]:
+        """Components consumed. A bare QuickBooks item has none."""
+        return list(self.product.bom_lines) if self.product else []
 
 
 class IntegrationCredential(Base):

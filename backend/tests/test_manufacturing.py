@@ -8,6 +8,8 @@ of the payload, and — most of all — the conditions under which nothing is se
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -699,6 +701,198 @@ class TestTheSheetApi:
         response = await signed_in.post(f"/api/manufacturing/sheets/{sheet_row.id}/post")
         assert response.status_code == 400
         assert "ORPHAN" in response.json()["detail"]
+
+
+class TestQuickBooksItemsCanBeAddedDirectly:
+    """Plenty of stock is worth counting into QuickBooks without being a product
+    here — supplies, sub-assemblies, anything not sold on Etsy."""
+
+    def _items(self, extra=None):
+        rows = [
+            {"Id": "50", "Name": "Packing Box", "Type": "Inventory",
+             "PurchaseCost": 0.85, "TrackQtyOnHand": True, "QtyOnHand": 100},
+            {"Id": "60", "Name": "Design Time", "Type": "Service", "PurchaseCost": 75.00},
+        ]
+        return rows + (extra or [])
+
+    def _handler(self, extra=None, posted=None):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                q = request.url.params.get("query", "")
+                ids = re.findall(r"'([^']+)'", q)
+                rows = [r for r in self._items(extra) if not ids or r["Id"] in ids]
+                return httpx.Response(200, json={"QueryResponse": {"Item": rows}})
+            if posted is not None:
+                posted.append(json.loads(request.content or b"{}"))
+            return httpx.Response(
+                200, json={"Purchase": {"Id": "5", "DocNumber": "88", "SyncToken": "0"}}
+            )
+
+        return handler
+
+    async def test_an_item_with_no_product_can_be_added(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, self._handler())
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        body = (
+            await signed_in.post(
+                f"/api/manufacturing/sheets/{sheet['id']}/lines",
+                json={"qbo_item_id": "50", "qbo_item_name": "Packing Box", "quantity": 40},
+            )
+        ).json()
+        line = body["lines"][0]
+        assert line["source"] == "quickbooks"
+        assert line["sku"] == "Packing Box"
+        assert line["qbo_item_id"] == "50"
+        # Prefilled from the item's own cost in QuickBooks.
+        assert line["unit_cost"] == "0.85"
+        assert line["amount"] == "34.00"
+
+    async def test_it_posts_the_item_and_consumes_nothing(
+        self, signed_in, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list[dict] = []
+        _patch_qbo(monkeypatch, self._handler(posted=posted))
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines",
+            json={"qbo_item_id": "50", "qbo_item_name": "Packing Box", "quantity": 40},
+        )
+        result = (
+            await signed_in.post(f"/api/manufacturing/sheets/{sheet['id']}/post")
+        ).json()
+        assert result["status"] == "posted"
+
+        lines = posted[0]["Line"]
+        assert len(lines) == 1
+        detail = lines[0]["ItemBasedExpenseLineDetail"]
+        assert detail["ItemRef"]["value"] == "50"
+        assert detail["Qty"] == 40
+
+    async def test_picking_an_item_that_maps_to_a_product_keeps_its_bom(
+        self, signed_in, db, monkeypatch
+    ):
+        """Otherwise the same physical act posts two different ways depending on
+        which picker was used — no BOM, so no components consumed."""
+        await _qbo_connected(db)
+        await _configured(db)
+        screw = await _product(db, "SCREW", qbo_id="1")
+        await _bundle(db, "WIDGET", [(screw, 4)])
+        await db.commit()
+
+        extra = [
+            {"Id": "1", "Name": "Screw", "Type": "Inventory", "PurchaseCost": 0.25,
+             "TrackQtyOnHand": True},
+            {"Id": "100", "Name": "Widget", "Type": "Inventory", "PurchaseCost": 1.00,
+             "TrackQtyOnHand": True},
+        ]
+        _patch_qbo(monkeypatch, self._handler(extra))
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        body = (
+            await signed_in.post(
+                f"/api/manufacturing/sheets/{sheet['id']}/lines",
+                # Item 100 is WIDGET's linked item, chosen from the QuickBooks list.
+                json={"qbo_item_id": "100", "qbo_item_name": "Widget", "quantity": 10},
+            )
+        ).json()
+        line = body["lines"][0]
+        assert line["source"] == "product"
+        assert line["sku"] == "WIDGET"
+        assert line["has_bom"] is True
+
+        preview = (
+            await signed_in.get(f"/api/manufacturing/sheets/{sheet['id']}/preview")
+        ).json()
+        assert [row["sku"] for row in preview["consumed"]] == ["SCREW"]
+        assert preview["consumed"][0]["quantity"] == 40
+
+    async def test_a_service_item_is_refused(self, signed_in, db, monkeypatch):
+        """A Service line would book the expense and move no stock at all."""
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, self._handler())
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines",
+            json={"qbo_item_id": "60", "qbo_item_name": "Design Time", "quantity": 2},
+        )
+        preview = (
+            await signed_in.get(f"/api/manufacturing/sheets/{sheet['id']}/preview")
+        ).json()
+        assert any("does not track quantity" in p for p in preview["problems"])
+
+        response = await signed_in.post(f"/api/manufacturing/sheets/{sheet['id']}/post")
+        assert response.status_code == 400
+
+    async def test_the_same_item_cannot_be_listed_twice(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, self._handler())
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        payload = {"qbo_item_id": "50", "qbo_item_name": "Packing Box", "quantity": 1}
+        first = await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines", json=payload
+        )
+        assert first.status_code == 200
+        second = await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines", json=payload
+        )
+        assert second.status_code == 409
+
+    async def test_a_line_must_name_exactly_one_thing(self, signed_in, db):
+        plain = await _product(db, "PLAIN", qbo_id="9")
+        await db.commit()
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+
+        neither = await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines", json={"quantity": 1}
+        )
+        assert neither.status_code == 422
+
+        both = await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines",
+            json={"product_id": str(plain.id), "qbo_item_id": "50", "quantity": 1},
+        )
+        assert both.status_code == 422
+
+    async def test_a_product_line_and_an_item_line_coexist(
+        self, signed_in, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _configured(db)
+        plain = await _product(db, "PLAIN", qbo_id="9")
+        await db.commit()
+        extra = [{"Id": "9", "Name": "Plain", "Type": "Inventory", "TrackQtyOnHand": True}]
+        posted: list[dict] = []
+        _patch_qbo(monkeypatch, self._handler(extra, posted))
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines",
+            json={"product_id": str(plain.id), "quantity": 2, "unit_cost": "1.00"},
+        )
+        await signed_in.post(
+            f"/api/manufacturing/sheets/{sheet['id']}/lines",
+            json={"qbo_item_id": "50", "qbo_item_name": "Packing Box", "quantity": 3},
+        )
+        result = (
+            await signed_in.post(f"/api/manufacturing/sheets/{sheet['id']}/post")
+        ).json()
+        assert result["status"] == "posted"
+        moved = {
+            line["ItemBasedExpenseLineDetail"]["ItemRef"]["value"]:
+                line["ItemBasedExpenseLineDetail"]["Qty"]
+            for line in posted[0]["Line"]
+        }
+        assert moved == {"9": 2, "50": 3}
 
 
 class TestPostingSettings:

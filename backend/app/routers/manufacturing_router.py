@@ -39,12 +39,13 @@ def _serialize_line(line: MadeSheetLine) -> dict[str, Any]:
     return {
         "id": line.id,
         "product_id": line.product_id,
-        "sku": line.product.sku,
-        "name": line.product.name,
-        "fulfillment": line.product.fulfillment,
-        "qbo_item_id": line.product.qbo_item_id,
-        "qbo_item_name": line.product.qbo_item_name,
-        "has_bom": bool(line.product.bom_lines),
+        # `sku` is the label the UI shows, whichever kind of line it is.
+        "sku": line.item_label,
+        "name": line.item_name,
+        "fulfillment": line.product.fulfillment if line.product else None,
+        "qbo_item_id": line.item_id,
+        "source": "product" if line.product else "quickbooks",
+        "has_bom": bool(line.bom_lines),
         "quantity": line.quantity,
         "unit_cost": str(manufacturing.money(line.unit_cost)),
         "cost_from_bom": line.cost_from_bom,
@@ -268,7 +269,11 @@ async def delete_sheet(
 
 
 class LineRequest(BaseModel):
-    product_id: uuid.UUID
+    """Name a PrintFlow product or a QuickBooks item — one of the two."""
+
+    product_id: uuid.UUID | None = None
+    qbo_item_id: str | None = None
+    qbo_item_name: str | None = None
     quantity: int = Field(gt=0)
     unit_cost: str | float | int | None = None
 
@@ -283,15 +288,38 @@ async def add_line(
     sheet = await _load(session, sheet_id)
     _editable(sheet)
 
-    product = await session.get(Product, body.product_id)
-    if product is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+    if bool(body.product_id) == bool(body.qbo_item_id):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Give either a product or a QuickBooks item, not both and not neither.",
+        )
+
+    product: Product | None = None
+    qbo_item_id: str | None = None
+
+    if body.product_id:
+        product = await manufacturing.loaded_product(session, body.product_id)
+        if product is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
+    else:
+        qbo_item_id = str(body.qbo_item_id)
+        # If a product already maps to this item, store the line against the
+        # product. Otherwise picking "Dragon Egg" from the QuickBooks list would
+        # skip its BOM and consume no components, so the same physical act would
+        # post two different ways depending on which picker was used.
+        product = await manufacturing.product_for_item(session, qbo_item_id)
+        if product is not None:
+            qbo_item_id = None
 
     from_bom = False
     if body.unit_cost is None:
-        # Prefill from the BOM roll-up, and remember that it was a suggestion so
-        # a later BOM change can refresh it without clobbering a typed figure.
-        suggested = await manufacturing.suggest_unit_cost(session, product)
+        # Prefill, and remember that it was a suggestion so a later change can
+        # refresh it without clobbering a typed figure.
+        suggested = (
+            await manufacturing.suggest_unit_cost(session, product)
+            if product is not None
+            else await manufacturing.qbo_item_cost(session, str(qbo_item_id))
+        )
         cost = suggested if suggested is not None else Decimal("0.00")
         from_bom = suggested is not None
     else:
@@ -300,11 +328,13 @@ async def add_line(
     # Read what the error message needs before committing: a rollback expires
     # every loaded object, and reading one back afterwards fails rather than
     # reloading, which would hide the real error behind a second one.
-    sku = product.sku
+    label = product.sku if product is not None else (body.qbo_item_name or "That item")
 
     line = MadeSheetLine(
         sheet_id=sheet.id,
-        product_id=product.id,
+        product_id=product.id if product is not None else None,
+        qbo_item_id=qbo_item_id,
+        qbo_item_name=(body.qbo_item_name or None) if qbo_item_id else None,
         quantity=body.quantity,
         unit_cost=cost,
         cost_from_bom=from_bom,
@@ -316,7 +346,7 @@ async def add_line(
         await session.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"{sku} is already on this sheet — change its quantity instead.",
+            f"{label} is already on this sheet — change its quantity instead.",
         ) from exc
 
     return _serialize(await _load(session, sheet_id))

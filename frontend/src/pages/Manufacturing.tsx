@@ -20,7 +20,7 @@ interface SheetLine {
   sku: string
   name: string
   qbo_item_id: string | null
-  qbo_item_name: string | null
+  source: 'product' | 'quickbooks'
   has_bom: boolean
   quantity: number
   unit_cost: string
@@ -68,6 +68,16 @@ interface ProductOption {
   sku: string
   name: string
   qbo_item_id: string | null
+}
+
+interface QboItem {
+  id: string
+  name: string
+  sku: string | null
+  type: string
+  qty_on_hand: number | null
+  purchase_cost: string | null
+  inventory: boolean
 }
 
 const STATUS_CLASSES: Record<Sheet['status'], string> = {
@@ -224,7 +234,11 @@ function SheetEditor({
 }) {
   const [current, setCurrent] = useState<Sheet>(sheet)
   const [preview, setPreview] = useState<Preview | null>(null)
+  const [source, setSource] = useState<'product' | 'quickbooks'>('product')
   const [addProduct, setAddProduct] = useState('')
+  const [itemQuery, setItemQuery] = useState('')
+  const [items, setItems] = useState<QboItem[] | null>(null)
+  const [addItem, setAddItem] = useState<QboItem | null>(null)
   const [addQty, setAddQty] = useState('1')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -254,18 +268,48 @@ function SheetEditor({
     onChanged()
   }
 
+  /* Search the QuickBooks item list, debounced so typing does not hammer it. */
+  useEffect(() => {
+    if (source !== 'quickbooks') return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      api
+        .get<{ items: QboItem[] }>(
+          `/api/integrations/qbo/items?limit=50&q=${encodeURIComponent(itemQuery)}`,
+        )
+        .then((data) => {
+          if (!cancelled) setItems(data.items)
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setItems([])
+            setError(errorMessage(err))
+          }
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [source, itemQuery])
+
   const addLine = async () => {
-    if (!addProduct) return
+    const body =
+      source === 'product'
+        ? { product_id: addProduct, quantity: Number(addQty) || 1 }
+        : {
+            qbo_item_id: addItem?.id,
+            qbo_item_name: addItem?.name,
+            quantity: Number(addQty) || 1,
+          }
+    if (source === 'product' ? !addProduct : !addItem) return
     setBusy('add')
     setError(null)
     try {
-      apply(
-        await api.post<Sheet>(`/api/manufacturing/sheets/${current.id}/lines`, {
-          product_id: addProduct,
-          quantity: Number(addQty) || 1,
-        }),
-      )
+      apply(await api.post<Sheet>(`/api/manufacturing/sheets/${current.id}/lines`, body))
       setAddProduct('')
+      setAddItem(null)
+      setItemQuery('')
       setAddQty('1')
       await loadPreview()
     } catch (err) {
@@ -392,7 +436,14 @@ function SheetEditor({
                     <tr key={line.id} className="border-t border-ink-100">
                       <td className="py-1.5 pr-3">
                         <div className="font-medium text-ink-800">{line.sku}</div>
-                        <div className="text-xs text-ink-500">{line.name}</div>
+                        <div className="text-xs text-ink-500">
+                          {line.name && line.name !== line.sku ? line.name : null}
+                          {line.source === 'quickbooks' ? (
+                            <span className={line.name !== line.sku ? 'ml-1' : ''}>
+                              straight from QuickBooks, no BOM
+                            </span>
+                          ) : null}
+                        </div>
                         {!line.qbo_item_id ? (
                           <div className="text-xs text-red-700">
                             Not linked to a QuickBooks item
@@ -428,7 +479,9 @@ function SheetEditor({
                           />
                         </div>
                         {line.cost_from_bom ? (
-                          <div className="text-xs text-ink-500">from BOM</div>
+                          <div className="text-xs text-ink-500">
+                            {line.source === 'product' ? 'from BOM' : 'from QuickBooks'}
+                          </div>
                         ) : null}
                       </td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">
@@ -455,37 +508,128 @@ function SheetEditor({
         </div>
 
         {draft ? (
-          <div className="flex flex-wrap items-end gap-2 rounded-md bg-ink-50 p-3">
-            <div className="min-w-56 flex-1">
-              <Field label="Add a product" hint="Cost is prefilled from its BOM where one exists.">
-                <select
-                  className={inputClass}
-                  value={addProduct}
-                  onChange={(e) => setAddProduct(e.target.value)}
+          <div className="space-y-3 rounded-md bg-ink-50 p-3">
+            <div className="flex gap-1 text-xs">
+              {(
+                [
+                  ['product', 'PrintFlow product'],
+                  ['quickbooks', 'QuickBooks item'],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSource(key)}
+                  className={cx(
+                    'rounded-md px-2.5 py-1 font-medium',
+                    source === key
+                      ? 'bg-ink-900 text-white'
+                      : 'text-ink-600 hover:bg-ink-100',
+                  )}
                 >
-                  <option value="">Choose a product…</option>
-                  {products.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.sku} — {product.name}
-                      {product.qbo_item_id ? '' : ' (not linked to QuickBooks)'}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+                  {label}
+                </button>
+              ))}
             </div>
-            <Field label="Quantity">
-              <div className="w-24">
-                <input
-                  className={inputClass}
-                  inputMode="numeric"
-                  value={addQty}
-                  onChange={(e) => setAddQty(e.target.value.replace(/\D/g, ''))}
-                />
-              </div>
-            </Field>
-            <Button onClick={addLine} disabled={!addProduct || busy === 'add'}>
-              {busy === 'add' ? 'Adding…' : 'Add'}
-            </Button>
+
+            <div className="flex flex-wrap items-end gap-2">
+              {source === 'product' ? (
+                <div className="min-w-56 flex-1">
+                  <Field
+                    label="Add a product"
+                    hint="Cost is prefilled from its BOM where one exists."
+                  >
+                    <select
+                      className={inputClass}
+                      value={addProduct}
+                      onChange={(e) => setAddProduct(e.target.value)}
+                    >
+                      <option value="">Choose a product…</option>
+                      {products.map((product) => (
+                        <option key={product.id} value={product.id}>
+                          {product.sku} — {product.name}
+                          {product.qbo_item_id ? '' : ' (not linked to QuickBooks)'}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+              ) : (
+                <div className="min-w-56 flex-1 space-y-2">
+                  <Field
+                    label="Find a QuickBooks item"
+                    hint="For stock you count into QuickBooks that is not a product here. Cost is prefilled from the item."
+                  >
+                    <input
+                      className={inputClass}
+                      placeholder="Search by name…"
+                      value={itemQuery}
+                      onChange={(e) => {
+                        setItemQuery(e.target.value)
+                        setAddItem(null)
+                      }}
+                    />
+                  </Field>
+                  {items === null ? (
+                    <p className="text-xs text-ink-500">Loading items…</p>
+                  ) : items.length === 0 ? (
+                    <p className="text-xs text-ink-500">No matching items.</p>
+                  ) : (
+                    <ul className="max-h-44 overflow-y-auto rounded-md border border-ink-200 bg-white">
+                      {items.map((item) => (
+                        <li key={item.id}>
+                          <button
+                            type="button"
+                            disabled={!item.inventory}
+                            onClick={() => setAddItem(item)}
+                            title={
+                              item.inventory
+                                ? undefined
+                                : `${item.type} items do not track quantity in QuickBooks`
+                            }
+                            className={cx(
+                              'flex w-full items-baseline gap-2 px-2 py-1 text-left text-sm',
+                              !item.inventory && 'cursor-not-allowed opacity-50',
+                              addItem?.id === item.id
+                                ? 'bg-ink-900 text-white'
+                                : 'hover:bg-ink-50',
+                            )}
+                          >
+                            <span className="flex-1 truncate">{item.name}</span>
+                            {!item.inventory ? (
+                              <span className="text-xs">{item.type}</span>
+                            ) : (
+                              <span className="text-xs opacity-70">
+                                on hand {item.qty_on_hand ?? '—'}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <Field label="Quantity">
+                <div className="w-24">
+                  <input
+                    className={inputClass}
+                    inputMode="numeric"
+                    value={addQty}
+                    onChange={(e) => setAddQty(e.target.value.replace(/\D/g, ''))}
+                  />
+                </div>
+              </Field>
+              <Button
+                onClick={addLine}
+                disabled={
+                  (source === 'product' ? !addProduct : !addItem) || busy === 'add'
+                }
+              >
+                {busy === 'add' ? 'Adding…' : 'Add'}
+              </Button>
+            </div>
           </div>
         ) : null}
 

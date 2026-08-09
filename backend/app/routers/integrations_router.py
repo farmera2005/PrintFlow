@@ -604,6 +604,12 @@ async def qbo_items(
                 "type": item.get("Type"),
                 "qty_on_hand": qbo_api.item_qty_on_hand(item),
                 "tracked": bool(item.get("TrackQtyOnHand")),
+                # Used to prefill a made-items line and to grey out the items a
+                # Purchase cannot move.
+                "purchase_cost": (
+                    str(cost) if (cost := qbo_api.item_purchase_cost(item)) is not None else None
+                ),
+                "inventory": qbo_api.item_is_inventory(item),
             }
             for item in items
         ]

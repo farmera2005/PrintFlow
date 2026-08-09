@@ -121,6 +121,54 @@ async def component_costs(
     return out
 
 
+async def qbo_item(session: AsyncSession, item_id: str) -> dict[str, Any] | None:
+    """One QuickBooks item, or None if it cannot be read right now."""
+    try:
+        client = await qbo_api.client_for(session)
+        return (await client.get_items([item_id])).get(str(item_id))
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        log.info("Could not read QuickBooks item %s: %s", item_id, exc)
+        return None
+
+
+async def qbo_item_cost(session: AsyncSession, item_id: str) -> Decimal | None:
+    """What QuickBooks says the item costs — the prefill for a direct item line."""
+    item = await qbo_item(session, item_id)
+    return qbo_api.item_purchase_cost(item) if item else None
+
+
+async def non_inventory_items(
+    session: AsyncSession, item_ids: list[str]
+) -> dict[str, str]:
+    """Of these items, the ones whose quantity a Purchase line cannot move.
+
+    QuickBooks only tracks quantity on Inventory items. A Service or
+    Non-Inventory item on a made-items sheet posts an expense and changes no
+    stock at all — the sheet would look like it worked and do nothing.
+
+    Returns {item_id: type}. Empty when QuickBooks cannot be read: an unproven
+    suspicion is not worth blocking a posting over, and the post itself will
+    fail loudly if QuickBooks is genuinely unreachable.
+    """
+    ids = [i for i in dict.fromkeys(item_ids) if i]
+    if not ids:
+        return {}
+    try:
+        client = await qbo_api.client_for(session)
+        items = await client.get_items(ids)
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        log.info("Could not check item types: %s", exc)
+        return {}
+    # Only report a type QuickBooks actually stated. An item that came back
+    # without one is unconfirmed, not wrong, and blocking a posting on a failure
+    # to confirm would be the more expensive mistake of the two.
+    return {
+        item_id: str(item["Type"])
+        for item_id, item in items.items()
+        if item.get("Type") and not qbo_api.item_is_inventory(item)
+    }
+
+
 async def suggest_unit_cost(session: AsyncSession, product: Product) -> Decimal | None:
     """The BOM roll-up used to prefill a new line, or None if it cannot be had."""
     product = await loaded_product(session, product.id) or product
@@ -150,7 +198,7 @@ def explode_components(lines: list[MadeSheetLine]) -> dict[uuid.UUID, tuple[Prod
     """
     consumed: dict[uuid.UUID, tuple[Product, int]] = {}
     for line in lines:
-        for bom in line.product.bom_lines:
+        for bom in line.bom_lines:
             product = bom.component
             _, running = consumed.get(product.id, (product, 0))
             consumed[product.id] = (product, running + bom.quantity * line.quantity)
@@ -173,20 +221,22 @@ async def preview(session: AsyncSession, sheet: MadeSheet) -> dict[str, Any]:
         made_total += amount
         made.append(
             {
-                "product_id": str(line.product_id),
-                "sku": line.product.sku,
-                "name": line.product.name,
+                "product_id": str(line.product_id) if line.product_id else None,
+                "sku": line.item_label,
+                "name": line.item_name,
                 "quantity": line.quantity,
                 "unit_cost": str(money(line.unit_cost)),
                 "amount": str(amount),
-                "qbo_item_id": line.product.qbo_item_id,
-                "qbo_item_name": line.product.qbo_item_name,
+                "qbo_item_id": line.item_id,
+                "source": "product" if line.product else "quickbooks",
             }
         )
 
     consumed: list[dict[str, Any]] = []
     consumed_total = Decimal("0")
-    costs = await _safe_component_costs(session, [line.product for line in sheet.lines])
+    costs = await _safe_component_costs(
+        session, [line.product for line in sheet.lines if line.product]
+    )
     for product, quantity in explode_components(sheet.lines).values():
         unit = costs.get(product.qbo_item_id or "")
         amount = money(unit * quantity) if unit is not None else None
@@ -254,10 +304,11 @@ async def problems(
         )
 
     for line in sheet.lines:
-        if not line.product.qbo_item_id:
+        if not line.item_id:
             found.append(
-                f"{line.product.sku} is not linked to a QuickBooks item, so its "
-                "quantity cannot be changed. Link it on the Products page."
+                f"{line.item_label} is not linked to a QuickBooks item, so its "
+                "quantity cannot be changed. Link it on the Products page, or add "
+                "the QuickBooks item to this sheet directly."
             )
     for product, _ in explode_components(sheet.lines).values():
         if not product.qbo_item_id:
@@ -265,6 +316,18 @@ async def problems(
                 f"{product.sku} is used as a component but is not linked to a "
                 "QuickBooks item, so it cannot be consumed."
             )
+
+    # Only Inventory items carry a quantity. Posting a Service item would book
+    # the expense and move no stock, which reads as success and is not.
+    labels = {line.item_id: line.item_label for line in sheet.lines if line.item_id}
+    labels.update(
+        {p.qbo_item_id: p.sku for p, _ in explode_components(sheet.lines).values() if p.qbo_item_id}
+    )
+    for item_id, item_type in (await non_inventory_items(session, list(labels))).items():
+        found.append(
+            f"{labels.get(item_id, item_id)} is a {item_type} item in QuickBooks, "
+            "which does not track quantity. Only Inventory items can be made into stock."
+        )
     return found
 
 
@@ -290,11 +353,11 @@ def build_purchase(
         unit = money(line.unit_cost)
         lines.append(
             _item_line(
-                item_id=str(line.product.qbo_item_id),
+                item_id=str(line.item_id),
                 quantity=line.quantity,
                 unit_cost=unit,
                 amount=money(unit * line.quantity),
-                description=f"Made {line.quantity} × {line.product.sku} — {line.product.name}",
+                description=_made_description(line),
                 account_id=settings.get("account_id"),
             )
         )
@@ -355,6 +418,12 @@ def _item_line(
     }
 
 
+def _made_description(line: MadeSheetLine) -> str:
+    name = line.item_name
+    label = f"Made {line.quantity} × {line.item_label}"
+    return f"{label} — {name}" if name and name != line.item_label else label
+
+
 def _note(sheet: MadeSheet) -> str:
     note = f"PrintFlow made-items sheet {sheet.reference}"
     if sheet.memo:
@@ -370,7 +439,9 @@ async def post(session: AsyncSession, sheet: MadeSheet, *, actor: str) -> MadeSh
     if found:
         raise SheetError(" ".join(found))
 
-    costs = await _safe_component_costs(session, [line.product for line in sheet.lines])
+    costs = await _safe_component_costs(
+        session, [line.product for line in sheet.lines if line.product]
+    )
     body = build_purchase(sheet, settings=settings, component_unit_costs=costs)
 
     client = await qbo_api.client_for(session)
@@ -496,6 +567,23 @@ async def get_sheet(session: AsyncSession, sheet_id: uuid.UUID) -> MadeSheet | N
 async def loaded(session: AsyncSession, sheet: MadeSheet) -> MadeSheet:
     """The same sheet, with its whole graph guaranteed present."""
     return await get_sheet(session, sheet.id) or sheet
+
+
+async def product_for_item(session: AsyncSession, qbo_item_id: str) -> Product | None:
+    """The product mapped to this QuickBooks item, if any.
+
+    Used to fold a QuickBooks-list pick back onto the product it represents, so
+    the BOM still applies.
+    """
+    return (
+        await session.execute(
+            select(Product)
+            .where(Product.qbo_item_id == str(qbo_item_id))
+            .options(selectinload(Product.bom_lines).selectinload(BomLine.component))
+            .order_by(Product.sku)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def loaded_product(session: AsyncSession, product_id: uuid.UUID) -> Product | None:
