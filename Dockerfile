@@ -23,26 +23,32 @@ WORKDIR /app
 # rather than needing a second container. Best-effort: if the download fails
 # (offline build, GitHub unreachable) the image still works and the app says
 # plainly that the binary is missing instead of failing to start.
+#
+# Downloaded with Python rather than curl on purpose: installing curl meant an
+# apt round-trip, and `apt-get purge --auto-remove curl` can take
+# ca-certificates with it (apt treats it as a dependency it pulled in), which
+# would quietly break every outbound HTTPS call to Etsy and QuickBooks. Python
+# is already here and needs no cleanup.
 ARG TARGETARCH=amd64
 ARG CLOUDFLARED_VERSION=latest
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends curl ca-certificates; \
-    case "$TARGETARCH" in \
-      amd64|arm64|arm) arch="$TARGETARCH" ;; \
-      *) arch=amd64 ;; \
-    esac; \
+RUN set -eu; \
+    arch="${TARGETARCH:-amd64}"; \
+    case "$arch" in amd64|arm64|arm) ;; *) arch=amd64 ;; esac; \
     if [ "$CLOUDFLARED_VERSION" = "latest" ]; then \
       url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"; \
     else \
       url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${arch}"; \
     fi; \
-    (curl -fsSL --retry 3 -o /usr/local/bin/cloudflared "$url" \
+    ( python -c "import sys,urllib.request; urllib.request.urlretrieve(sys.argv[1], '/usr/local/bin/cloudflared')" "$url" \
       && chmod +x /usr/local/bin/cloudflared \
-      && /usr/local/bin/cloudflared --version) \
-      || echo "WARNING: cloudflared was not bundled; configure a tunnel externally"; \
-    apt-get purge -y --auto-remove curl; \
-    rm -rf /var/lib/apt/lists/*
+      && /usr/local/bin/cloudflared --version ) \
+      || { \
+        echo "WARNING: cloudflared was not bundled; set the tunnel up externally"; \
+        rm -f /usr/local/bin/cloudflared; \
+      }
+# The rm matters: a partial download or a wrong-architecture binary would still
+# look "installed" to the app, which would then report the tunnel as available
+# and fail confusingly at runtime instead of saying it is missing.
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

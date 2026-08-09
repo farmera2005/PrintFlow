@@ -1,6 +1,24 @@
 #!/bin/sh
 set -e
 
+DATA_DIR="${PRINTFLOW_DATA_DIR:-/data}"
+
+# The container runs unprivileged, so it cannot chown its own volume. A volume
+# created before the image declared /data is owned by root, and the app would
+# die on the encryption key with a traceback instead of something actionable.
+if [ ! -d "$DATA_DIR" ] || [ ! -w "$DATA_DIR" ]; then
+  echo "PrintFlow: cannot write to $DATA_DIR (running as uid $(id -u))." >&2
+  echo >&2
+  echo "  That directory holds the encryption key for your stored credentials," >&2
+  echo "  so it has to persist and be writable. Fix the ownership once with:" >&2
+  echo >&2
+  echo "    docker compose run --rm --user root --entrypoint sh app \\" >&2
+  echo "      -c 'chown -R 10001 $DATA_DIR'" >&2
+  echo "    docker compose up -d" >&2
+  echo >&2
+  exit 1
+fi
+
 echo "PrintFlow: waiting for the database..."
 python - <<'PY'
 import os, socket, sys, time
