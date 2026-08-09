@@ -6,6 +6,7 @@ import SetupWizard from './pages/SetupWizard'
 import Board from './pages/Board'
 import Products from './pages/Products'
 import PrintQueue from './pages/PrintQueue'
+import Manufacturing from './pages/Manufacturing'
 import Settings from './pages/Settings'
 import SyncLog from './pages/SyncLog'
 import { api } from './lib/api'
@@ -64,6 +65,7 @@ export default function App() {
         <Route path="/" element={<Board />} />
         <Route path="/products" element={<Products />} />
         <Route path="/print-queue" element={<PrintQueue />} />
+        <Route path="/manufacturing" element={<Manufacturing />} />
         <Route path="/sync-log" element={<SyncLog />} />
         <Route path="/settings" element={<Settings onChange={refresh} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

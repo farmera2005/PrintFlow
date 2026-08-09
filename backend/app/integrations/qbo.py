@@ -1,13 +1,18 @@
-"""QuickBooks Online client — read only.
+"""QuickBooks Online client.
 
-QBO is the inventory system of record. This platform only ever reads QtyOnHand;
-it never posts inventory adjustments (§4.2).
+QBO is the inventory system of record. Order handling only ever reads QtyOnHand
+(§4.2) — nothing in the order pipeline writes to the books.
+
+The one exception is manufacturing: posting a made-items sheet creates a
+Purchase, which is how QuickBooks raises quantity on hand. Every write is
+started by a person pressing a button; no background job posts anything.
 """
 
 from __future__ import annotations
 
 import base64
 import time
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
 
@@ -182,6 +187,91 @@ class QboClient:
             )
         return response.json().get("QueryResponse", {})
 
+    async def _write(
+        self,
+        entity: str,
+        body: dict[str, Any],
+        *,
+        params: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """POST to an entity endpoint. Writes are never retried automatically.
+
+        A create that times out may well have succeeded, and a blind retry would
+        duplicate a transaction in someone's books. `request_id` is QuickBooks'
+        own idempotency key: replaying the same one returns the original result
+        instead of creating a second document.
+        """
+        if not self.realm_id:
+            raise AuthExpiredError(PROVIDER_QBO, "No QuickBooks company (realm) stored")
+        query: dict[str, Any] = {"minorversion": MINOR_VERSION, **(params or {})}
+        if request_id:
+            query["requestid"] = request_id
+        headers = {
+            "Authorization": f"Bearer {await self._access_token()}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        async with new_client(base_url=self.api_base) as client:
+            response = await request(
+                client,
+                "POST",
+                f"/v3/company/{self.realm_id}/{entity}",
+                provider=PROVIDER_QBO,
+                headers=headers,
+                params=query,
+                json=body,
+                retries=0,
+            )
+        return response.json()
+
+    async def create_purchase(
+        self, purchase: dict[str, Any], *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Create an Expense. Item lines are what move quantity on hand."""
+        data = await self._write("purchase", purchase, request_id=request_id)
+        return data.get("Purchase") or {}
+
+    async def void_purchase(self, purchase_id: str, sync_token: str) -> dict[str, Any]:
+        """Delete the Purchase, reversing every quantity it moved.
+
+        QuickBooks has no void for a Purchase — delete is the reversal, and it
+        is what the UI's "Void" does. The sheet keeps the id and the payload, so
+        the history of what was posted survives the deletion.
+        """
+        data = await self._write(
+            "purchase",
+            {"Id": str(purchase_id), "SyncToken": str(sync_token)},
+            params={"operation": "delete"},
+        )
+        return data.get("Purchase") or {}
+
+    async def get_accounts(
+        self, account_types: tuple[str, ...] = (), limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Chart of accounts, for choosing what the manufacturing cost comes out of."""
+        where = " where Active = true"
+        if account_types:
+            joined = ",".join(f"'{escape_literal(t)}'" for t in account_types)
+            where += f" and AccountType in ({joined})"
+        result = await self.query(
+            f"select * from Account{where} maxresults {max(1, min(limit, 1000))}"
+        )
+        return list(result.get("Account") or [])
+
+    async def search_vendors(self, term: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 200))
+        if term.strip():
+            needle = escape_literal(term.strip())
+            statement = (
+                f"select * from Vendor where DisplayName like '%{needle}%' "
+                f"maxresults {limit}"
+            )
+        else:
+            statement = f"select * from Vendor maxresults {limit}"
+        result = await self.query(statement)
+        return list(result.get("Vendor") or [])
+
     async def company_info(self) -> dict[str, Any]:
         result = await self.query("select * from CompanyInfo")
         rows = result.get("CompanyInfo") or []
@@ -213,6 +303,26 @@ class QboClient:
             statement = f"select * from Item maxresults {limit}"
         result = await self.query(statement)
         return list(result.get("Item") or [])
+
+
+def item_purchase_cost(item: dict[str, Any]) -> Decimal | None:
+    """What QuickBooks last recorded as this item's cost, if anything.
+
+    Decimal, not float: these values are summed into a figure that is posted to
+    someone's books, and 0.1 + 0.2 must not be 0.30000000000000004 there.
+    """
+    raw = item.get("PurchaseCost")
+    if raw is None:
+        return None
+    try:
+        return Decimal(str(raw))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+
+
+def item_is_inventory(item: dict[str, Any]) -> bool:
+    """Only Inventory items carry a quantity that a Purchase can move."""
+    return str(item.get("Type") or "") == "Inventory"
 
 
 def item_qty_on_hand(item: dict[str, Any]) -> float | None:

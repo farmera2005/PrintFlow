@@ -610,6 +610,65 @@ async def qbo_items(
     }
 
 
+# Which accounts make sense as the other side of a manufacturing posting. Cost
+# of Goods Sold and Expense cover the usual choices; Other Current Asset is
+# there for shops that run a work-in-process account.
+MANUFACTURING_ACCOUNT_TYPES = (
+    "Cost of Goods Sold",
+    "Expense",
+    "Other Expense",
+    "Other Current Asset",
+    "Bank",
+)
+
+
+@router.get("/qbo/accounts")
+async def qbo_accounts(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Chart of accounts for the manufacturing-cost picker."""
+    try:
+        client = await qbo_api.client_for(session)
+        accounts = await client.get_accounts(MANUFACTURING_ACCOUNT_TYPES)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {
+        "accounts": [
+            {
+                "id": account.get("Id"),
+                "name": account.get("FullyQualifiedName") or account.get("Name"),
+                "type": account.get("AccountType"),
+                "subtype": account.get("AccountSubType"),
+            }
+            for account in accounts
+        ]
+    }
+
+
+@router.get("/qbo/vendors")
+async def qbo_vendors(
+    q: str = "",
+    limit: int = 50,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Optional payee on a manufacturing posting."""
+    try:
+        client = await qbo_api.client_for(session)
+        vendors = await client.search_vendors(q, limit)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {
+        "vendors": [
+            {"id": v.get("Id"), "name": v.get("DisplayName")} for v in vendors
+        ]
+    }
+
+
 # --------------------------------------------------------------------------
 # Bambuddy
 # --------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from .integrations.base import AuthExpiredError, IntegrationError
 from .routers import (
     auth_router,
     integrations_router,
+    manufacturing_router,
     orders_router,
     print_jobs_router,
     products_router,
@@ -65,6 +66,7 @@ app.include_router(setup_router.router)
 app.include_router(security_router.router)
 app.include_router(integrations_router.router)
 app.include_router(products_router.router)
+app.include_router(manufacturing_router.router)
 app.include_router(orders_router.router)
 app.include_router(print_jobs_router.router)
 app.include_router(system_router.router)

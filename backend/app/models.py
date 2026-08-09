@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -128,6 +130,11 @@ JOB_STATUSES = (
 
 # Jobs the reconciler still needs to poll Bambuddy about.
 JOB_OPEN_STATUSES = (JOB_PENDING, JOB_QUEUED, JOB_PRINTING)
+
+SHEET_DRAFT = "draft"
+SHEET_POSTED = "posted"
+SHEET_VOIDED = "voided"
+SHEET_STATUSES = (SHEET_DRAFT, SHEET_POSTED, SHEET_VOIDED)
 
 PROVIDER_ETSY = "etsy"
 PROVIDER_QBO = "qbo"
@@ -373,6 +380,95 @@ class PrintJob(Base):
     )
 
     order_line: Mapped[OrderLine] = relationship(back_populates="print_jobs")
+
+
+class MadeSheet(Base):
+    """A batch of items manufactured into stock.
+
+    Posting one writes a single Purchase (an Expense) to QuickBooks: item lines
+    for what was made, and — where the product has a BOM — negative item lines
+    for the components it consumed. QuickBooks raises quantity on hand for the
+    positive lines and lowers it for the negative ones, so the sheet moves value
+    from components into finished goods in one transaction.
+
+    Sheets are drafts until posted. Nothing reaches QuickBooks without someone
+    pressing Post, and a posted sheet is immutable — correcting one means
+    voiding it and making another, the same as in any ledger.
+    """
+
+    __tablename__ = "made_sheets"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    reference: Mapped[str] = mapped_column(Text, nullable=False)
+    made_on: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    memo: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default=SHEET_DRAFT)
+
+    qbo_purchase_id: Mapped[str | None] = mapped_column(Text)
+    qbo_doc_number: Mapped[str | None] = mapped_column(Text)
+    qbo_sync_token: Mapped[str | None] = mapped_column(Text)
+    # What was actually sent and what came back, kept verbatim. When a posting
+    # is questioned months later the payload is the only reliable answer.
+    qbo_request: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
+    qbo_response: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
+    # Stable across retries so a timeout followed by a retry cannot post twice.
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, default=uuid.uuid4
+    )
+
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    posted_by: Mapped[str | None] = mapped_column(Text)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('draft','posted','voided')", name="ck_made_sheets_status"
+        ),
+        Index("ix_made_sheets_status", "status"),
+    )
+
+    lines: Mapped[list[MadeSheetLine]] = relationship(
+        back_populates="sheet",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="MadeSheetLine.created_at",
+    )
+
+
+class MadeSheetLine(Base):
+    """One product made, in a quantity, at a unit cost."""
+
+    __tablename__ = "made_sheet_lines"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    sheet_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("made_sheets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # RESTRICT: a product named in a posted sheet is part of the accounting
+    # record and must not vanish from under it.
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Numeric, not float: this is money and it is going into someone's books.
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False, default=0)
+    # True while the cost is still the BOM roll-up; cleared once someone types
+    # over it, so a later BOM change does not silently overwrite their figure.
+    cost_from_bom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint("sheet_id", "product_id", name="uq_made_sheet_line_product"),
+        CheckConstraint("quantity > 0", name="ck_made_sheet_line_quantity_positive"),
+        CheckConstraint("unit_cost >= 0", name="ck_made_sheet_line_cost_not_negative"),
+    )
+
+    sheet: Mapped[MadeSheet] = relationship(back_populates="lines")
+    product: Mapped[Product] = relationship(lazy="selectin")
 
 
 class IntegrationCredential(Base):

@@ -7,7 +7,7 @@ between them and the single pane of glass over the whole fulfilment flow.
 | Platform           | Role                                        | Direction                       |
 | ------------------ | ------------------------------------------- | ------------------------------- |
 | Etsy               | Sales channel — source of orders            | Read only (poll receipts)       |
-| QuickBooks Online  | Inventory system of record — quantity on hand | Read only (item quantities)   |
+| QuickBooks Online  | Inventory system of record — quantity on hand | Read for orders; writes only a made-items sheet you post |
 | Bambuddy           | Print farm manager — queue + archived 3MFs  | Read/write (queue, track)       |
 | ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, buy labels) |
 
@@ -27,8 +27,41 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 7. At **Ready to Ship**, you click Create Label. ShipStation's own Etsy
    connection pushes the tracking number back to Etsy.
 
-**PrintFlow never writes to Etsy or QuickBooks.** Labels are never bought
-automatically — they cost money, so they are always an explicit click.
+**PrintFlow never writes to Etsy.** Order handling never writes to QuickBooks
+either — importing, deciding and fulfilling an order only ever reads quantity on
+hand. The single exception is the Manufacturing tab, and it only acts when you
+press Post. Labels are never bought automatically — they cost money, so they are
+always an explicit click.
+
+## Manufacturing (made-items sheets)
+
+When you make items into stock rather than against an order, record it on the
+**Manufacturing** tab. A sheet lists what you made and at what unit cost;
+posting it writes **one QuickBooks Expense** carrying:
+
+* a positive item line per product made — quantity on hand goes **up**;
+* a negative item line per component its BOM consumed — quantity on hand goes
+  **down**.
+
+Costed at the BOM roll-up, the two sides cancel and the expense totals zero: the
+sheet simply moves value out of components and into finished goods. Type a
+higher unit cost to absorb labour or machine time and the difference lands in
+the account you choose under **Settings → QuickBooks → Manufacturing postings**.
+There is no default for that account, and posting stays blocked until you pick
+one — where manufacturing cost belongs depends on your chart of accounts, and
+guessing would file it somewhere you did not choose.
+
+Guardrails, because this is the one place PrintFlow writes to your books:
+
+* Nothing posts without a person pressing Post. No background job posts.
+* The sheet shows exactly what will happen — both totals and the difference —
+  before you commit, and again in the confirmation.
+* A posted sheet is immutable. Correcting one means Void (which deletes the
+  QuickBooks transaction and reverses every quantity) plus a new sheet.
+* Each posting carries an idempotency key, so a timeout followed by a retry
+  cannot produce two transactions.
+* A product with no QuickBooks item linked blocks the post rather than silently
+  posting a sheet that moves nothing.
 
 ## Running it
 
@@ -451,6 +484,7 @@ frontend/src/          React + Vite + Tailwind SPA
 
 ## Not in v1
 
-No writes to Etsy or QuickBooks. No accounting features. No multi-user roles.
+No writes to Etsy. In QuickBooks, only made-items sheets — no invoices, bills,
+journal entries or other accounting features. No multi-user roles.
 No multi-level BOMs (a bundle may not contain a bundle — this is validated). No
 automatic label purchase. No filament or spool tracking — Bambuddy owns that.

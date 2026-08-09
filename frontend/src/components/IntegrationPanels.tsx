@@ -434,6 +434,122 @@ export function EtsyPanel({ status, redirectUri, onChange }: PanelProps) {
 // QuickBooks Online
 // --------------------------------------------------------------------------
 
+interface ManufacturingSettings {
+  account_id: string | null
+  account_name: string | null
+  payment_type: string
+  doc_number_prefix: string
+}
+
+/** Where the cost of a made-items sheet lands.
+ *
+ * There is deliberately no default: which account is right depends on how the
+ * shop's books are laid out, and picking one on their behalf would quietly file
+ * manufacturing cost somewhere they did not choose. Posting stays blocked until
+ * this is set, and the Manufacturing tab says so.
+ */
+function ManufacturingPosting() {
+  const [settings, setSettings] = useState<ManufacturingSettings | null>(null)
+  const [accounts, setAccounts] = useState<{ id: string; name: string; type: string }[]>([])
+  const [paymentTypes, setPaymentTypes] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api
+      .get<{ settings: ManufacturingSettings; payment_types: string[] }>(
+        '/api/manufacturing/settings',
+      )
+      .then((data) => {
+        setSettings(data.settings)
+        setPaymentTypes(data.payment_types)
+      })
+      .catch((err) => setError(errorMessage(err)))
+    api
+      .get<{ accounts: { id: string; name: string; type: string }[] }>(
+        '/api/integrations/qbo/accounts',
+      )
+      .then((data) => setAccounts(data.accounts))
+      .catch(() => setAccounts([]))
+  }, [])
+
+  const save = async (changes: Partial<ManufacturingSettings>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const data = await api.put<{ settings: ManufacturingSettings }>(
+        '/api/manufacturing/settings',
+        changes,
+      )
+      setSettings(data.settings)
+      setSaved(true)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!settings) return null
+
+  return (
+    <div className="space-y-3 rounded-md bg-ink-50 p-3">
+      <p className="text-sm font-medium text-ink-800">Manufacturing postings</p>
+      <Field
+        label="Account for manufacturing cost"
+        hint="Where the difference between what you made and what it consumed lands. A pure assembly nets to zero and never touches it."
+      >
+        <select
+          className={inputClass}
+          value={settings.account_id ?? ''}
+          disabled={busy}
+          onChange={(e) => {
+            const account = accounts.find((a) => a.id === e.target.value)
+            save({ account_id: account?.id ?? null, account_name: account?.name ?? null })
+          }}
+        >
+          <option value="">Choose an account…</option>
+          {accounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name} ({account.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+      {!accounts.length ? (
+        <p className="text-xs text-ink-500">
+          Could not read your chart of accounts. Reconnect QuickBooks, or reload
+          this page once it is back.
+        </p>
+      ) : null}
+      <Field label="Payment type" hint="How QuickBooks records the expense.">
+        <select
+          className={inputClass}
+          value={settings.payment_type}
+          disabled={busy}
+          onChange={(e) => save({ payment_type: e.target.value })}
+        >
+          {paymentTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {!settings.account_id ? (
+        <Alert tone="warning">
+          Until an account is chosen, made-items sheets can be built but not posted.
+        </Alert>
+      ) : null}
+      {saved && settings.account_id ? (
+        <p className="text-xs text-emerald-700">Saved.</p>
+      ) : null}
+      {error ? <Alert tone="error">{error}</Alert> : null}
+    </div>
+  )
+}
+
 export function QboPanel({ status, redirectUri, onChange }: PanelProps) {
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
@@ -471,8 +587,11 @@ export function QboPanel({ status, redirectUri, onChange }: PanelProps) {
           <dd className="text-ink-800">{status.detail.environment}</dd>
         </dl>
         <p className="text-xs text-ink-500">
-          Read-only: PrintFlow reads QtyOnHand and never posts inventory adjustments.
+          Order handling is read-only: PrintFlow reads QtyOnHand and never posts
+          anything while importing or fulfilling orders. The one write is a
+          made-items sheet on the Manufacturing tab, and only when you press Post.
         </p>
+        <ManufacturingPosting />
       </div>
     )
   }

@@ -31,6 +31,16 @@ export function BoardIcon(props: IconProps) {
   )
 }
 
+export function ManufacturingIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 20h18" />
+      <path d="M4 20V9l5 3.5V9l5 3.5V9l5 3.5V20" />
+      <path d="M9 20v-3.5h3V20" />
+    </Svg>
+  )
+}
+
 export function ProductsIcon(props: IconProps) {
   return (
     <Svg {...props}>
