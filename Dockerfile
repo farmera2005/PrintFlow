@@ -52,6 +52,13 @@ COPY backend/ ./
 # and no CORS configuration to get wrong.
 COPY --from=frontend /build/dist ./app/static
 
+# Stamped by update.sh so the running commit is visible in Settings — the
+# quickest way to tell whether a `git pull` actually reached the container.
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV PRINTFLOW_GIT_SHA=$GIT_SHA \
+    PRINTFLOW_BUILT_AT=$BUILD_TIME
+
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && useradd --create-home --uid 10001 printflow \

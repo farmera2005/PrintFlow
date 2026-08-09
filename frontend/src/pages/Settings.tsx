@@ -7,6 +7,7 @@ import SecurityPanel from '../components/SecurityPanel'
 import { Alert, Badge, Button, Card, Field, inputClass } from '../components/ui'
 
 interface SettingsResponse {
+  version: { git_sha: string; built_at: string }
   setup_complete: boolean
   poll_intervals: Record<string, number>
   public_base_url: string | null
@@ -145,6 +146,26 @@ export default function Settings({ onChange }: { onChange: () => Promise<void> }
               Re-open setup wizard
             </Button>
           </div>
+        </Card>
+
+        <Card className="p-4">
+          <h2 className="text-sm font-semibold text-ink-900">Version</h2>
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+            <dt className="text-ink-500">Running commit</dt>
+            <dd className="font-mono text-ink-800">{data.version?.git_sha ?? 'unknown'}</dd>
+            <dt className="text-ink-500">Image built</dt>
+            <dd className="text-ink-800">
+              {data.version?.built_at && data.version.built_at !== 'unknown'
+                ? formatDateTime(data.version.built_at)
+                : 'unknown'}
+            </dd>
+          </dl>
+          <p className="mt-2 text-xs text-ink-500">
+            Update with <code>./update.sh</code> (or <code>git pull</code> then{' '}
+            <code>docker compose up -d --build</code>). Migrations run on start and your
+            data lives in Docker volumes, so it survives the rebuild. "unknown" just
+            means the image was built without the stamp.
+          </p>
         </Card>
       </div>
     </div>

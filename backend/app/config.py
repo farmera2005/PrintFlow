@@ -48,6 +48,10 @@ class Config:
         self.https_port: int = _int_env("PRINTFLOW_HTTPS_PORT", 8443)
         self.tls_dir: Path = self.data_dir / "tls"
 
+        # Stamped into the image at build time; "unknown" outside Docker.
+        self.git_sha: str = os.getenv("PRINTFLOW_GIT_SHA", "").strip() or "unknown"
+        self.built_at: str = os.getenv("PRINTFLOW_BUILT_AT", "").strip() or "unknown"
+
         self.session_cookie: str = "printflow_session"
         self.session_max_age: int = 60 * 60 * 24 * 30
         # Static frontend build, served by the same container in production.

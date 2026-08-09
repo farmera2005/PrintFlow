@@ -10,6 +10,9 @@ backend/app/static/*
 .pytest_cache/
 .DS_Store
 *.log
+# Local deployment tweaks (ports, extra volumes). Compose merges this over
+# docker-compose.yml automatically, so `git pull` never conflicts with them.
+docker-compose.override.yml
 # Local dev data directory: holds the generated secret key and TLS private key.
 .printflow-data/
 *.pem

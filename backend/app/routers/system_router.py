@@ -86,9 +86,12 @@ async def audit_log(
 async def app_settings(
     _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
 ) -> dict:
+    from ..config import get_config
     from ..scheduler import job_overview
 
+    config = get_config()
     return {
+        "version": {"git_sha": config.git_sha, "built_at": config.built_at},
         "setup_complete": await is_setup_complete(session),
         "poll_intervals": await get_poll_intervals(session),
         "public_base_url": await get_setting(session, KEY_PUBLIC_BASE_URL),

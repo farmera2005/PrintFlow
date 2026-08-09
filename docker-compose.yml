@@ -35,6 +35,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Set by ./update.sh so Settings can show the running commit. Building
+        # by hand just leaves it "unknown", which is harmless.
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -49,8 +54,12 @@ services:
     volumes:
       - printflow-data:/data
     ports:
-      - "8443:8443" # HTTPS — use this one
-      - "8420:8000" # HTTP — fallback, and handy if the certificate goes wrong
+      # Host ports come from the environment so you can change them without
+      # editing this tracked file — put them in .env (which is gitignored) and
+      # `git pull` will never conflict:
+      #   PRINTFLOW_HTTPS_HOST_PORT=9443
+      - "${PRINTFLOW_HTTPS_HOST_PORT:-8443}:8443" # HTTPS — use this one
+      - "${PRINTFLOW_HTTP_HOST_PORT:-8420}:8000" # HTTP — fallback, if the cert goes wrong
 
 volumes:
   printflow-db:

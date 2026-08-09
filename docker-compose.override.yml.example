@@ -1,0 +1,43 @@
+# Local deployment tweaks — copy to docker-compose.override.yml and edit.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Docker Compose merges docker-compose.override.yml over docker-compose.yml
+# automatically; no extra flags. The override file is gitignored, so `git pull`
+# will never conflict with your changes. Edit docker-compose.yml directly only
+# if you are happy to resolve merges on every update.
+#
+# NOTE: to change the published ports you do NOT need this file — set them in
+# `.env` instead (also gitignored):
+#
+#   PRINTFLOW_HTTPS_HOST_PORT=9443
+#   PRINTFLOW_HTTP_HOST_PORT=9420
+#
+# That is deliberate. Compose merges list fields such as `ports` by *appending*,
+# so overriding them here would publish both the old and the new port and fail
+# on the very conflict you were trying to avoid. (Compose 2.24+ can force a
+# replace with `ports: !override [...]`, but older versions — including the ones
+# some NAS packages ship — cannot.)
+#
+# Everything below is optional — delete what you do not need.
+
+services:
+  app:
+    environment:
+      # Mapping fields like `environment` merge key-by-key, so these are safe.
+      TZ: "America/New_York"
+
+      # Only if you would rather manage the encryption key yourself. Leaving it
+      # unset lets PrintFlow generate and persist one. Never change it after
+      # first run: stored credentials are encrypted with it.
+      # SECRET_KEY: "your-long-random-string"
+
+    # Extra mounts, e.g. to write backups somewhere you can see them.
+    # volumes:
+    #   - /volume1/backups/printflow:/backups
+
+  # postgres:
+  #   ports:
+  #     # Expose the database on the host for backups or inspection. Off by
+  #     # default: it is only reachable from the app container otherwise.
+  #     - "5432:5432"

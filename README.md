@@ -36,11 +36,15 @@ Two services, nothing to edit. Designed to sit on a NAS next to the existing
 Bambuddy container.
 
 ```bash
-git clone <this repo> && cd PrintFlow
+git clone https://github.com/farmera2005/PrintFlow.git
+cd PrintFlow
 docker compose up -d
 ```
 
 Then open **`https://<your-nas>:8443`** and work through the setup wizard.
+
+Clone it with `git`, not as a zip — updating later is a `git pull`, and that
+needs a real checkout.
 
 That is the whole install. There is no file to edit, no secret to invent and no
 certificate to generate by hand:
@@ -142,6 +146,67 @@ being replaced. Your browser will ask you to trust the new certificate.
 
 If you would rather terminate TLS at a reverse proxy, point it at port 8000,
 set **Public base URL** to the proxy's address and ignore 8443.
+
+## Updating
+
+```bash
+cd PrintFlow
+./update.sh
+```
+
+That pulls, rebuilds and restarts. Or by hand:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+Nothing else is needed. Database migrations run automatically when the
+container starts, and your data lives in Docker volumes rather than in the
+image, so a rebuild does not touch it. **Settings → Version** shows the running
+commit, which is the quickest way to confirm an update actually reached the
+container.
+
+### Keep your local tweaks out of git's way
+
+The one thing that breaks pull-based updates is editing a tracked file. Nothing
+in a normal install requires it.
+
+**Changing the published ports** (if 8443 or 8420 are taken on your NAS): put
+them in `.env`, which Compose loads automatically and git ignores.
+
+```bash
+echo "PRINTFLOW_HTTPS_HOST_PORT=9443" >> .env
+echo "PRINTFLOW_HTTP_HOST_PORT=9420"  >> .env
+docker compose up -d
+```
+
+**Anything else** — an extra volume, a timezone, your own `SECRET_KEY` — goes in
+`docker-compose.override.yml`, which Compose merges over the tracked file and
+git also ignores:
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+```
+
+Ports are handled through `.env` rather than the override file on purpose:
+Compose merges list fields such as `ports` by *appending*, so overriding them
+there publishes both the old and the new port and fails on the very conflict you
+were avoiding. Compose 2.24+ can force a replace with `ports: !override [...]`,
+but older versions — including some NAS packages — cannot.
+
+`update.sh` refuses to run if tracked files have been modified, and says which
+ones, rather than leaving a half-updated checkout behind.
+
+### Before a big update
+
+Both volumes are worth a snapshot first:
+
+```bash
+docker run --rm -v printflow-db:/db -v printflow-data:/data -v "$PWD":/backup \
+  alpine tar czf /backup/printflow-backup.tar.gz /db /data
+```
+
+Migrations are forward-only; there is no automatic downgrade path.
 
 ### Backups
 
