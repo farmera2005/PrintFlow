@@ -153,6 +153,32 @@ If the image was built without network access the binary will be missing; the
 UI says so plainly and you can run `cloudflared` yourself against
 `http://<host>:8000` instead.
 
+### "502 Bad gateway" on the OAuth callback
+
+You finish authorising on Etsy or Intuit, get redirected back, and land on a
+Cloudflare error page. Read its three status blocks: Browser ✓, Cloudflare ✓,
+**Host ✗**. Nothing failed at Etsy — Cloudflare could not reach PrintFlow.
+
+Almost always the tunnel's Public Hostname points at the wrong local address.
+In the Cloudflare dashboard the **Service** must be:
+
+```
+HTTP    localhost:8000
+```
+
+Plain HTTP, port 8000. Two ways to get this wrong:
+
+- **`HTTPS` / port 8443.** That port serves the self-signed certificate, which
+  Cloudflare will not trust — 502. Cloudflare terminates TLS at the edge, so
+  the hop to PrintFlow is plain HTTP by design.
+- **`localhost` when cloudflared runs in its own container.** Then `localhost`
+  is that container, not PrintFlow. Use `http://app:8000`.
+
+**Access & security → Public access → Test public URL** fetches your own public
+URL from the server and names the broken hop: a working origin, a 502 with the
+service value to fix, a missing connector, or a Cloudflare Access policy (which
+blocks the server-side probe but is harmless — browsers still work).
+
 ### About the certificate
 
 Re-issuing applies immediately: the HTTPS listener restarts on the new

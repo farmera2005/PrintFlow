@@ -17,6 +17,14 @@ const MODES: { value: TunnelInfo['mode']; label: string; hint: string }[] = [
   },
 ]
 
+interface TestResult {
+  url: string
+  ok: boolean
+  status: number | null
+  diagnosis: string
+  detail: string
+}
+
 export default function TunnelSection({
   tunnel,
   onApplied,
@@ -30,6 +38,7 @@ export default function TunnelSection({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[] | null>(null)
+  const [test, setTest] = useState<TestResult | null>(null)
 
   const run = async (label: string, action: () => Promise<void>) => {
     setBusy(label)
@@ -120,9 +129,20 @@ export default function TunnelSection({
       {mode === 'named' ? (
         <>
           <Alert tone="info">
-            In Cloudflare Zero Trust → Networks → Tunnels, create a tunnel, add a public
-            hostname routed to <code>http://localhost:8000</code>, then copy the
-            connector token here.
+            <p>
+              In Cloudflare Zero Trust → Networks → Tunnels, create a tunnel and add a
+              Public Hostname. Under <strong>Service</strong>, set it to exactly:
+            </p>
+            <code className="mt-1 block rounded bg-white/70 px-2 py-1 text-xs">
+              HTTP&nbsp;&nbsp;localhost:8000
+            </code>
+            <p className="mt-1 text-xs">
+              Plain <strong>HTTP</strong>, port <strong>8000</strong>. Not HTTPS, and not
+              8443 — that port serves a self-signed certificate Cloudflare will not
+              trust, and you get a 502 Bad gateway on the callback. (cloudflared runs
+              inside this container, so <code>localhost</code> is PrintFlow. If you run
+              cloudflared as a separate container instead, use <code>http://app:8000</code>.)
+            </p>
           </Alert>
           <Field
             label="Connector token"
@@ -210,10 +230,34 @@ export default function TunnelSection({
             </Button>
           </>
         ) : null}
+        {active ? (
+          <Button
+            size="sm"
+            onClick={() =>
+              run('test', async () => {
+                setTest(await api.post<TestResult>('/api/security/tunnel/test'))
+              })
+            }
+            disabled={busy === 'test'}
+          >
+            {busy === 'test' ? 'Testing…' : 'Test public URL'}
+          </Button>
+        ) : null}
         <Button size="sm" variant="ghost" onClick={showLogs}>
           {logs ? 'Refresh log' : 'Show log'}
         </Button>
       </div>
+
+      {test ? (
+        <Alert tone={test.ok ? 'success' : 'error'}>
+          <p className="font-medium">
+            {test.ok ? 'Reachable' : 'Not reachable'}
+            {test.status ? ` — HTTP ${test.status}` : ''}
+          </p>
+          <p className="mt-0.5 text-xs">{test.detail}</p>
+          <p className="mt-0.5 break-all text-xs opacity-70">Tested {test.url}</p>
+        </Alert>
+      ) : null}
 
       {logs ? (
         <pre className="max-h-56 overflow-auto rounded-md bg-ink-900 p-3 text-[11px] leading-relaxed text-ink-200">

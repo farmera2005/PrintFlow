@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_user
 from ..config import get_config
 from ..db import get_session
+from ..integrations.base import new_client
 from ..models import User
 from ..services import audit, public_url, tls, tunnel
 from ..services.settings_store import (
@@ -315,6 +317,100 @@ async def stop_tunnel(
     if supervisor is not None:
         await supervisor.stop()
     return await _payload(request, session)
+
+
+@router.post("/tunnel/test")
+async def test_tunnel(
+    request: Request,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Fetch our own public URL and say which hop is broken.
+
+    A Cloudflare 502 on the callback looks like an Etsy failure but means
+    Cloudflare could not reach *us*, which is almost always the tunnel's public
+    hostname pointing at the wrong local address.
+    """
+    base, source = await public_url.resolve_base_url(session, request)
+    if source not in (public_url.SOURCE_TUNNEL_LIVE, public_url.SOURCE_TUNNEL_CONFIG):
+        return {
+            "url": base,
+            "ok": False,
+            "status": None,
+            "diagnosis": "no_tunnel",
+            "detail": "No tunnel hostname is configured, so there is nothing to test.",
+        }
+
+    url = f"{base}/api/health"
+    try:
+        async with new_client(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(url, headers={"Accept": "application/json"})
+    except httpx.HTTPError as exc:
+        return {
+            "url": url,
+            "ok": False,
+            "status": None,
+            "diagnosis": "unreachable",
+            "detail": (
+                f"Could not reach {base} at all ({type(exc).__name__}). Either DNS for "
+                "that hostname does not resolve, or the tunnel is not connected."
+            ),
+        }
+
+    body = response.text[:400]
+    if response.status_code == 200 and "cloudflare_tunnel" in body:
+        return {
+            "url": url,
+            "ok": True,
+            "status": 200,
+            "diagnosis": "ok",
+            "detail": "Cloudflare reached PrintFlow successfully. Callback URLs will work.",
+        }
+    if response.status_code in (502, 503, 504):
+        return {
+            "url": url,
+            "ok": False,
+            "status": response.status_code,
+            "diagnosis": "origin_unreachable",
+            "detail": (
+                "Cloudflare answered but could not reach PrintFlow — this is the "
+                "'Bad gateway' page. In the tunnel's Public Hostname settings the "
+                "service must be exactly http://localhost:8000 — plain HTTP, port "
+                "8000. Pointing it at https:// or at port 8443 fails, because that "
+                "port serves a self-signed certificate Cloudflare will not trust."
+            ),
+        }
+    if response.status_code in (530, 521, 523):
+        return {
+            "url": url,
+            "ok": False,
+            "status": response.status_code,
+            "diagnosis": "tunnel_down",
+            "detail": (
+                "Cloudflare has no connector for this hostname. The tunnel is not "
+                "connected — check the log below, and that the token belongs to the "
+                "tunnel this hostname is routed through."
+            ),
+        }
+    if response.status_code in (401, 403) or "cf-access" in body.lower():
+        return {
+            "url": url,
+            "ok": True,
+            "status": response.status_code,
+            "diagnosis": "access_protected",
+            "detail": (
+                "Cloudflare Access is protecting this hostname, so this server-side "
+                "check is blocked. That is expected and fine — browsers sign in at "
+                "Cloudflare first, and the OAuth callback still works."
+            ),
+        }
+    return {
+        "url": url,
+        "ok": False,
+        "status": response.status_code,
+        "diagnosis": "unexpected",
+        "detail": f"Unexpected response {response.status_code} from {base}.",
+    }
 
 
 @router.get("/tunnel/logs")
