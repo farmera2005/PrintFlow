@@ -652,13 +652,63 @@ async def bambuddy_config(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     spec: dict[str, Any] = result["openapi"]
     printers = result["printers"]
+    adopted: dict[str, str] = result["adopted_paths"]
 
+    # Persist what the instance's own spec said, so polling and queueing use the
+    # same endpoints the validation just proved. Kept separate from the operator's
+    # own `paths` so a later re-validation can move them.
+    payload["discovered_paths"] = client.discovered_paths
     payload["api_version"] = spec.get("version")
     payload["openapi"] = spec
     payload["printers"] = printers
     await credentials.save(session, PROVIDER_BAMBUDDY, payload)
     await session.commit()
-    return {"printers": printers, "openapi": spec}
+    return {
+        "printers": printers,
+        "openapi": spec,
+        "adopted_paths": adopted,
+        "paths": client.paths,
+    }
+
+
+class BambuddyEndpointsRequest(BaseModel):
+    base_url: str = Field(min_length=4)
+    api_key: str = ""
+
+
+@router.post("/bambuddy/endpoints")
+async def bambuddy_endpoints(
+    body: BambuddyEndpointsRequest,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """What this instance says it serves, for when our default paths 404.
+
+    Reads the OpenAPI document only. Never fails the request: an operator
+    staring at a 404 needs the list of real endpoints more than they need
+    another error.
+    """
+    existing = await credentials.load(session, PROVIDER_BAMBUDDY)
+    client = bambuddy_api.BambuddyClient(
+        {
+            **existing,
+            "base_url": body.base_url.strip().rstrip("/"),
+            "api_key": body.api_key.strip() or existing.get("api_key", ""),
+        }
+    )
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Reading the API description"):
+            spec = await client.fetch_openapi()
+    except IntegrationError as exc:
+        return {"error": str(exc), "discovered": {}, "collections": [], "current": client.paths}
+    return {
+        "error": None,
+        "spec_path": spec.get("path"),
+        "version": spec.get("version"),
+        "discovered": spec.get("discovered") or {},
+        "collections": spec.get("collections") or [],
+        "current": client.paths,
+    }
 
 
 @router.get("/bambuddy/printers")

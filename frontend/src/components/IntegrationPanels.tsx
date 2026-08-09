@@ -524,14 +524,31 @@ export function QboPanel({ status, redirectUri, onChange }: PanelProps) {
 // Bambuddy
 // --------------------------------------------------------------------------
 
+interface BambuddyEndpoints {
+  error: string | null
+  spec_path?: string
+  version?: string
+  discovered: Record<string, { path: string | null; alternatives: string[] }>
+  collections: { path: string; methods: string[] }[]
+  current: Record<string, string>
+}
+
+const PATH_ROLES: { key: string; label: string; hint: string }[] = [
+  { key: 'printers', label: 'Printers', hint: 'Listed during setup and shown on the queue.' },
+  { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a SKU to a print file.' },
+  { key: 'queue', label: 'Queue', hint: 'Read for job status, and posted to when a plate is sent.' },
+]
+
 export function BambuddyPanel({ status, onChange }: PanelProps) {
   const [baseUrl, setBaseUrl] = useState(status.detail.base_url ?? '')
   const [apiKey, setApiKey] = useState('')
   const [advanced, setAdvanced] = useState(false)
-  const [paths, setPaths] = useState('')
+  const [pathOverrides, setPathOverrides] = useState<Record<string, string>>({})
   const [fields, setFields] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [adopted, setAdopted] = useState<Record<string, string>>({})
+  const [endpoints, setEndpoints] = useState<BambuddyEndpoints | null>(null)
   const [printers, setPrinters] = useState<BambuddyPrinter[]>(status.detail.printers ?? [])
   const disconnect = useDisconnect('bambuddy', onChange)
 
@@ -540,21 +557,48 @@ export function BambuddyPanel({ status, onChange }: PanelProps) {
     setPrinters(status.detail.printers ?? [])
   }, [status.detail.base_url, status.detail.printers])
 
+  /** Ask the instance what it serves. Used on a 404, and on demand. */
+  const loadEndpoints = async () => {
+    setBusy(true)
+    try {
+      const data = await api.post<BambuddyEndpoints>('/api/integrations/bambuddy/endpoints', {
+        base_url: baseUrl,
+        api_key: apiKey,
+      })
+      setEndpoints(data)
+      setAdvanced(true)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const save = async () => {
     setBusy(true)
     setError(null)
+    setAdopted({})
     try {
       const body: Record<string, unknown> = { base_url: baseUrl, api_key: apiKey }
-      if (paths.trim()) body.paths = JSON.parse(paths)
-      if (fields.trim()) body.fields = JSON.parse(fields)
-      const data = await api.post<{ printers: BambuddyPrinter[]; openapi: any }>(
-        '/api/integrations/bambuddy/config',
-        body,
+      const chosen = Object.fromEntries(
+        Object.entries(pathOverrides).filter(([, value]) => value),
       )
+      if (Object.keys(chosen).length) body.paths = chosen
+      if (fields.trim()) body.fields = JSON.parse(fields)
+      const data = await api.post<{
+        printers: BambuddyPrinter[]
+        openapi: any
+        adopted_paths: Record<string, string>
+      }>('/api/integrations/bambuddy/config', body)
       setPrinters(data.printers)
+      setAdopted(data.adopted_paths ?? {})
       await onChange()
     } catch (err) {
-      setError(errorMessage(err))
+      const message = errorMessage(err)
+      setError(message)
+      // A 404 means the host is right and the path is wrong, which is the one
+      // failure the operator can fix here — so hand them the real list.
+      if (message.includes('404')) await loadEndpoints()
     } finally {
       setBusy(false)
     }
@@ -592,19 +636,71 @@ export function BambuddyPanel({ status, onChange }: PanelProps) {
       </button>
       {advanced ? (
         <div className="space-y-3 rounded-md bg-ink-50 p-3">
-          <p className="text-xs text-ink-600">
-            Only needed if your Bambuddy build uses different paths or request field
-            names. JSON objects; keys you omit keep their defaults.
-          </p>
-          <Field label="Endpoint paths">
-            <input
-              className={inputClass}
-              placeholder='{"queue":"/api/queue","archives":"/api/archives"}'
-              value={paths}
-              onChange={(e) => setPaths(e.target.value)}
-            />
-          </Field>
-          <Field label="Queue payload field names">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={loadEndpoints} disabled={busy || !baseUrl}>
+              {busy ? 'Reading…' : 'Read endpoints from this instance'}
+            </Button>
+            <span className="text-xs text-ink-500">
+              Bambuddy publishes an OpenAPI description of itself. PrintFlow reads
+              the paths from it rather than assuming.
+            </span>
+          </div>
+
+          {endpoints?.error ? (
+            <Alert tone="warning">
+              Could not read the API description: {endpoints.error}
+            </Alert>
+          ) : null}
+          {endpoints && !endpoints.error ? (
+            <p className="text-xs text-ink-600">
+              Read <span className="font-mono">{endpoints.spec_path}</span>
+              {endpoints.version ? ` (version ${endpoints.version})` : ''} —{' '}
+              {endpoints.collections.length} listable endpoints.
+            </p>
+          ) : null}
+
+          {PATH_ROLES.map((role) => {
+            const suggestion = endpoints?.discovered?.[role.key]?.path
+            const current =
+              pathOverrides[role.key] ?? endpoints?.current?.[role.key] ?? ''
+            return (
+              <Field key={role.key} label={`${role.label} endpoint`} hint={role.hint}>
+                {endpoints?.collections.length ? (
+                  <select
+                    className={inputClass}
+                    value={current}
+                    onChange={(e) =>
+                      setPathOverrides((prev) => ({ ...prev, [role.key]: e.target.value }))
+                    }
+                  >
+                    {!endpoints.collections.some((c) => c.path === current) ? (
+                      <option value={current}>{current} (not in this instance)</option>
+                    ) : null}
+                    {endpoints.collections.map((c) => (
+                      <option key={c.path} value={c.path}>
+                        {c.path}
+                        {suggestion === c.path ? '  ← suggested' : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className={inputClass}
+                    value={current}
+                    placeholder={`/api/${role.key}`}
+                    onChange={(e) =>
+                      setPathOverrides((prev) => ({ ...prev, [role.key]: e.target.value }))
+                    }
+                  />
+                )}
+              </Field>
+            )
+          })}
+
+          <Field
+            label="Queue payload field names"
+            hint="Only if your build names the request fields differently. JSON; omitted keys keep their defaults."
+          >
             <input
               className={inputClass}
               placeholder='{"archive_id":"archive_id","plate_number":"plate"}'
@@ -616,6 +712,15 @@ export function BambuddyPanel({ status, onChange }: PanelProps) {
       ) : null}
 
       {error ? <Alert tone="error">{error}</Alert> : null}
+      {Object.keys(adopted).length ? (
+        <Alert tone="success">
+          Took these endpoints from the instance's own API description:{' '}
+          {Object.entries(adopted)
+            .map(([role, path]) => `${role} → ${path}`)
+            .join(', ')}
+          .
+        </Alert>
+      ) : null}
       <Button variant="primary" onClick={save} disabled={busy || !baseUrl}>
         {busy ? 'Validating…' : status.connected ? 'Re-validate & save' : 'Connect Bambuddy'}
       </Button>

@@ -358,14 +358,29 @@ is idempotent — re-running intake on a processed receipt is a no-op.
 
 ## Bambuddy endpoint configuration
 
-Bambuddy is self-hosted and its schema can move between releases, so the
-endpoint paths and the queue payload field names are stored with the
-credentials and editable under **Settings → Bambuddy → Advanced**. Defaults:
+Bambuddy is self-hosted, ships hundreds of endpoints, and moves them between
+releases — so PrintFlow does not assume where they are. On every validation it
+reads the instance's own OpenAPI document and takes the printers, archives and
+queue endpoints from that, whatever they are called on your build.
+
+Three layers decide the path actually used, weakest first:
+
+1. **Defaults** — `/api/printers`, `/api/archives`, `/api/queue`, spec at
+   `/openapi.json`. Only used when the other two say nothing.
+2. **Discovered** — read from the instance's OpenAPI document and re-read on
+   every re-validation, so an upgrade that moves an endpoint is picked up.
+3. **Yours** — anything set under **Settings → Bambuddy → Advanced** wins and is
+   never overwritten by discovery.
+
+If the spec names nothing PrintFlow recognises, Advanced lists every listable
+endpoint the instance publishes and you pick from that list rather than typing a
+path blind. A 404 during validation opens it automatically, because a 404 means
+the address is right and only the path is wrong.
+
+Queue payload field names are stored alongside, and still edited by hand:
 
 ```json
-{ "paths":  { "openapi": "/openapi.json", "printers": "/api/printers",
-              "archives": "/api/archives", "queue": "/api/queue" },
-  "fields": { "archive_id": "archive_id", "plate_number": "plate",
+{ "fields": { "archive_id": "archive_id", "plate_number": "plate",
               "printer_id": "printer_id" } }
 ```
 

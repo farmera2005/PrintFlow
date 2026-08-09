@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
@@ -80,6 +81,92 @@ _STATUS_MAP = {
 }
 
 
+# How to recognise each endpoint we need in an OpenAPI paths object. The first
+# keyword is the one the endpoint is actually named after; the rest are what
+# other builds have called the same thing. Scored rather than matched outright,
+# because "queue" also appears in /api/printers/{id}/queue, which is a different
+# endpoint from the farm-wide queue we want.
+PATH_ROLES: dict[str, dict[str, Any]] = {
+    "printers": {"keywords": ("printer", "device"), "methods": ("get",)},
+    "archives": {"keywords": ("archive", "model", "project", "file"), "methods": ("get",)},
+    # The queue is the only one we write to, so it has to accept a POST.
+    "queue": {"keywords": ("queue", "job", "task"), "methods": ("get", "post")},
+}
+
+
+def _score_path(path: str, methods: set[str], role: dict[str, Any]) -> int | None:
+    """Rank a spec path as a candidate for one of our endpoints.
+
+    None means "not a candidate". Higher is better.
+    """
+    if "{" in path:
+        # A templated path is an item endpoint (/printers/{id}), not the
+        # collection we list and post to.
+        return None
+    if not set(role["methods"]).issubset(methods):
+        return None
+
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+    last = segments[-1].lower().rstrip("s")
+
+    try:
+        rank = [k for k in role["keywords"]].index(last)
+    except ValueError:
+        return None
+
+    score = 100 - rank * 10
+    # Prefer the shallow, farm-wide endpoint over one nested under another
+    # resource: /api/queue beats /api/printers/queue.
+    score -= len(segments)
+    # A conventional /api prefix is a mild positive signal over a bare /queue.
+    if segments[0].lower() == "api":
+        score += 2
+    return score
+
+
+def collection_paths(spec_paths: dict[str, Any], limit: int = 400) -> list[dict[str, Any]]:
+    """Every listable endpoint in the spec, for the operator to pick from.
+
+    When name matching finds nothing, showing what the instance actually serves
+    beats asking someone to guess a path into a text box.
+    """
+    rows = [
+        {"path": str(path), "methods": sorted(m.lower() for m in ops if isinstance(m, str))}
+        for path, ops in spec_paths.items()
+        if isinstance(ops, dict) and "{" not in str(path) and any(
+            isinstance(m, str) and m.lower() == "get" for m in ops
+        )
+    ]
+    rows.sort(key=lambda row: row["path"])
+    return rows[:limit]
+
+
+def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    """Read our endpoints off an OpenAPI document.
+
+    Returns the best candidate per role plus every runner-up, because a guess
+    the operator cannot see is a guess they cannot correct.
+    """
+    found: dict[str, Any] = {}
+    for name, role in PATH_ROLES.items():
+        scored: list[tuple[int, str]] = []
+        for path, operations in spec_paths.items():
+            if not isinstance(operations, dict):
+                continue
+            methods = {m.lower() for m in operations if isinstance(m, str)}
+            score = _score_path(str(path), methods, role)
+            if score is not None:
+                scored.append((score, str(path)))
+        scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        found[name] = {
+            "path": scored[0][1] if scored else None,
+            "alternatives": [path for _, path in scored[1:6]],
+        }
+    return found
+
+
 def normalize_status(raw: Any) -> str | None:
     """Map a Bambuddy status string onto our print_jobs vocabulary."""
     if raw is None:
@@ -144,9 +231,28 @@ class BambuddyClient:
             raise IntegrationError(PROVIDER_BAMBUDDY, "No Bambuddy base URL configured")
         self.base_url = base_url
         self.api_key = str(payload.get("api_key") or "")
-        self.paths = {**DEFAULT_PATHS, **(payload.get("paths") or {})}
+        # Three layers, weakest first: our defaults, what this instance's spec
+        # said last time we read it, and what the operator typed into Advanced.
+        # Discovered paths are kept apart from typed ones so that re-validating
+        # after a Bambuddy upgrade can move them — folding them into `paths`
+        # would make them indistinguishable from a deliberate choice and pin the
+        # config to endpoints that no longer exist.
+        self.explicit_paths = {k: v for k, v in (payload.get("paths") or {}).items() if v}
+        self.discovered_paths = {
+            k: v for k, v in (payload.get("discovered_paths") or {}).items() if v
+        }
+        self.paths = {**DEFAULT_PATHS, **self.discovered_paths, **self.explicit_paths}
         self.fields = {**DEFAULT_FIELDS, **(payload.get("fields") or {})}
         self.auth_header = str(payload.get("auth_header") or DEFAULT_AUTH_HEADER)
+
+    def url_for(self, path: str) -> str:
+        """The absolute URL a call will actually hit.
+
+        Built the same way httpx merges a relative path onto a base URL, so a
+        base URL with a path component shows its real effect: base
+        `http://host:8080/api` plus `/api/printers` is `/api/api/printers`.
+        """
+        return str(httpx.URL(self.base_url + "/").join(path.lstrip("/")))
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -161,15 +267,24 @@ class BambuddyClient:
         self, method: str, path: str, *, retries: int = 2, **kwargs: Any
     ) -> Any:
         async with new_client(base_url=self.base_url, timeout=LAN_TIMEOUT) as client:
-            response = await request(
-                client,
-                method,
-                path,
-                provider=PROVIDER_BAMBUDDY,
-                headers=self._headers(),
-                retries=retries,
-                **kwargs,
-            )
+            try:
+                response = await request(
+                    client,
+                    method,
+                    path,
+                    provider=PROVIDER_BAMBUDDY,
+                    headers=self._headers(),
+                    retries=retries,
+                    **kwargs,
+                )
+            except IntegrationError as exc:
+                # Name the whole URL, not just the status. "404" tells the
+                # operator nothing when the base URL and the path are configured
+                # separately and either could be wrong — and a base URL that
+                # already ends in /api silently doubles up into /api/api/…,
+                # which is invisible unless the joined URL is printed.
+                exc.args = (f"{exc.args[0] if exc.args else 'Request failed'} at {self.url_for(path)}",)
+                raise
         if not response.content:
             return {}
         try:
@@ -196,14 +311,21 @@ class BambuddyClient:
                 continue
             if isinstance(data, dict) and ("openapi" in data or "swagger" in data):
                 info = data.get("info") or {}
+                spec_paths = data.get("paths") or {}
                 return {
                     "path": path,
                     "title": info.get("title"),
                     "version": info.get("version"),
                     "openapi": data.get("openapi") or data.get("swagger"),
                     "operation_count": sum(
-                        len(v) for v in (data.get("paths") or {}).values() if isinstance(v, dict)
+                        len(v) for v in spec_paths.values() if isinstance(v, dict)
                     ),
+                    # Kept so the endpoints can be read off the instance instead
+                    # of guessed. Bambuddy ships hundreds of them and they move
+                    # between releases; the spec is the only statement of what
+                    # this particular instance serves.
+                    "discovered": discover_paths(spec_paths),
+                    "collections": collection_paths(spec_paths),
                 }
         raise IntegrationError(
             PROVIDER_BAMBUDDY,
@@ -213,9 +335,9 @@ class BambuddyClient:
         )
 
     async def validate(self) -> dict[str, Any]:
-        """Setup check: read the spec if it is there, then list the printers.
+        """Setup check: read the spec, adopt the paths it states, list printers.
 
-        Runs under one budget covering both calls. An operator waiting on a
+        Runs under one budget covering every call. An operator waiting on a
         form needs an answer, and a reverse proxy in front of PrintFlow will
         replace a slow reply with its own error page long before httpx's
         per-request timeouts have finished stacking up.
@@ -231,8 +353,56 @@ class BambuddyClient:
             except IntegrationError as exc:
                 # The spec is informational; printers is the real test.
                 spec = {"warning": str(exc)}
-            printers = await self.list_printers(retries=0)
-        return {"openapi": spec, "printers": printers}
+
+            adopted = self.adopt_discovered(spec.get("discovered") or {})
+            try:
+                printers = await self.list_printers(retries=0)
+            except IntegrationError as exc:
+                raise self._explain_404(exc, "printers", spec) from exc
+        return {"openapi": spec, "printers": printers, "adopted_paths": adopted}
+
+    def adopt_discovered(self, discovered: dict[str, Any]) -> dict[str, str]:
+        """Take the paths the instance's own spec states, over our defaults.
+
+        Only fills roles the operator has not set by hand: an explicit choice in
+        Advanced settings outranks anything found by matching names.
+        """
+        explicit = set(self.explicit_paths)
+        adopted: dict[str, str] = {}
+        for name, result in discovered.items():
+            path = (result or {}).get("path")
+            if not path or name in explicit:
+                continue
+            self.discovered_paths[name] = path
+            if self.paths.get(name) != path:
+                self.paths[name] = path
+                adopted[name] = path
+        return adopted
+
+    def _explain_404(
+        self, exc: IntegrationError, role: str, spec: dict[str, Any]
+    ) -> IntegrationError:
+        """A 404 means the host is right and the path is wrong — say so."""
+        if exc.status_code != 404:
+            return exc
+        if spec.get("warning"):
+            hint = (
+                "PrintFlow could not read this instance's OpenAPI document either, "
+                "so it cannot look the right path up. Set it under Advanced."
+            )
+        else:
+            hint = (
+                f"Its OpenAPI document does not describe a {role} endpoint that "
+                "PrintFlow recognises, so the path has to be set under Advanced."
+            )
+        return IntegrationError(
+            PROVIDER_BAMBUDDY,
+            f"{exc.args[0] if exc.args else 'Request failed'}. "
+            f"The address is reachable — Bambuddy answered, it just has nothing "
+            f"at that path. {hint}",
+            status_code=exc.status_code,
+            body=exc.body,
+        )
 
     async def list_printers(self, *, retries: int = 2) -> list[dict[str, Any]]:
         data = await self._call("GET", self.paths["printers"], retries=retries)
