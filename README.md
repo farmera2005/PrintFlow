@@ -183,6 +183,23 @@ URL from the server and names the broken hop: a working origin, a 502 with the
 service value to fix, a missing connector, or a Cloudflare Access policy (which
 blocks the server-side probe but is harmless — browsers still work).
 
+### "502 Bad gateway" from one slow page, while the rest of the app works
+
+Same Cloudflare page, different cause. Cloudflare stops waiting for the origin
+at 100 seconds; if a single request takes longer, it answers with its own error
+page — and that page names *your* hostname, so it reads like the service you
+were configuring is at fault when it is not.
+
+The wrong-Bambuddy-address case used to take 3m32s (four OpenAPI probes and
+three printer attempts, each willing to wait out a 30s read timeout) and so
+always turned into a 502. Bambuddy calls now use LAN-appropriate timeouts,
+the OpenAPI probe stops as soon as the host proves unreachable, and setup
+validation runs under a 20-second budget, so you get PrintFlow's own message —
+which names the address it actually tried.
+
+If you do see a proxy error page, PrintFlow now condenses it to one line saying
+where it came from rather than pasting the markup into the panel.
+
 ### About the certificate
 
 Re-issuing applies immediately: the HTTPS listener restarts on the new

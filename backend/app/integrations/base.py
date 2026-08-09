@@ -6,14 +6,29 @@ import asyncio
 import logging
 import random
 import time
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 import httpx
 
 log = logging.getLogger("printflow.integrations")
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+
+# Bambuddy is on the same LAN, so a slow answer means something is wrong rather
+# than far away. The default timeouts are sized for the internet APIs and are
+# far too patient here: four OpenAPI probes plus three printer attempts at a
+# 30s read timeout is over three minutes, which is longer than any reverse
+# proxy in front of PrintFlow will wait for a reply (Cloudflare gives up at
+# 100s and serves its own 502 page, which is what the operator then sees
+# instead of our error).
+LAN_TIMEOUT = httpx.Timeout(connect=4.0, read=10.0, write=10.0, pool=4.0)
+
 RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+# What an interactive "save and validate" is allowed to take end to end. Well
+# under any proxy's patience, and well over a healthy LAN round trip.
+INTERACTIVE_BUDGET_SECONDS = 20.0
 
 
 class IntegrationError(RuntimeError):
@@ -50,6 +65,41 @@ class AuthExpiredError(IntegrationError):
     """Credentials were rejected — the operator must re-connect in Settings."""
 
 
+class DeadlineExceeded(IntegrationError):
+    """A whole operation ran out of its time budget, not just one request."""
+
+
+class TransportFailed(IntegrationError):
+    """The request never got an HTTP reply — wrong address, or nothing there.
+
+    Distinct from an HTTP error because it says something about the *host*
+    rather than the path: when this happens there is no point trying the same
+    host again on a different path.
+    """
+
+
+@asynccontextmanager
+async def deadline(
+    provider: str, what: str, seconds: float = INTERACTIVE_BUDGET_SECONDS
+) -> AsyncIterator[None]:
+    """Cap a multi-request operation so a reply always beats the proxy.
+
+    Without this the operator sees the proxy's own error page — which names
+    PrintFlow's hostname, not the service that was actually unreachable, and
+    sends them looking in entirely the wrong place.
+    """
+    try:
+        async with asyncio.timeout(seconds):
+            yield
+    except TimeoutError as exc:
+        raise DeadlineExceeded(
+            provider,
+            f"{what} did not finish within {int(seconds)}s. "
+            f"{provider} accepted the connection but never answered — "
+            "check the address and port, and that the service is running",
+        ) from exc
+
+
 def new_client(**kwargs: Any) -> httpx.AsyncClient:
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
     kwargs.setdefault("follow_redirects", True)
@@ -75,7 +125,7 @@ async def request(
         try:
             response = await client.request(method, url, **kwargs)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            last_exc = IntegrationError(provider, f"{type(exc).__name__}: {exc}")
+            last_exc = TransportFailed(provider, transport_reason(exc, client, url))
             if attempt == retries:
                 raise last_exc from exc
         else:
@@ -110,6 +160,31 @@ async def request(
 
 def provider_said(provider: str) -> str:
     return f"{provider} said"
+
+
+def transport_reason(exc: Exception, client: httpx.AsyncClient, url: str) -> str:
+    """Plain-language reason a request never got an HTTP reply.
+
+    `str(httpx.ReadTimeout())` is the empty string, so the obvious
+    f"{type(exc).__name__}: {exc}" renders as "ReadTimeout: " — the operator is
+    told the name of a Python class and nothing about which address failed.
+    """
+    try:
+        target = str(client.build_request("GET", url).url)
+    except Exception:  # pragma: no cover - defensive
+        target = url
+
+    if isinstance(exc, httpx.ConnectTimeout):
+        return f"No answer from {target} — the address is wrong, or a firewall is dropping the connection"
+    if isinstance(exc, httpx.ConnectError):
+        return f"Could not connect to {target} — nothing is listening on that address and port"
+    if isinstance(exc, httpx.ReadTimeout):
+        return (
+            f"Connected to {target}, but it never sent a reply. "
+            "That is usually a different service on the port, or one that is wedged"
+        )
+    detail = str(exc).strip()
+    return f"Could not reach {target} ({type(exc).__name__}{f': {detail}' if detail else ''})"
 
 
 def _compact(body: str | None, limit: int = 300) -> str:

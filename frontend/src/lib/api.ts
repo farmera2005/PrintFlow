@@ -9,6 +9,30 @@ export class ApiError extends Error {
   }
 }
 
+/** Turn a non-JSON error body into one readable line.
+ *
+ * When a reverse proxy in front of PrintFlow answers instead of PrintFlow —
+ * Cloudflare, nginx, a tunnel — the body is a full HTML error page. Dumping it
+ * into an alert buries the one useful fact under a screenful of markup, and
+ * the page names PrintFlow's own hostname, which sends the operator looking at
+ * the wrong service entirely.
+ */
+export function summariseErrorBody(text: string, status: number): string {
+  const trimmed = text.trim()
+  const isHtml = /^(<!doctype|<html)/i.test(trimmed)
+  if (!isHtml) return trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed
+
+  const title = /<title>([^<]*)<\/title>/i.exec(trimmed)?.[1]?.trim()
+  const gateway = status === 502 || status === 504
+  const what = title ? `“${title}”` : `an HTML error page (HTTP ${status})`
+  if (!gateway) return `The server returned ${what} instead of a response.`
+  return (
+    `${what} — this came from the proxy in front of PrintFlow, not from ` +
+    `PrintFlow itself. PrintFlow took too long to answer or is not running, ` +
+    `so the request never reached the service you were configuring.`
+  )
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -25,7 +49,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     try {
       payload = JSON.parse(text)
     } catch {
-      payload = { detail: text }
+      payload = { detail: summariseErrorBody(text, response.status) }
     }
   }
 

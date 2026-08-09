@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_user
 from ..db import get_session
 from ..integrations import bambuddy as bambuddy_api
+from ..integrations import base as base_api
 from ..integrations import etsy as etsy_api
 from ..integrations import qbo as qbo_api
 from ..integrations import shipstation as ss_api
@@ -643,18 +644,14 @@ async def bambuddy_config(
         payload["fields"] = {**(existing.get("fields") or {}), **body.fields}
 
     client = bambuddy_api.BambuddyClient(payload)
-    spec: dict[str, Any] = {}
     try:
-        spec = await client.fetch_openapi()
-    except IntegrationError as exc:
-        # The spec is informational; a working printers endpoint is the real test.
-        spec = {"warning": str(exc)}
-    try:
-        printers = await client.list_printers()
+        result = await client.validate()
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    spec: dict[str, Any] = result["openapi"]
+    printers = result["printers"]
 
     payload["api_version"] = spec.get("version")
     payload["openapi"] = spec
@@ -670,7 +667,8 @@ async def bambuddy_printers(
 ) -> dict:
     client = await _bambuddy_client(session)
     try:
-        printers = await client.list_printers()
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing printers"):
+            printers = await client.list_printers()
     except IntegrationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return {"printers": printers}
@@ -687,9 +685,10 @@ async def bambuddy_archives(
     """Archive browser behind the mapping helper — no manual ID entry (§4.3)."""
     client = await _bambuddy_client(session)
     try:
-        archives = await client.list_archives(
-            search=search, limit=max(1, min(limit, 200)), offset=max(0, offset)
-        )
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing archives"):
+            archives = await client.list_archives(
+                search=search, limit=max(1, min(limit, 200)), offset=max(0, offset)
+            )
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()

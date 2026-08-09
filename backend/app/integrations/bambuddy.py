@@ -24,7 +24,14 @@ from ..models import (
     PROVIDER_BAMBUDDY,
 )
 from ..services import credentials
-from .base import IntegrationError, new_client, request
+from .base import (
+    LAN_TIMEOUT,
+    IntegrationError,
+    TransportFailed,
+    deadline,
+    new_client,
+    request,
+)
 
 DEFAULT_PATHS: dict[str, str] = {
     "openapi": "/openapi.json",
@@ -153,7 +160,7 @@ class BambuddyClient:
     async def _call(
         self, method: str, path: str, *, retries: int = 2, **kwargs: Any
     ) -> Any:
-        async with new_client(base_url=self.base_url) as client:
+        async with new_client(base_url=self.base_url, timeout=LAN_TIMEOUT) as client:
             response = await request(
                 client,
                 method,
@@ -179,6 +186,11 @@ class BambuddyClient:
         for path in [p for p in dict.fromkeys(candidates) if p]:
             try:
                 data = await self._call("GET", path, retries=0)
+            except TransportFailed:
+                # The host is not answering at all. The remaining candidates are
+                # on the same host, so they can only fail the same way — and each
+                # one costs a full timeout the operator is sitting through.
+                raise
             except IntegrationError as exc:
                 errors.append(f"{path}: {exc}")
                 continue
@@ -200,8 +212,30 @@ class BambuddyClient:
             + "; ".join(errors),
         )
 
-    async def list_printers(self) -> list[dict[str, Any]]:
-        data = await self._call("GET", self.paths["printers"])
+    async def validate(self) -> dict[str, Any]:
+        """Setup check: read the spec if it is there, then list the printers.
+
+        Runs under one budget covering both calls. An operator waiting on a
+        form needs an answer, and a reverse proxy in front of PrintFlow will
+        replace a slow reply with its own error page long before httpx's
+        per-request timeouts have finished stacking up.
+        """
+        async with deadline(PROVIDER_BAMBUDDY, "Checking the Bambuddy address"):
+            spec: dict[str, Any] = {}
+            try:
+                spec = await self.fetch_openapi()
+            except TransportFailed:
+                # Nothing is answering — reporting the printers call separately
+                # would just repeat the same failure.
+                raise
+            except IntegrationError as exc:
+                # The spec is informational; printers is the real test.
+                spec = {"warning": str(exc)}
+            printers = await self.list_printers(retries=0)
+        return {"openapi": spec, "printers": printers}
+
+    async def list_printers(self, *, retries: int = 2) -> list[dict[str, Any]]:
+        data = await self._call("GET", self.paths["printers"], retries=retries)
         return [parse_printer(row) for row in _as_list(data)]
 
     async def list_archives(
