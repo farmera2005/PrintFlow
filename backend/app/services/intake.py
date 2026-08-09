@@ -19,6 +19,7 @@ from ..models import (
     BomLine,
     Order,
     OrderLine,
+    PrintJob,
     Product,
     ProductVariation,
 )
@@ -237,7 +238,7 @@ async def apply_etsy_link(session: AsyncSession, link: EtsyProductLink) -> int:
 
     fixed = 0
     for line in lines:
-        produced = await _resolve_line(session, line)
+        produced = await resolve_line(session, line)
         if not produced:
             continue
         fixed += 1
@@ -388,7 +389,7 @@ async def process_order(session: AsyncSession, order: Order) -> Order:
 
     produced: list[OrderLine] = []
     for line in top_lines:
-        produced.extend(await _resolve_line(session, line))
+        produced.extend(await resolve_line(session, line))
 
     await allocation.decide_lines(session, produced)
     await printing.plan_jobs(session, produced)
@@ -404,11 +405,15 @@ async def attach_variation(
     Left unset when nothing describes the combination, which is the ordinary
     case for a product that has no variations at all.
     """
+    # Variations belong to the master. A line that has already been re-pointed
+    # at a variant product has to look at the master's list again, or re-running
+    # intake would find nothing and forget which variation it is.
+    owner_id = product.parent_id or product.id
     rows = (
         (
             await session.execute(
                 select(ProductVariation)
-                .where(ProductVariation.product_id == product.id)
+                .where(ProductVariation.product_id == owner_id)
                 .order_by(ProductVariation.created_at)
             )
         )
@@ -420,7 +425,7 @@ async def attach_variation(
     return match
 
 
-async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLine]:
+async def resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLine]:
     """Match a top-level line to a product and explode it if it is a bundle.
 
     Returns the lines that actually get produced (components for a bundle, the
@@ -451,7 +456,17 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
     # Which variation of it the buyer bought. Re-run every time rather than only
     # when unset: variations get added after the order arrived, and re-running
     # intake is how an operator applies them.
-    await attach_variation(session, line, product)
+    match = await attach_variation(session, line, product)
+
+    # A variation can be a product of its own — its own components, its own
+    # print file. From here on the line is that product, so everything below
+    # (bundle explosion, allocation, printing) works on what is actually made
+    # rather than on the listing it was sold under.
+    if match is not None and match.variant_product_id not in (None, product.id):
+        variant = await session.get(Product, match.variant_product_id)
+        if variant is not None:
+            line.product_id = variant.id
+            product = variant
 
     if product.fulfillment != "bundle":
         if line.state == LINE_UNMATCHED:
@@ -548,6 +563,102 @@ async def _resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLin
     return children
 
 
+async def clear_line_match(session: AsyncSession, line: OrderLine) -> dict[str, int]:
+    """Unmatch a line so it can be pointed somewhere else.
+
+    Undoing a match means undoing what it produced: the components a bundle
+    exploded into, and the plates queued for them. Anything already sent to
+    Bambuddy is left alone and counted — it is on a machine, and forgetting the
+    row here would not unprint it.
+    """
+    from ..models import JOB_PENDING
+
+    kept_jobs = 0
+    removed_children = 0
+
+    children = (
+        (
+            await session.execute(
+                select(OrderLine)
+                .where(OrderLine.parent_line_id == line.id)
+                .options(selectinload(OrderLine.print_jobs))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for child in children:
+        live = [job for job in child.print_jobs if job.status != JOB_PENDING]
+        kept_jobs += len(live)
+        if live:
+            # Still tied to a real plate, so it stays — orphaning it would hide
+            # work that is genuinely happening.
+            continue
+        for job in child.print_jobs:
+            await session.delete(job)
+        await session.delete(child)
+        removed_children += 1
+
+    own = (
+        (
+            await session.execute(
+                select(PrintJob).where(PrintJob.order_line_id == line.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for job in own:
+        if job.status == JOB_PENDING:
+            await session.delete(job)
+        else:
+            kept_jobs += 1
+
+    line.product_id = None
+    line.variation_id = None
+    line.qty_from_stock = 0
+    line.qty_to_print = 0
+    line.option_effects = []
+    line.stock_note = (
+        f"{kept_jobs} print job{'s' if kept_jobs != 1 else ''} already sent to "
+        "Bambuddy were left as they are."
+        if kept_jobs
+        else None
+    )
+    line.state = LINE_UNMATCHED
+    await session.flush()
+    return {"kept_jobs": kept_jobs, "removed_children": removed_children}
+
+
+async def reset_order_matching(session: AsyncSession, order: Order) -> dict[str, int]:
+    """Unmatch every line on an order, then run intake over it again.
+
+    The fix after the catalogue changes: new listing links, new variations, a
+    corrected BOM. Re-running from scratch is what makes an order that arrived
+    before any of that pick it up.
+    """
+    top_lines = (
+        (
+            await session.execute(
+                select(OrderLine).where(
+                    OrderLine.order_id == order.id, OrderLine.parent_line_id.is_(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    totals = {"lines": 0, "kept_jobs": 0, "removed_children": 0}
+    for line in top_lines:
+        result = await clear_line_match(session, line)
+        totals["lines"] += 1
+        totals["kept_jobs"] += result["kept_jobs"]
+        totals["removed_children"] += result["removed_children"]
+
+    await process_order(session, order)
+    return totals
+
+
 async def relink_line(
     session: AsyncSession, line: OrderLine, product: Product
 ) -> Order | None:
@@ -558,7 +669,7 @@ async def relink_line(
     order = await session.get(Order, line.order_id)
     if order is None:
         return None
-    produced = await _resolve_line(session, line)
+    produced = await resolve_line(session, line)
     await allocation.decide_lines(session, produced)
     await printing.plan_jobs(session, produced)
     await recompute_order(session, order)
@@ -571,7 +682,7 @@ async def redecide_line(session: AsyncSession, line: OrderLine) -> Order | None:
     if line.product_id is not None:
         product = await session.get(Product, line.product_id)
         if product is not None and product.fulfillment == "bundle":
-            produced = await _resolve_line(session, line)
+            produced = await resolve_line(session, line)
     await allocation.decide_lines(session, produced)
     await printing.plan_jobs(session, produced)
     order = await session.get(Order, line.order_id)

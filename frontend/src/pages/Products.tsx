@@ -31,6 +31,30 @@ const FULFILLMENTS: { value: Fulfillment; label: string; hint: string }[] = [
   { value: 'bundle', label: 'Bundle', hint: 'Explodes into components via its BOM.' },
 ]
 
+/** Masters first, each followed by its variants.
+ *
+ * A variant is a product in its own right, but it is not a thing the shop
+ * sells on its own — it is one way of making the listing above it. Listing
+ * both flat, alphabetically, would scatter families across the screen. */
+function nest(products: Product[]): { product: Product; depth: number }[] {
+  const children = new Map<string, Product[]>()
+  for (const product of products) {
+    if (!product.parent_id) continue
+    children.set(product.parent_id, [...(children.get(product.parent_id) ?? []), product])
+  }
+  const rows: { product: Product; depth: number }[] = []
+  for (const product of products) {
+    // A variant whose master is not in this result set (filtered out by a
+    // search, say) still has to appear, or it would be unreachable.
+    if (product.parent_id && products.some((p) => p.id === product.parent_id)) continue
+    rows.push({ product, depth: 0 })
+    for (const child of children.get(product.id) ?? []) {
+      rows.push({ product: child, depth: 1 })
+    }
+  }
+  return rows
+}
+
 export default function Products() {
   const [products, setProducts] = useState<Product[] | null>(null)
   const [query, setQuery] = useState('')
@@ -150,12 +174,13 @@ export default function Products() {
           />
         ) : (
           <Card className="divide-y divide-ink-200">
-            {products.map((product) => (
+            {nest(products).map(({ product, depth }) => (
               // The checkbox sits outside the row button: a control inside a
               // button is not reachable on its own.
               <div
                 key={product.id}
                 className="flex w-full items-center gap-2 pl-4 hover:bg-ink-50"
+                style={{ paddingLeft: 16 + depth * 24 }}
               >
                 <input
                   type="checkbox"
@@ -169,6 +194,7 @@ export default function Products() {
                   className="flex min-w-0 flex-1 flex-wrap items-center gap-2 py-3 pr-4 text-left"
                 >
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-900">
+                  {depth ? <span className="text-ink-400">↳ </span> : null}
                   {product.name}
                 </span>
                 <span className="font-mono text-xs text-ink-500">{product.sku}</span>
@@ -1195,6 +1221,43 @@ function VariationsEditor({
     }
   }
 
+  /** Give a variation a product of its own, so it can have its own components. */
+  const makeProduct = async (variation: ProductVariation, fulfillment: Fulfillment) => {
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<Product & { moved: number }>(
+        `/api/products/${product.id}/variations/${variation.id}/product`,
+        { fulfillment },
+      )
+      await onSaved(saved)
+      setNotice(
+        `“${variation.label}” is now its own product — give it its components below.` +
+          (saved.moved ? ` ${saved.moved} open order line(s) moved onto it.` : ''),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const detachProduct = async (variation: ProductVariation) => {
+    setBusy(true)
+    try {
+      await onSaved(
+        await api.del<Product>(
+          `/api/products/${product.id}/variations/${variation.id}/product`,
+        ),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="space-y-2 rounded-md border border-ink-200 p-3">
       <div className="flex flex-wrap items-start gap-2">
@@ -1203,7 +1266,9 @@ function VariationsEditor({
           <p className="text-xs text-ink-500">
             What the buyer can pick on Etsy. Orders attach to one automatically —
             by Etsy's variation id, or by the option values if Etsy has reissued
-            the ids. Leave a row blank to use the product's own settings.
+            the ids. A variation that is genuinely a different build gets its own
+            product, nested under this one, with its own components; otherwise it
+            uses this product's settings.
           </p>
         </div>
         <Button size="sm" onClick={sync} disabled={busy}>
@@ -1256,7 +1321,50 @@ function VariationsEditor({
                 </Button>
               </div>
 
-              {product.fulfillment === 'printed' ? (
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-ink-500">Is:</span>
+                {variation.variant_product_id ? (
+                  <>
+                    <span className="text-ink-700">
+                      {variation.variant_product_name}
+                    </span>
+                    <Badge>{variation.variant_product_fulfillment}</Badge>
+                    <span className="text-ink-500">
+                      — edit it in the list to set its components
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => detachProduct(variation)}
+                    >
+                      Detach
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-ink-500">the product above</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => makeProduct(variation, 'bundle')}
+                    >
+                      Give it its own components
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => makeProduct(variation, product.fulfillment)}
+                    >
+                      …or its own {product.fulfillment} product
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {product.fulfillment === 'printed' && !variation.variant_product_id ? (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-ink-500">Prints:</span>
                   {variation.bambuddy_archive_id ? (
@@ -1294,7 +1402,7 @@ function VariationsEditor({
                 </div>
               ) : null}
 
-              {product.fulfillment === 'stocked' ? (
+              {product.fulfillment === 'stocked' && !variation.variant_product_id ? (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-ink-500">Stock:</span>
                   <span className="text-ink-700">

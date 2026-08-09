@@ -4,6 +4,7 @@ import AppShell from './components/AppShell'
 import Login from './pages/Login'
 import SetupWizard from './pages/SetupWizard'
 import Board from './pages/Board'
+import Orders from './pages/Orders'
 import Products from './pages/Products'
 import PrintQueue from './pages/PrintQueue'
 import Manufacturing from './pages/Manufacturing'
@@ -63,6 +64,7 @@ export default function App() {
     <AppShell username={session.username} onSignedOut={refresh}>
       <Routes>
         <Route path="/" element={<Board />} />
+        <Route path="/orders" element={<Orders />} />
         <Route path="/products" element={<Products />} />
         <Route path="/print-queue" element={<PrintQueue />} />
         <Route path="/manufacturing" element={<Manufacturing />} />

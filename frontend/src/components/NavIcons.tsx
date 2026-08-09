@@ -31,6 +31,15 @@ export function BoardIcon(props: IconProps) {
   )
 }
 
+export function OrdersIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8 4h9a2 2 0 0 1 2 2v14l-3-2-3 2-3-2-3 2V6a2 2 0 0 1 2-2Z" />
+      <path d="M9 9h7M9 13h7" />
+    </Svg>
+  )
+}
+
 export function ManufacturingIcon(props: IconProps) {
   return (
     <Svg {...props}>

@@ -282,6 +282,13 @@ function LineRow({
               Link product
             </Button>
           ) : null}
+          {/* A wrong match used to be permanent. Letting go of it puts the
+              line back where the picker can reach it. */}
+          {line.state !== 'unmatched' && line.parent_line_id === null && line.product_id ? (
+            <Button size="sm" variant="ghost" onClick={() => run('unmatch')} disabled={busy}>
+              Change product
+            </Button>
+          ) : null}
           {line.is_bundle ? (
             <Button
               size="sm"
@@ -399,6 +406,30 @@ export default function OrderDrawer({
     const base = `/api/orders/${orderId}/lines/${line.id}`
     if (action === 'link') {
       setPickerLine(line)
+      return
+    }
+    if (action === 'unmatch') {
+      if (
+        !window.confirm(
+          'Let go of this product? Anything queued for it that has not reached ' +
+            'Bambuddy yet is dropped, and the line goes back to needing a match.',
+        )
+      )
+        return
+      setNotice(null)
+      await apply(
+        api
+          .post<Order & { kept_jobs?: number }>(`${base}/unmatch`)
+          .then((updated) => {
+            if (updated.kept_jobs) {
+              setNotice(
+                `${updated.kept_jobs} print job${updated.kept_jobs === 1 ? '' : 's'} ` +
+                  'already on the Bambuddy queue were left as they are.',
+              )
+            }
+            return updated
+          }),
+      )
       return
     }
     if (action === 'requeue-job') {
@@ -551,6 +582,37 @@ export default function OrderDrawer({
                     onClick={() => apply(api.post(`/api/orders/${orderId}/reprocess`))}
                   >
                     Re-run intake
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={async () => {
+                      if (
+                        !window.confirm(
+                          'Unmatch every line and run intake again from scratch? ' +
+                            'Use this after linking a listing or adding variations.',
+                        )
+                      )
+                        return
+                      setNotice(null)
+                      await apply(
+                        api
+                          .post<Order & { lines?: number; kept_jobs?: number }>(
+                            `/api/orders/${orderId}/reset-matching`,
+                          )
+                          .then((updated) => {
+                            setNotice(
+                              `Re-matched from scratch.` +
+                                (updated.kept_jobs
+                                  ? ` ${updated.kept_jobs} job(s) already on the Bambuddy queue were left alone.`
+                                  : ''),
+                            )
+                            return updated
+                          }),
+                      )
+                    }}
+                  >
+                    Reset matching
                   </Button>
                   <a
                     className="inline-flex items-center rounded-md px-2.5 py-1 text-xs text-ink-600 underline"

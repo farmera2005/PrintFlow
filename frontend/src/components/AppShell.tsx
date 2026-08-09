@@ -10,6 +10,7 @@ import {
   ManufacturingIcon,
   MenuIcon,
   PrinterIcon,
+  OrdersIcon,
   ProductsIcon,
   SettingsIcon,
 } from './NavIcons'
@@ -17,6 +18,7 @@ import { Alert, Button, cx } from './ui'
 
 const NAV = [
   { to: '/', label: 'Board', end: true, Icon: BoardIcon },
+  { to: '/orders', label: 'Orders', Icon: OrdersIcon },
   { to: '/products', label: 'Products', Icon: ProductsIcon },
   { to: '/print-queue', label: 'Print Queue', Icon: PrinterIcon },
   { to: '/manufacturing', label: 'Manufacturing', Icon: ManufacturingIcon },

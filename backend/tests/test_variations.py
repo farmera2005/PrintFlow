@@ -12,7 +12,14 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.models import OrderLine, PrintJob, PrintMapping, Product, ProductVariation
+from app.models import (
+    BomLine,
+    OrderLine,
+    PrintJob,
+    PrintMapping,
+    Product,
+    ProductVariation,
+)
 from app.services import intake, variations
 
 pytestmark = pytest.mark.asyncio
@@ -569,3 +576,247 @@ class TestStockPerVariation:
         ]
         assert notes[0] is None
         assert "Short on stock: 0 available" in notes[1]
+
+
+# --------------------------------------------------------------------------
+# Variants as products of their own
+# --------------------------------------------------------------------------
+
+
+class TestVariantProducts:
+    """A variation can be a product, and then it brings its own components.
+
+    "With fan" and "without fan" are not one build with a substitution; they
+    are two builds. The master is what Etsy sells and what an order matches
+    first — the variant is what actually gets made.
+    """
+
+    @staticmethod
+    async def _family(db):
+        master = Product(
+            sku="BIN", name="Storage bin", fulfillment="printed", qbo_item_id=None
+        )
+        db.add(master)
+        await db.flush()
+        db.add(
+            PrintMapping(
+                product_id=master.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
+            )
+        )
+        variation = ProductVariation(
+            product_id=master.id,
+            label="Bin Fan: Yes",
+            options=[{"name": "Bin Fan", "value": "Yes"}],
+            etsy_product_id=VARIANT_YES,
+        )
+        db.add(variation)
+        await db.flush()
+        return master, variation
+
+    async def test_the_line_becomes_the_variant_product(self, db):
+        master, variation = await self._family(db)
+        variant = Product(
+            sku="BIN-FAN", name="Bin, with fan", parent_id=master.id,
+            fulfillment="printed", qbo_item_id=None,
+        )
+        db.add(variant)
+        await db.flush()
+        db.add(
+            PrintMapping(
+                product_id=variant.id, bambuddy_archive_id=99, plate_number=1, units_per_plate=1
+            )
+        )
+        variation.variant_product_id = variant.id
+        await db.commit()
+
+        order, _ = await intake.ingest_receipt(
+            db, _receipt(20, value="Yes", product_id=VARIANT_YES)
+        )
+        await db.commit()
+        line = await _first_line(db, order)
+        assert line.product_id == variant.id
+        job = (
+            await db.execute(select(PrintJob).where(PrintJob.order_line_id == line.id))
+        ).scalar_one()
+        assert job.bambuddy_archive_id == 99
+
+    async def test_a_variant_bundle_explodes_into_its_own_components(self, db):
+        """The whole point of the change: different components per variant."""
+        master, variation = await self._family(db)
+        body = Product(sku="BODY", name="Body", fulfillment="printed", qbo_item_id=None)
+        fan = Product(sku="FAN", name="Fan", fulfillment="stocked", qbo_item_id=None)
+        variant = Product(
+            sku="BIN-FAN", name="Bin, with fan", parent_id=master.id,
+            fulfillment="bundle", qbo_item_id=None,
+        )
+        db.add_all([body, fan, variant])
+        await db.flush()
+        db.add(BomLine(bundle_id=variant.id, component_id=body.id, quantity=1))
+        db.add(BomLine(bundle_id=variant.id, component_id=fan.id, quantity=2))
+        variation.variant_product_id = variant.id
+        await db.commit()
+
+        order, _ = await intake.ingest_receipt(
+            db, _receipt(21, value="Yes", product_id=VARIANT_YES)
+        )
+        await db.commit()
+
+        children = (
+            (
+                await db.execute(
+                    select(OrderLine).where(OrderLine.parent_line_id.isnot(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert sorted((c.sku_raw, c.quantity) for c in children) == [
+            ("BODY", 1),
+            ("FAN", 2),
+        ]
+
+    async def test_the_other_variation_still_uses_the_master(self, db):
+        master, variation = await self._family(db)
+        db.add(
+            ProductVariation(
+                product_id=master.id,
+                label="Bin Fan: No",
+                options=[{"name": "Bin Fan", "value": "No"}],
+                etsy_product_id=VARIANT_NO,
+            )
+        )
+        variant = Product(
+            sku="BIN-FAN", name="Bin, with fan", parent_id=master.id,
+            fulfillment="printed", qbo_item_id=None,
+        )
+        db.add(variant)
+        await db.flush()
+        variation.variant_product_id = variant.id
+        await db.commit()
+
+        order, _ = await intake.ingest_receipt(
+            db, _receipt(22, value="No", product_id=VARIANT_NO)
+        )
+        await db.commit()
+        assert (await _first_line(db, order)).product_id == master.id
+
+    async def test_re_running_intake_does_not_lose_the_variation(self, db):
+        """The line now points at the variant, whose variations live on the master."""
+        master, variation = await self._family(db)
+        variant = Product(
+            sku="BIN-FAN", name="Bin, with fan", parent_id=master.id,
+            fulfillment="printed", qbo_item_id=None,
+        )
+        db.add(variant)
+        await db.flush()
+        variation.variant_product_id = variant.id
+        await db.commit()
+
+        order, _ = await intake.ingest_receipt(
+            db, _receipt(23, value="Yes", product_id=VARIANT_YES)
+        )
+        await db.commit()
+        await intake.process_order(db, order)
+        await db.commit()
+
+        line = await _first_line(db, order)
+        assert line.product_id == variant.id
+        assert line.variation_id == variation.id
+
+
+class TestVariantProductApi:
+    async def test_creating_one_nests_it_under_the_master(self, signed_in, db):
+        master = Product(sku="BIN", name="Storage bin", fulfillment="printed", qbo_item_id=None)
+        db.add(master)
+        await db.flush()
+        variation = ProductVariation(
+            product_id=master.id,
+            label="Bin Fan: Yes",
+            options=[{"name": "Bin Fan", "value": "Yes"}],
+            etsy_listing_id=LISTING,
+            etsy_product_id=VARIANT_YES,
+        )
+        db.add(variation)
+        await db.commit()
+
+        response = await signed_in.post(
+            f"/api/products/{master.id}/variations/{variation.id}/product",
+            json={"fulfillment": "bundle"},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["variations"][0]["variant_product_name"] == "Storage bin — Bin Fan: Yes"
+
+        listing = (await signed_in.get("/api/products")).json()["products"]
+        variant = next(p for p in listing if p["parent_id"] == str(master.id))
+        assert variant["fulfillment"] == "bundle"
+        assert variant["sku"] == f"ETSY-{LISTING}-{VARIANT_YES}"
+
+    async def test_a_variant_cannot_have_variants_of_its_own(self, signed_in, db):
+        master = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(master)
+        await db.flush()
+        variant = Product(
+            sku="BIN-FAN", name="Bin, fan", parent_id=master.id,
+            fulfillment="printed", qbo_item_id=None,
+        )
+        db.add(variant)
+        await db.flush()
+        nested = ProductVariation(
+            product_id=variant.id, label="Colour: Red",
+            options=[{"name": "Colour", "value": "Red"}],
+        )
+        db.add(nested)
+        await db.commit()
+
+        response = await signed_in.post(
+            f"/api/products/{variant.id}/variations/{nested.id}/product",
+            json={"fulfillment": "printed"},
+        )
+        assert response.status_code == 400
+        assert "do not nest" in response.json()["detail"]
+
+    async def test_a_master_with_variants_is_not_deleted_by_accident(self, signed_in, db):
+        master = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(master)
+        await db.flush()
+        db.add(
+            Product(
+                sku="BIN-FAN", name="Bin, fan", parent_id=master.id,
+                fulfillment="printed", qbo_item_id=None,
+            )
+        )
+        await db.commit()
+
+        response = await signed_in.delete(f"/api/products/{master.id}")
+        assert response.status_code == 409
+        assert "1 variant" in response.json()["detail"]
+
+    async def test_a_whole_family_can_be_deleted_together(self, signed_in, db):
+        """Selecting both must work, whichever order they arrive in."""
+        master = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(master)
+        await db.flush()
+        variant = Product(
+            sku="BIN-FAN", name="Bin, fan", parent_id=master.id,
+            fulfillment="printed", qbo_item_id=None,
+        )
+        db.add(variant)
+        await db.flush()
+        db.add(
+            ProductVariation(
+                product_id=master.id, label="Bin Fan: Yes",
+                options=[{"name": "Bin Fan", "value": "Yes"}],
+                variant_product_id=variant.id,
+            )
+        )
+        await db.commit()
+
+        # Master listed first, which is the order the screen would send.
+        response = await signed_in.post(
+            "/api/products/bulk-delete",
+            json={"product_ids": [str(master.id), str(variant.id)]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"deleted": 2, "kept": []}
+        assert (await signed_in.get("/api/products")).json()["products"] == []

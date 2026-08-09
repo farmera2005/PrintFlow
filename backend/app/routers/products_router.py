@@ -22,13 +22,15 @@ from ..models import (
     LINE_CANCELLED,
     LINE_SHIPPED,
     MadeSheetLine,
+    Order,
     OrderLine,
     PrintMapping,
     Product,
     ProductVariation,
     User,
 )
-from ..services import audit, codes, intake, printing
+from ..services import allocation, audit, codes, intake, printing
+from ..services.state import recompute_order
 from ..services import variations as variations_service
 from ..services.credentials import IntegrationNotConfigured
 
@@ -42,6 +44,7 @@ def _serialize(product: Product) -> dict[str, Any]:
         "sku": product.sku,
         "name": product.name,
         "fulfillment": product.fulfillment,
+        "parent_id": product.parent_id,
         "qbo_item_id": product.qbo_item_id,
         "qbo_item_name": product.qbo_item_name,
         "active": product.active,
@@ -100,6 +103,15 @@ def _serialize(product: Product) -> dict[str, Any]:
                 "preferred_printer_id": variation.preferred_printer_id,
                 "qbo_item_id": variation.qbo_item_id,
                 "qbo_item_name": variation.qbo_item_name,
+                "variant_product_id": variation.variant_product_id,
+                "variant_product_name": (
+                    variation.variant_product.name if variation.variant_product else None
+                ),
+                "variant_product_fulfillment": (
+                    variation.variant_product.fulfillment
+                    if variation.variant_product
+                    else None
+                ),
                 "active": variation.active,
             }
             for variation in sorted(
@@ -130,7 +142,7 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
                 selectinload(Product.option_rules).selectinload(BomOptionRule.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
                 selectinload(Product.etsy_links),
-                selectinload(Product.variations),
+                selectinload(Product.variations).selectinload(ProductVariation.variant_product),
             )
             # Sessions do not expire on commit, so without this the identity map
             # would hand back the collections as they were before the write.
@@ -157,7 +169,7 @@ async def list_products(
         selectinload(Product.option_rules).selectinload(BomOptionRule.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
         selectinload(Product.etsy_links),
-        selectinload(Product.variations),
+        selectinload(Product.variations).selectinload(ProductVariation.variant_product),
     )
     if q.strip():
         needle = f"%{q.strip().lower()}%"
@@ -318,10 +330,38 @@ async def bulk_delete_products(
     """
     deleted: list[str] = []
     kept: list[dict[str, Any]] = []
-    for product_id in body.product_ids:
+
+    # Variants before masters, so selecting a whole family and deleting it works
+    # in one pass rather than reporting "it has 2 variants" about a product the
+    # operator has already ticked.
+    chosen = [
+        product
+        for product in (
+            await session.execute(select(Product).where(Product.id.in_(body.product_ids)))
+        )
+        .scalars()
+        .all()
+    ]
+    order_of = {product.id: (0 if product.parent_id else 1) for product in chosen}
+    for product_id in sorted(body.product_ids, key=lambda pid: order_of.get(pid, 1)):
         product = await session.get(Product, product_id)
         if product is None:
             continue
+        # A variation pointing at it goes too; the row without its product would
+        # silently fall back to the master's build.
+        for variation in (
+            (
+                await session.execute(
+                    select(ProductVariation).where(
+                        ProductVariation.variant_product_id == product.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            variation.variant_product_id = None
+        await session.flush()
         blockers = await _delete_blockers(session, product)
         if blockers:
             kept.append(
@@ -353,6 +393,30 @@ async def _delete_blockers(session: AsyncSession, product: Product) -> list[str]
     here, or the delete fails in the database and surfaces as a 500.
     """
     blockers: list[str] = []
+
+    variants = (
+        await session.execute(
+            select(func.count()).select_from(Product).where(Product.parent_id == product.id)
+        )
+    ).scalar_one()
+    if variants:
+        blockers.append(
+            f"It has {variants} variant{'s' if variants != 1 else ''} — delete "
+            "those first, or select them here too."
+        )
+
+    used_by_variation = (
+        await session.execute(
+            select(func.count())
+            .select_from(ProductVariation)
+            .where(ProductVariation.variant_product_id == product.id)
+        )
+    ).scalar_one()
+    if used_by_variation:
+        blockers.append(
+            f"{used_by_variation} variation{'s' if used_by_variation != 1 else ''} "
+            "resolve to it — detach it from those first."
+        )
 
     orders = (
         await session.execute(
@@ -1009,3 +1073,137 @@ async def delete_variation(
     await session.delete(variation)
     await session.commit()
     return _serialize(await _get(session, product_id))
+
+
+class VariantProductRequest(BaseModel):
+    """Turn a variation into a product of its own."""
+
+    name: str | None = Field(default=None, max_length=500)
+    fulfillment: str = Field(pattern="^(printed|stocked|bundle)$")
+    sku: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/{product_id}/variations/{variation_id}/product", status_code=201)
+async def create_variant_product(
+    product_id: uuid.UUID,
+    variation_id: uuid.UUID,
+    body: VariantProductRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Give a variation its own product, so it can have its own components.
+
+    "With fan" and "without fan" are not the same build, and a single BOM
+    cannot describe both. The variant is a full product — its own BOM, print
+    file and QuickBooks item — nested under the listing it is sold as.
+    """
+    master = await _get(session, product_id)
+    variation = await session.get(ProductVariation, variation_id)
+    if variation is None or variation.product_id != master.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Variation not found")
+    if variation.variant_product_id is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This variation already has its own product."
+        )
+    if master.parent_id is not None:
+        # One level. A variant of a variant is a hierarchy nobody asked for and
+        # every reader would then have to walk.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This product is already a variant. Variants do not nest further.",
+        )
+
+    name = (body.name or f"{master.name} — {variation.label}").strip()[:500]
+    code = (body.sku or "").strip() or await codes.unique(
+        session,
+        codes.from_listing(variation.etsy_listing_id, variation.etsy_product_id)
+        or codes.from_name(name),
+    )
+    variant = Product(
+        sku=code,
+        name=name,
+        parent_id=master.id,
+        fulfillment=body.fulfillment,
+        qbo_item_id=None,
+        active=True,
+    )
+    session.add(variant)
+    await session.flush()
+    variation.variant_product_id = variant.id
+    await session.flush()
+
+    # Orders sitting on the master should move onto the variant, and take their
+    # undispatched plates with them.
+    moved = await _reattach_open_lines(session, master)
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=master.id,
+        action="variant_product_create",
+        detail={"variation": variation.label, "variant": variant.sku, "moved": moved},
+        actor=user.username,
+    )
+    await session.commit()
+    payload = _serialize(await _get(session, product_id))
+    payload["variant_product_id"] = str(variant.id)
+    payload["moved"] = moved
+    return payload
+
+
+@router.delete("/{product_id}/variations/{variation_id}/product")
+async def detach_variant_product(
+    product_id: uuid.UUID,
+    variation_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Stop a variation resolving to its own product. The product itself stays."""
+    variation = await session.get(ProductVariation, variation_id)
+    if variation is None or variation.product_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Variation not found")
+    variation.variant_product_id = None
+    await session.flush()
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+async def _reattach_open_lines(session: AsyncSession, master: Product) -> int:
+    """Re-resolve open lines sitting on a master or any of its variants."""
+    # Queried rather than read off master.variants: the collection was loaded
+    # before this request added a variant, and refreshing it mid-transaction is
+    # a lazy load in the wrong place.
+    family = [master.id] + list(
+        (
+            await session.execute(
+                select(Product.id).where(Product.parent_id == master.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    lines = (
+        (
+            await session.execute(
+                select(OrderLine).where(
+                    OrderLine.product_id.in_(family),
+                    OrderLine.parent_line_id.is_(None),
+                    OrderLine.state.notin_((LINE_SHIPPED, LINE_CANCELLED)),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    moved = 0
+    for line in lines:
+        before = line.product_id
+        produced = await intake.resolve_line(session, line)
+        if line.product_id != before:
+            moved += 1
+        await allocation.decide_lines(session, produced)
+        await printing.plan_jobs(session, produced)
+        order = await session.get(Order, line.order_id)
+        if order is not None:
+            await recompute_order(session, order)
+    return moved

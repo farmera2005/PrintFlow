@@ -138,14 +138,25 @@ Both are kept because Etsy **reissues a variation's id whenever the seller edits
 the listing's options**. Matching on the id alone would go quiet after an edit
 and take the wrong plate with it; the values survive.
 
-Each row can override, and every override is optional:
+What a matched variation *is* comes in two weights.
 
-* **the print file** — a different archive, or the same one on a different
-  plate;
-* **the QuickBooks item** — for a variation whose stock is tracked separately.
+**Its own product** — *Give it its own components*. The variant becomes a real
+product nested under the master, with its own BOM, print file and QuickBooks
+item. This is the right answer when the combinations are genuinely different
+builds, which is most of the time: "with fan" and "without fan" are two builds,
+not one build with a substitution. The master stays what Etsy sells and what an
+order matches first; the variant is what actually gets made, and an order
+resolves through to it and explodes its components.
 
-Blank means "use the product's". A variation with no overrides is still worth
-having: the order says which one was bought.
+**A shortcut** — for when only the plate or the stock bucket differs and a whole
+product would be ceremony, the row can override **the print file** or **the
+QuickBooks item** directly. Ignored once the variation has its own product; that
+product carries everything.
+
+Blank on both counts is still worth having: the order says which one was bought.
+
+Variants do not nest further. One level is enough to describe a listing, and
+more would mean every reader has to walk a tree.
 
 Setting variations up **after** the first order arrived is the normal way round,
 so pulling them re-matches the open orders on that product, and rewrites any
@@ -155,6 +166,23 @@ it.
 
 Combinations Etsy stops selling are marked *no longer sold* rather than deleted,
 because old orders still point at them.
+
+## Finding an order, and changing a match
+
+The board draws the five live columns, so a cancelled order is not on it and a
+shipped one scrolls away. **Orders** lists every order whatever its status, with
+a filter per status and a search over order number and buyer, and opens the same
+drawer.
+
+Two ways back from a wrong match:
+
+* **Change product** on a line hands it back to the picker. Anything queued for
+  it that has not reached Bambuddy is dropped; anything already on a printer is
+  left alone and said so, because forgetting the row would not unprint it.
+* **Reset matching** on the order unmatches every line and runs intake again
+  from scratch. This is the one to use after the catalogue changed underneath an
+  order — a listing linked, variations added, a BOM corrected. Plain **Re-run
+  intake** keeps whatever each line already matched; reset throws it away first.
 
 ## Etsy options that change the BOM
 

@@ -177,6 +177,13 @@ class Product(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     sku: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # A variant of another product: "Bin, with fan" under "Storage bin". The
+    # child is a product in its own right — its own BOM, print file and
+    # QuickBooks item — because that is exactly how it differs. The parent is
+    # what Etsy sells and what an order matches first.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
     fulfillment: Mapped[str] = mapped_column(Text, nullable=False)
     qbo_item_id: Mapped[str | None] = mapped_column(Text)
     qbo_item_name: Mapped[str | None] = mapped_column(Text)
@@ -188,6 +195,7 @@ class Product(Base):
         CheckConstraint(
             "fulfillment in ('printed','stocked','bundle')", name="ck_products_fulfillment"
         ),
+        CheckConstraint("parent_id is null or parent_id <> id", name="ck_products_parent_not_self"),
         Index("ix_products_sku_lower", func.lower(sku), unique=True),
     )
 
@@ -210,7 +218,16 @@ class Product(Base):
         back_populates="product", cascade="all, delete-orphan", lazy="selectin"
     )
     variations: Mapped[list[ProductVariation]] = relationship(
-        back_populates="product", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="product",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        foreign_keys="ProductVariation.product_id",
+    )
+    variants: Mapped[list[Product]] = relationship(
+        back_populates="parent", foreign_keys=[parent_id], lazy="selectin"
+    )
+    parent: Mapped[Product | None] = relationship(
+        back_populates="variants", remote_side=[id], foreign_keys=[parent_id]
     )
 
 
@@ -314,9 +331,17 @@ class ProductVariation(Base):
       space-insensitively. Slower to match but survives an edit, which is why
       both are kept and the ids are refreshed rather than relied upon.
 
-    Every override is optional. A variation that sets none of them is still
-    worth having: it records what the listing offers, and the order says which
-    one was bought.
+    What a matched variation then *is* comes in two weights:
+
+    * `variant_product_id` — a product of its own, with its own BOM, print file
+      and QuickBooks item. The right answer when the combinations are genuinely
+      different things to make, which is most of the time.
+    * the override columns below — a shortcut for when only the plate or the
+      stock bucket differs and a whole product would be ceremony. Ignored when
+      a variant product is set; that product carries everything.
+
+    Both are optional. A variation that sets neither is still worth having: it
+    records what the listing offers, and the order says which one was bought.
     """
 
     __tablename__ = "product_variations"
@@ -335,7 +360,15 @@ class ProductVariation(Base):
     )
     label: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Print override. Null archive means "use the product's print mapping".
+    # The product this combination actually is. RESTRICT rather than CASCADE:
+    # deleting the variant product is a catalogue decision that should be made
+    # deliberately, not fall out of tidying up a variation row.
+    variant_product_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), index=True
+    )
+
+    # Print override, used only when there is no variant product. Null archive
+    # means "use the product's print mapping".
     bambuddy_archive_id: Mapped[int | None] = mapped_column(Integer)
     bambuddy_archive_name: Mapped[str | None] = mapped_column(Text)
     plate_number: Mapped[int | None] = mapped_column(Integer)
@@ -370,7 +403,12 @@ class ProductVariation(Base):
         ),
     )
 
-    product: Mapped[Product] = relationship(back_populates="variations")
+    product: Mapped[Product] = relationship(
+        back_populates="variations", foreign_keys=[product_id]
+    )
+    variant_product: Mapped[Product | None] = relationship(
+        foreign_keys=[variant_product_id], lazy="selectin"
+    )
 
 
 class BomOptionRule(Base):

@@ -174,6 +174,8 @@ export interface Product {
   sku: string
   name: string
   fulfillment: Fulfillment
+  /** Set when this product is a variant of another — "Bin, with fan". */
+  parent_id: string | null
   qbo_item_id: string | null
   qbo_item_name: string | null
   active: boolean
@@ -204,6 +206,10 @@ export interface ProductVariation {
   preferred_printer_id: number | null
   qbo_item_id: string | null
   qbo_item_name: string | null
+  /** The product this combination is, when it has one of its own. */
+  variant_product_id: string | null
+  variant_product_name: string | null
+  variant_product_fulfillment: Fulfillment | null
   active: boolean
 }
 

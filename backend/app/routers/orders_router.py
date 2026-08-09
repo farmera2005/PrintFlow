@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +18,7 @@ from ..db import get_session
 from ..integrations.base import IntegrationError
 from ..models import (
     LINE_CANCELLED,
+    ORDER_STATUSES,
     LINE_PRINTED,
     LINE_READY,
     ORDER_READY_TO_SHIP,
@@ -74,6 +75,12 @@ async def list_orders(
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    """Every order, whatever its status.
+
+    The board only draws the five live columns, so a cancelled order — or a
+    shipped one from last month — is invisible there. This is the way back to
+    it.
+    """
     stmt = select(Order).options(
         selectinload(Order.lines).selectinload(OrderLine.print_jobs),
         selectinload(Order.lines).selectinload(OrderLine.product),
@@ -84,10 +91,25 @@ async def list_orders(
             Order.order_number.ilike(needle) | Order.buyer_name.ilike(needle)
         )
     if status_filter:
+        if status_filter not in ORDER_STATUSES:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"status_filter must be one of {', '.join(ORDER_STATUSES)}",
+            )
         stmt = stmt.where(Order.status == status_filter)
     stmt = stmt.order_by(Order.placed_at.desc().nullslast()).limit(max(1, min(limit, 500)))
     orders = (await session.execute(stmt)).scalars().all()
-    return {"orders": [board.order_card(order) for order in orders]}
+
+    counts = dict(
+        (
+            await session.execute(select(Order.status, func.count()).group_by(Order.status))
+        ).all()
+    )
+    return {
+        "orders": [board.order_card(order) for order in orders],
+        "counts": {name: counts.get(name, 0) for name in ORDER_STATUSES},
+        "total": sum(counts.values()),
+    }
 
 
 @router.get("/orders/{order_id}")
@@ -135,6 +157,65 @@ async def reprocess_order(
 # --------------------------------------------------------------------------
 # Line-level actions
 # --------------------------------------------------------------------------
+
+
+@router.post("/orders/{order_id}/reset-matching")
+async def reset_matching(
+    order_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Unmatch everything and run intake again from scratch.
+
+    The fix after the catalogue has changed underneath an order — a listing
+    linked, variations added, a BOM corrected. Re-running intake alone keeps
+    whatever each line already matched; this throws that away first.
+    """
+    order = await _get_order(session, order_id)
+    totals = await intake.reset_order_matching(session, order)
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="reset_matching",
+        detail=totals,
+        actor=user.username,
+    )
+    await session.commit()
+    detail = await board.load_order_detail(session, order_id)
+    detail.update(totals)
+    return detail
+
+
+@router.post("/orders/{order_id}/lines/{line_id}/unmatch")
+async def unmatch_line(
+    order_id: uuid.UUID,
+    line_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Let go of this line's product so a different one can be picked."""
+    line = await _get_line(session, order_id, line_id)
+    if line.parent_line_id is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This is a bundle component. Change the item it came from instead.",
+        )
+    result = await intake.clear_line_match(session, line)
+    order = await _get_order(session, order_id)
+    await recompute_order(session, order)
+    await audit.record(
+        session,
+        entity_type="order_line",
+        entity_id=line.id,
+        action="unmatch",
+        detail=result,
+        actor=user.username,
+    )
+    await session.commit()
+    detail = await board.load_order_detail(session, order_id)
+    detail.update(result)
+    return detail
 
 
 class LinkProductRequest(BaseModel):
