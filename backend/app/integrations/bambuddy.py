@@ -446,7 +446,14 @@ def _ref_id(value: Any) -> Any:
 
 
 def parse_library_folder(row: dict[str, Any]) -> dict[str, Any]:
-    """One row of the library's folder collection."""
+    """One row of the library's folder collection.
+
+    A row may say where it sits in two ways: an id pointing at its parent, or a
+    path that spells the whole ancestry out. The path is taken when there is
+    one — it needs no chain to resolve and cannot be broken by a parent that
+    did not come back in the same reply.
+    """
+    raw_path = _first(row, "path", "full_path", "fullPath", "folder_path", "location")
     return {
         "id": _first(row, "id", "folder_id", "folderId", "uuid"),
         "name": str(
@@ -455,15 +462,18 @@ def parse_library_folder(row: dict[str, Any]) -> dict[str, Any]:
         "parent_id": _ref_id(
             _first(
                 row, "parent_id", "parentId", "parent_folder_id", "parentFolderId",
-                "folder_id", "parent",
+                "parent", "folder_id",
             )
         ),
+        "path": join_path("", str(raw_path)) if raw_path else None,
     }
 
 
 def parse_library_file(row: dict[str, Any]) -> dict[str, Any]:
     """One row of the library's file collection."""
+    raw_path = _first(row, "path", "full_path", "fullPath", "file_path", "location")
     return {
+        "path": join_path("", str(raw_path)) if raw_path else None,
         "id": _first(row, "id", "file_id", "fileId", "uuid"),
         "name": str(
             _first(
@@ -514,6 +524,11 @@ def build_library_tree(
         # ancestor, hangs off the root rather than disappearing with its files.
         if folder is None or folder_id in seen:
             return ""
+        if folder.get("path"):
+            # The row spelled its ancestry out, so there is no chain to walk and
+            # no parent that has to have come back in the same reply.
+            paths[folder_id] = folder["path"]
+            return paths[folder_id]
         parent = path_of(folder["parent_id"], seen | {folder_id})
         paths[folder_id] = join_path(parent, folder["name"] or str(folder_id))
         return paths[folder_id]
@@ -560,13 +575,17 @@ def build_library_tree(
         )
 
     for row in files:
-        if not row["name"]:
+        if not row["name"] and not row.get("path"):
             continue
-        parent = path_of(row["folder_id"]) if row["folder_id"] is not None else ""
+        if row.get("path"):
+            where = row["path"]
+        else:
+            parent = path_of(row["folder_id"]) if row["folder_id"] is not None else ""
+            where = join_path(parent, row["name"])
         place(
-            join_path(parent, row["name"]),
+            where,
             {
-                "name": row["name"],
+                "name": row["name"] or row["path"].rsplit("/", 1)[-1],
                 "kind": "file",
                 "size": row["size"],
                 "modified": row["modified"],
@@ -577,6 +596,33 @@ def build_library_tree(
                 "library_id": row["id"],
             },
         )
+
+    # A node whose folder never came back would be drawn nowhere: the picker
+    # lists a folder's children, and nothing is a child of a folder that does
+    # not exist. Two rows deep under an absent folder is invisible, not empty,
+    # which is the worst way for a file to go missing. So the folders a path
+    # implies are made real.
+    for path in [node["path"] for node in nodes.values()]:
+        parts = path.strip("/").split("/")
+        for depth in range(1, len(parts)):
+            branch = "/" + "/".join(parts[:depth])
+            if branch in nodes:
+                continue
+            nodes[branch] = {
+                "name": parts[depth - 1],
+                "kind": "folder",
+                "size": None,
+                "modified": None,
+                "archive_id": None,
+                "printable": False,
+                "library_id": None,
+                "path": branch,
+                "parent": folderish_parent(branch),
+                "depth": max(0, branch.count("/") - 1),
+                # Nothing described it; it is known only because something
+                # inside it named it.
+                "implied": True,
+            }
 
     listing = sorted(
         nodes.values(), key=lambda node: (node["path"].count("/"), node["path"].lower())
@@ -921,28 +967,29 @@ class BambuddyClient:
         """
         if printer_id is not None:
             return {"probes": [await self._probe(self.files_path(printer_id))]}
+
+        # Every call the tree is built from, in the order it makes them. Which
+        # one is wrong is not guessable from outside a self-hosted instance, but
+        # four replies side by side make it obvious.
         probes = [
             await self._probe(self.paths["library_folders"]),
             await self._probe(self.paths["library_files"]),
         ]
-        # If the flat file list came back empty, show what one folder's worth
-        # looks like too: that is the call the fallback makes, and its reply is
-        # the thing that says whether the endpoint wants to be asked.
-        if not probes[1].get("rows_found"):
-            folders = file_rows(
-                await self._call("GET", self.paths["library_folders"], params=None)
+        folders = file_rows(
+            await self._call("GET", self.paths["library_folders"], params=None)
+        )
+        first = next(
+            (parse_library_folder(row)["id"] for row in folders
+             if parse_library_folder(row)["id"] is not None),
+            None,
+        )
+        if first is not None:
+            probes.append(
+                await self._probe(self.paths["library_folders"], {"parent_id": first})
             )
-            first = next(
-                (parse_library_folder(row)["id"] for row in folders
-                 if parse_library_folder(row)["id"] is not None),
-                None,
+            probes.append(
+                await self._probe(self.paths["library_files"], {"folder_id": first})
             )
-            if first is not None:
-                probes.append(
-                    await self._probe(
-                        self.paths["library_files"], {"folder_id": first}
-                    )
-                )
         if path:
             probes.append(await self._probe(self.files_path(None), {"path": path}))
         return {"probes": probes}

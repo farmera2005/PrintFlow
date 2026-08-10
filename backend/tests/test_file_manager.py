@@ -299,6 +299,54 @@ class TestBuildLibraryTree:
         tree = _library(folders=[], files=[{"id": 1, "folder_id": None}])
         assert tree["files"] == []
 
+    def test_a_row_that_states_its_own_path_needs_no_parent_chain(self):
+        # Some builds carry the ancestry as a string instead of an id, and then
+        # every row looks top-level to a reader that only knows about ids.
+        tree = _library(
+            folders=[{"id": 1, "name": "Hopper", "path": "/Grain Bin (Large)/Hopper"}],
+            files=[{"id": 5, "name": "hopper.3mf", "folder_id": 1}],
+        )
+        paths = [node["path"] for node in tree["files"]]
+        assert "/Grain Bin (Large)/Hopper" in paths
+        assert "/Grain Bin (Large)/Hopper/hopper.3mf" in paths
+
+    def test_a_file_that_states_its_own_path_is_placed_by_it(self):
+        tree = _library(
+            folders=[],
+            files=[{"id": 5, "name": "a.3mf", "path": "/Deep/Down/a.3mf"}],
+        )
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert by_path["/Deep/Down/a.3mf"]["parent"] == "/Deep/Down"
+
+    def test_the_folders_a_path_implies_are_made_real(self):
+        """A node under a folder nobody listed would be drawn nowhere.
+
+        The picker lists a folder's children, and nothing is a child of a folder
+        that does not exist — so a file two levels under an absent folder is
+        invisible rather than merely misplaced, which is the worst way for it to
+        go missing.
+        """
+        tree = _library(
+            folders=[{"id": 1, "name": "Hopper", "path": "/Grain Bin (Large)/Hopper"}],
+            files=[{"id": 5, "name": "hopper.3mf", "folder_id": 1}],
+        )
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert by_path["/Grain Bin (Large)"]["kind"] == "folder"
+        assert by_path["/Grain Bin (Large)"]["implied"] is True
+        assert by_path["/Grain Bin (Large)"]["parent"] == "/"
+        # And the one that was really listed is not marked as invented.
+        assert "implied" not in by_path["/Grain Bin (Large)/Hopper"]
+
+    def test_a_real_folder_is_not_replaced_by_an_implied_one(self):
+        tree = _library(
+            folders=[{"id": 1, "name": "Top", "path": "/Top"},
+                     {"id": 2, "name": "Under", "path": "/Top/Under"}],
+            files=[],
+        )
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert by_path["/Top"]["archive_id"] == 1
+        assert "implied" not in by_path["/Top"]
+
     def test_a_related_object_stands_in_for_its_id(self):
         # Some serialisers nest the parent rather than sending a bare id.
         tree = _library(

@@ -1440,16 +1440,22 @@ function PrintFilePicker({
           </div>
 
           {!busy && tree ? (
-            <p className="mt-2 text-xs text-ink-500">
-              {tree.printable} print file{tree.printable === 1 ? '' : 's'} in{' '}
-              {tree.folders} folder{tree.folders === 1 ? '' : 's'}.
-              {hidden
-                ? ` ${hidden} other file${hidden === 1 ? ' is' : 's are'} not something a printer takes.`
-                : ''}
-              {nodes.length > OPEN_EVERYTHING_UNDER
-                ? ' Too many to open at once — Expand all if you want them.'
-                : ''}
-            </p>
+            <div className="mt-2 flex flex-wrap items-baseline gap-x-2">
+              <p className="min-w-48 flex-1 text-xs text-ink-500">
+                {tree.printable} print file{tree.printable === 1 ? '' : 's'} in{' '}
+                {tree.folders} folder{tree.folders === 1 ? '' : 's'}.
+                {hidden
+                  ? ` ${hidden} other file${hidden === 1 ? ' is' : 's are'} not something a printer takes.`
+                  : ''}
+                {nodes.length > OPEN_EVERYTHING_UNDER
+                  ? ' Too many to open at once — Expand all if you want them.'
+                  : ''}
+              </p>
+              {/* Always here, not only when the tree is visibly empty: a tree
+                  that is subtly wrong needs the replies just as much, and the
+                  operator is the only one who can see them. */}
+              {tree.printable > 0 ? <WhatBambuddySent printerId={printerId} /> : null}
+            </div>
           ) : null}
         </>
       )}
@@ -1473,26 +1479,8 @@ function EmptyFileManager({
   tree: BambuddyFileTree
   printerId: number | null
 }) {
-  const [raw, setRaw] = useState<BambuddyRawListing | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
   const unreadable = tree.root_rows > tree.root_named
   const foldersOnly = tree.folders > 0 && tree.printable === 0
-  const show = () => {
-    setBusy(true)
-    api
-      .get<BambuddyRawListing>(
-        '/api/integrations/bambuddy/files/raw' +
-          (printerId !== null ? `?printer_id=${printerId}` : ''),
-      )
-      .then((data) => {
-        setRaw(data)
-        setError(null)
-      })
-      .catch((err) => setError(errorMessage(err)))
-      .finally(() => setBusy(false))
-  }
 
   return (
     <div className="space-y-2 py-3 text-sm text-ink-600">
@@ -1515,11 +1503,50 @@ function EmptyFileManager({
             : ' If that is not your file manager, set the right endpoint under Settings →' +
               ' Bambuddy → Advanced.'}
       </p>
+      <WhatBambuddySent printerId={printerId} />
+    </div>
+  )
+}
+
+/** The replies behind the tree, verbatim.
+ *
+ * Always reachable, not only when something is visibly broken. Every one of
+ * these instances is self-hosted and none of them are quite the same shape, so
+ * a tree that is subtly wrong — a folder in the wrong place, files missing from
+ * one branch — cannot be diagnosed from the outside at all. It can be shown,
+ * and that turns a round of guessing into one screenshot.
+ */
+function WhatBambuddySent({ printerId }: { printerId: number | null }) {
+  const [raw, setRaw] = useState<BambuddyRawListing | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const show = () => {
+    setBusy(true)
+    api
+      .get<BambuddyRawListing>(
+        '/api/integrations/bambuddy/files/raw' +
+          (printerId !== null ? `?printer_id=${printerId}` : ''),
+      )
+      .then((data) => {
+        setRaw(data)
+        setError(null)
+      })
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div className="space-y-2">
       {!raw ? (
-        <Button size="sm" onClick={show} disabled={busy}>
+        <Button size="sm" variant="ghost" onClick={show} disabled={busy}>
           {busy ? 'Asking…' : 'Show what Bambuddy sent'}
         </Button>
-      ) : null}
+      ) : (
+        <Button size="sm" variant="ghost" onClick={() => setRaw(null)}>
+          Hide what Bambuddy sent
+        </Button>
+      )}
       {error ? <Alert tone="error">{error}</Alert> : null}
       {raw?.probes.map((probe) => (
         <div key={probe.endpoint + (probe.body ?? '')} className="space-y-1">

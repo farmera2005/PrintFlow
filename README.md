@@ -257,18 +257,22 @@ never mistaken for an empty folder. If the file manager is bigger than PrintFlow
 walks in one pass, or a folder cannot be read, it says so rather than showing a
 short list and letting you conclude the file is missing.
 
-**When it comes back empty.** Every instance is self-hosted and none of them
-package a folder listing quite the same way, so "no files" has three causes that
-look identical from outside: the folder is empty, the reply held rows in a shape
-PrintFlow could not read, or the endpoint answers but is not the file manager.
+**Show what Bambuddy sent** is at the bottom of the picker, always, and prints
+the replies behind the tree verbatim — the folder list, one folder's children,
+the file list, and one folder's files. Every instance is self-hosted and none of
+them are quite the same shape, so a tree that is subtly wrong — a folder in the
+wrong place, one branch missing its files — cannot be diagnosed from outside at
+all. It can be shown, which turns a round of guessing into one screenshot.
+
+**When it comes back empty.** "No files" has three causes that look identical
+from outside: the folder is empty, the reply held rows in a shape PrintFlow
+could not read, or the endpoint answers but is not the file manager.
 It reads all the usual shapes — a bare list, any of the common envelopes, one
 wrapper around the payload, and builds that keep folders in one array and models
 in another — but it cannot know them all. So an empty file manager says which
-endpoint it read, how many rows came back, and offers **Show what Bambuddy
-sent**: the raw reply from every endpoint that feeds the picker, so the shape
-can be seen rather than guessed at. Send it along with an issue and the reader
-can be taught it. Folders that arrived with no files in them get the same
-treatment — that is a different fault from nothing at all, and it says so.
+endpoint it read and how many rows came back, alongside the replies themselves.
+Folders that arrived with no files in them get the same treatment — that is a
+different fault from nothing at all, and it says so.
 
 An instance that ignores the folder parameter and answers every request with its
 top level says so too, rather than drawing the same folder nested inside itself
@@ -315,6 +319,14 @@ look like an empty library rather than a missing question:
 
 Both are recorded in the picker's endpoint line, so a slower read is never
 mistaken for the fast one.
+
+A row may say where it sits in either of two ways, and both are read: an id
+pointing at its parent, or a path spelling the whole ancestry out. The path wins
+where there is one — it needs no chain to resolve and cannot be broken by a
+parent that did not come back in the same reply. Folders that a path implies but
+nothing listed are made real, because the picker draws a folder's children and
+nothing is a child of a folder that does not exist: a file under an unlisted
+folder would be invisible rather than merely misplaced.
 
 A build that instead lists one folder at a time is still supported and is used
 when the library collections are not there. All of these are discovered from the
