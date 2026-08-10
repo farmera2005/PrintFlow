@@ -13,10 +13,17 @@ downstream is allowed to second-guess that.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy import select
 
-from app.integrations.bambuddy import BambuddyClient, discover_paths, parse_file_entry
+from app.integrations.bambuddy import (
+    BambuddyClient,
+    discover_paths,
+    file_rows,
+    parse_file_entry,
+)
 from app.models import PrintJob, PrintMapping, ProductVariation
 from app.services import printing, variations
 
@@ -48,7 +55,12 @@ TREE: dict[str, list[dict]] = {
 
 
 class TreeClient(BambuddyClient):
-    """A client backed by a dict of folders, counting the calls it makes."""
+    """A client backed by a dict of folders, counting the calls it makes.
+
+    Stubbed at the transport, not at list_files, so the real parsing and the
+    real counting run — the shape of a reply is exactly what these tests are
+    about, and a stub that skipped it would test nothing.
+    """
 
     def __init__(self, tree: dict[str, list[dict]], *, unreadable: set[str] | None = None):
         super().__init__({"base_url": "http://bambuddy.local"})
@@ -56,16 +68,14 @@ class TreeClient(BambuddyClient):
         self.unreadable = unreadable or set()
         self.reads: list[str] = []
 
-    async def list_files(self, *, path: str = "", printer_id: int | None = None):
-        folder = path or "/"
+    async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
+        folder = (kwargs.get("params") or {}).get("path") or "/"
         self.reads.append(folder)
         if folder in self.unreadable:
             from app.integrations.base import IntegrationError
 
             raise IntegrationError("bambuddy", f"Cannot read {folder}")
-        rows = [parse_file_entry(row, parent=folder) for row in self.tree.get(folder, [])]
-        rows.sort(key=lambda row: (row["kind"] != "folder", row["name"].lower()))
-        return rows
+        return {"files": self.tree.get(folder, [])}
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +91,8 @@ class TestParseFileEntry:
             {"name": "Bins", "is_dir": True},
             {"name": "Bins", "isDirectory": True},
             {"name": "Bins", "children": []},
+            {"name": "Bins", "node_type": "dir"},
+            {"name": "Bins", "item_type": "directory"},
         ):
             assert parse_file_entry(row)["kind"] == "folder", row
 
@@ -103,6 +115,81 @@ class TestParseFileEntry:
         assert parse_file_entry({"name": "a.GCODE"})["printable"] is True
         assert parse_file_entry({"name": "a.png"})["printable"] is False
         assert parse_file_entry({"name": "Bins", "type": "folder"})["printable"] is False
+
+
+class TestFileRows:
+    """An empty file manager and one PrintFlow cannot read look identical.
+
+    Every instance is self-hosted, so the reply shape is not a fixed thing to
+    code against; a reader that only knew one of them would report a shop's
+    whole library as missing and give no way to tell which had happened.
+    """
+
+    def test_a_bare_list(self):
+        assert file_rows([{"name": "a.3mf"}, "junk"]) == [{"name": "a.3mf"}]
+
+    def test_the_usual_envelopes(self):
+        for key in ("files", "items", "results", "data", "entries", "models", "list"):
+            assert file_rows({key: [{"name": "a.3mf"}]}) == [{"name": "a.3mf"}], key
+
+    def test_folders_and_files_in_separate_arrays_are_one_folder(self):
+        rows = file_rows(
+            {"folders": [{"name": "Bins"}], "models": [{"name": "a.3mf"}]}
+        )
+        assert [row["name"] for row in rows] == ["Bins", "a.3mf"]
+        # The array a row came in settles what it is when the row does not say.
+        assert parse_file_entry(rows[0])["kind"] == "folder"
+        assert parse_file_entry(rows[1])["kind"] == "file"
+
+    def test_a_row_that_states_its_own_type_is_believed(self):
+        rows = file_rows({"folders": [{"name": "odd.3mf", "type": "file"}]})
+        assert parse_file_entry(rows[0])["kind"] == "file"
+
+    def test_alternative_names_for_one_list_are_not_read_twice(self):
+        # Some builds echo the same rows under a second key.
+        same = [{"name": "a.3mf"}]
+        assert file_rows({"files": same, "items": same}) == same
+
+    def test_one_wrapper_around_the_payload_is_unwrapped(self):
+        rows = file_rows({"tree": {"root": [{"label": "Production", "type": "dir"}]}})
+        assert parse_file_entry(rows[0])["name"] == "Production"
+
+    def test_two_branches_are_not_guessed_between(self):
+        # Picking the wrong one would be worse than saying nothing.
+        assert file_rows({"left": {"a": [{"name": "x"}]}, "right": {"b": []}}) == []
+
+    def test_unwrapping_does_not_run_away(self):
+        deep: Any = [{"name": "a.3mf"}]
+        for _ in range(6):
+            deep = {"wrap": deep}
+        assert file_rows(deep) == []
+
+    def test_nothing_recognisable_is_no_rows_rather_than_a_crash(self):
+        assert file_rows({"total": 0, "page": 1}) == []
+        assert file_rows("nope") == []
+        assert file_rows(None) == []
+
+
+class TestAnEmptyAnswerExplainsItself:
+    async def test_rows_that_could_not_be_read_are_counted(self):
+        # A shape with rows in it, none of which name anything.
+        client = TreeClient({"/": [{"id": 1}, {"id": 2}]})
+        tree = await client.file_tree()
+        assert tree["files"] == []
+        # Two rows arrived; none survived. That is not an empty file manager,
+        # and the picker needs to be able to say so.
+        assert (tree["root_rows"], tree["root_named"]) == (2, 0)
+
+    async def test_a_genuinely_empty_folder_says_zero_rows(self):
+        tree = await TreeClient({"/": []}).file_tree()
+        assert (tree["root_rows"], tree["root_named"]) == (0, 0)
+
+    async def test_the_endpoint_it_read_is_reported(self):
+        tree = await TreeClient(TREE).file_tree()
+        assert tree["endpoint"] == "/api/files"
+        assert (await TreeClient(TREE).file_tree(printer_id=3))["endpoint"] == (
+            "/api/printers/3/files"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -149,6 +236,28 @@ class TestFileTree:
         assert [node["path"] for node in tree["files"]] == ["/Production", "/Production/a.3mf"]
         assert client.reads == ["/"]
 
+    async def test_an_instance_that_ignores_the_folder_parameter_is_not_a_deep_tree(self):
+        """Every request answered with the root, which is not eight folders."""
+
+        class Ignores(TreeClient):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                self.reads.append((kwargs.get("params") or {}).get("path") or "/")
+                return {"files": self.tree["/"]}
+
+        client = Ignores({"/": [
+            {"name": "Production", "type": "folder"},
+            {"name": "bin.3mf", "type": "file"},
+        ]})
+        tree = await client.file_tree()
+
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert sorted(by_path) == ["/Production", "/bin.3mf"]
+        # Said out loud, rather than shown as a tower of identical folders.
+        assert tree["flat"] is True
+        assert by_path["/Production"]["unreadable"] is True
+        # Two calls: the root, and the one that proved the parameter is ignored.
+        assert client.reads == ["/", "/Production"]
+
     async def test_a_folder_that_contains_itself_does_not_spin(self):
         # An instance that resolves ".." into a real entry, or a symlink loop.
         client = TreeClient(
@@ -185,7 +294,8 @@ class TestFileTree:
 
     async def test_an_empty_file_manager_is_empty_not_broken(self):
         tree = await TreeClient({"/": []}).file_tree()
-        assert tree == {"files": [], "truncated": False, "printable": 0, "folders": 0}
+        assert (tree["files"], tree["truncated"]) == ([], False)
+        assert (tree["printable"], tree["folders"]) == (0, 0)
 
 
 class TestFilesPath:

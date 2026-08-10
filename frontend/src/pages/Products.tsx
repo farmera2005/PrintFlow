@@ -6,6 +6,7 @@ import type {
   BambuddyFileTree,
   BambuddyPrinter,
   BambuddyPrinterModel,
+  BambuddyRawListing,
   BomEntry,
   Catalog,
   CatalogRow,
@@ -1327,6 +1328,16 @@ function PrintFilePicker({
             </div>
           ) : null}
 
+          {tree?.flat ? (
+            <div className="mt-3">
+              <Alert tone="warning">
+                This Bambuddy answered every folder request with its top level, so
+                only the top level is here and its folders would not open. The files
+                below are real; anything inside a folder is not reachable this way.
+              </Alert>
+            </div>
+          ) : null}
+
           {tree?.shared && printerId !== null ? (
             <div className="mt-3">
               <Alert tone="info">
@@ -1363,10 +1374,8 @@ function PrintFilePicker({
                 No print file anywhere in here matches that.
               </p>
             ) : null}
-            {!busy && !needle && rows.length === 0 ? (
-              <p className="py-4 text-center text-sm text-ink-500">
-                Bambuddy listed no print files here.
-              </p>
+            {!busy && !needle && rows.length === 0 && tree ? (
+              <EmptyFileManager tree={tree} printerId={printerId} />
             ) : null}
 
             {needle
@@ -1443,6 +1452,79 @@ function PrintFilePicker({
         </>
       )}
     </Modal>
+  )
+}
+
+/** Why the file manager is empty — and, failing that, what Bambuddy actually sent.
+ *
+ * "No files" has three quite different causes and they are indistinguishable
+ * from a blank list: the folder really is empty, the reply held rows in a shape
+ * PrintFlow could not read, or the endpoint answers but is not the file manager
+ * at all. Every instance is self-hosted and none are quite the same, so the
+ * third one cannot be diagnosed from here — but it can be shown, which turns a
+ * dead end into something somebody can act on.
+ */
+function EmptyFileManager({
+  tree,
+  printerId,
+}: {
+  tree: BambuddyFileTree
+  printerId: number | null
+}) {
+  const [raw, setRaw] = useState<BambuddyRawListing | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const unreadable = tree.root_rows > 0
+  const show = () => {
+    setBusy(true)
+    api
+      .get<BambuddyRawListing>(
+        '/api/integrations/bambuddy/files/raw' +
+          (printerId !== null ? `?printer_id=${printerId}` : ''),
+      )
+      .then((data) => {
+        setRaw(data)
+        setError(null)
+      })
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div className="space-y-2 py-3 text-sm text-ink-600">
+      <p>
+        {unreadable
+          ? `Bambuddy sent ${tree.root_rows} entr${tree.root_rows === 1 ? 'y' : 'ies'}, ` +
+            'but PrintFlow could not read any of them as a file or a folder.'
+          : 'Bambuddy listed nothing here.'}
+      </p>
+      <p className="text-xs text-ink-500">
+        Read from <span className="font-mono">{tree.endpoint ?? 'the file manager'}</span>.
+        {unreadable
+          ? ' The endpoint answers but its reply is a shape PrintFlow has not seen.'
+          : ' If that is not your file manager, set the right endpoint under Settings →' +
+            ' Bambuddy → Advanced.'}
+      </p>
+      {!raw ? (
+        <Button size="sm" onClick={show} disabled={busy}>
+          {busy ? 'Asking…' : 'Show what Bambuddy sent'}
+        </Button>
+      ) : null}
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {raw ? (
+        <div className="space-y-1">
+          <p className="text-xs text-ink-500">
+            <span className="font-mono">{raw.endpoint}</span> returned {raw.kind}
+            {raw.keys?.length ? ` with keys: ${raw.keys.join(', ')}` : ''}.
+          </p>
+          <pre className="max-h-56 overflow-auto rounded-md bg-ink-900 p-2 text-[11px] leading-snug text-ink-100">
+            {raw.body}
+            {raw.body_truncated ? '\n… (truncated)' : ''}
+          </pre>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

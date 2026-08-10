@@ -257,6 +257,21 @@ never mistaken for an empty folder. If the file manager is bigger than PrintFlow
 walks in one pass, or a folder cannot be read, it says so rather than showing a
 short list and letting you conclude the file is missing.
 
+**When it comes back empty.** Every instance is self-hosted and none of them
+package a folder listing quite the same way, so "no files" has three causes that
+look identical from outside: the folder is empty, the reply held rows in a shape
+PrintFlow could not read, or the endpoint answers but is not the file manager.
+It reads all the usual shapes — a bare list, any of the common envelopes, one
+wrapper around the payload, and builds that keep folders in one array and models
+in another — but it cannot know them all. So an empty file manager says which
+endpoint it read, how many rows came back, and offers **Show what Bambuddy
+sent**: the raw reply, so the shape can be seen rather than guessed at. Send it
+along with an issue and the reader can be taught it.
+
+An instance that ignores the folder parameter and answers every request with its
+top level says so too, rather than drawing the same folder nested inside itself
+as deep as the walk is allowed to go.
+
 The file manager endpoints are discovered from the instance's own OpenAPI
 document, like the others, and can be corrected under **Settings → Bambuddy →
 Advanced** — including the per-printer one, where `{printer_id}` is substituted.

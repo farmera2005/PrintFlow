@@ -287,6 +287,26 @@ export interface BambuddyFileTree {
   shared: boolean
   printable: number
   folders: number
+  /** The path actually called, after any re-discovery. */
+  endpoint: string | null
+  /** Rows the top-level reply held, and how many of those had a usable name.
+   *  An empty tree with rows > 0 is a shape PrintFlow could not read, which is
+   *  a different problem from a file manager with nothing in it. */
+  root_rows: number
+  root_named: number
+  /** The instance answered a folder request with its root, so this is one
+   *  level and the folders in it could not be opened. */
+  flat: boolean
+}
+
+/** The untouched reply from a folder listing, for diagnosing an empty tree. */
+export interface BambuddyRawListing {
+  endpoint: string
+  keys: string[] | null
+  kind: string
+  rows_found: number
+  body: string
+  body_truncated: boolean
 }
 
 /** One machine type on the farm, and how many of it there are. */

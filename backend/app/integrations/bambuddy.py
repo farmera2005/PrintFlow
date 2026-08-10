@@ -11,6 +11,7 @@ instance; responses are parsed defensively so a renamed field degrades to
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -279,6 +280,57 @@ def _as_list(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+# How a file-manager listing packages its rows. A single list under one of the
+# entry keys is the common case; some builds keep folders in an array of their
+# own and the things you can print in another, and both halves are the folder.
+FOLDER_LIST_KEYS = ("folders", "directories", "dirs", "subfolders", "subdirectories")
+ENTRY_LIST_KEYS = (
+    "files", "entries", "children", "contents", "nodes", "items", "results",
+    "data", "objects", "models", "projects", "prints", "list",
+)
+
+
+def file_rows(data: Any, _depth: int = 0) -> list[dict[str, Any]]:
+    """Every entry in a file-manager listing, however this build packages one.
+
+    A reader that took the first list it recognised would show one half of a
+    folder and call the other half missing, which reads as an empty file
+    manager rather than as a shape nobody taught it. So both halves are taken,
+    and the key a row arrived under settles what it is when the row itself does
+    not say — the container is better evidence than a guess from the filename.
+    """
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if not isinstance(data, dict):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    folders = next((key for key in FOLDER_LIST_KEYS if isinstance(data.get(key), list)), None)
+    if folders:
+        rows += [
+            row if (row.get("type") or row.get("kind")) else {**row, "type": "folder"}
+            for row in data[folders]
+            if isinstance(row, dict)
+        ]
+    # Only the first entry key: they are alternative names for one list, not
+    # halves of it, so reading several would show the same rows twice.
+    entries = next((key for key in ENTRY_LIST_KEYS if isinstance(data.get(key), list)), None)
+    if entries:
+        rows += [row for row in data[entries] if isinstance(row, dict)]
+    if rows or _depth >= 3:
+        return rows
+
+    # Nothing recognised at this level. A reply that is one wrapper around the
+    # real payload — {"tree": {"root": [...]}} — is a shape, not a dead end, and
+    # a single key leaves nothing to choose wrongly between. More than one and
+    # this stops guessing, because picking the wrong branch would be worse than
+    # saying nothing.
+    inner = list(data.values())
+    if len(inner) == 1 and isinstance(inner[0], (dict, list)):
+        return file_rows(inner[0], _depth + 1)
+    return []
+
+
 def parse_archive(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": _first(row, "id", "archive_id", "archiveId"),
@@ -317,7 +369,11 @@ def parse_file_entry(row: dict[str, Any], *, parent: str = "") -> dict[str, Any]
     only falls back to "file" when the row says none of those.
     """
     name = str(
-        _first(row, "name", "filename", "file_name", "basename", "title") or ""
+        _first(
+            row, "name", "filename", "file_name", "basename", "title",
+            "label", "display_name", "displayName", "text",
+        )
+        or ""
     ).strip().strip("/")
     raw_path = _first(row, "path", "full_path", "fullPath", "key", "location")
     path = str(raw_path).strip() if raw_path else ""
@@ -328,7 +384,13 @@ def parse_file_entry(row: dict[str, Any], *, parent: str = "") -> dict[str, Any]
     if not name:
         name = path.rsplit("/", 1)[-1]
 
-    kind = str(_first(row, "type", "kind", "entry_type", "mime_type") or "").strip().lower()
+    kind = str(
+        _first(
+            row, "type", "kind", "node_type", "nodeType", "entry_type",
+            "item_type", "object_type", "mime_type",
+        )
+        or ""
+    ).strip().lower()
     children = row.get("children")
     if kind in {"dir", "directory", "folder"} or kind.startswith("folder"):
         folder = True
@@ -386,6 +448,9 @@ class BambuddyClient:
         # had cause to read it. Per client, so it lives exactly as long as the
         # request does and never goes stale between them.
         self.last_spec: dict[str, Any] | None = None
+        # What the most recent folder listing actually contained, so an empty
+        # tree can say whether Bambuddy sent nothing or sent something unread.
+        self.last_listing: dict[str, Any] = {}
 
     def url_for(self, path: str) -> str:
         """The absolute URL a call will actually hit.
@@ -638,10 +703,43 @@ class BambuddyClient:
             # Instances differ on what they call the folder; send the common ones.
             params = {"path": path, "dir": path, "folder": path}
         data = await self._call("GET", self.files_path(printer_id), params=params)
-        rows = [parse_file_entry(row, parent=path) for row in _as_list(data)]
+        raw = file_rows(data)
+        rows = [parse_file_entry(row, parent=path) for row in raw]
         rows = [row for row in rows if row["name"]]
+        # Counted so an empty answer can say which kind of empty it is: nothing
+        # there, or rows PrintFlow could not read. The two need different fixes
+        # and look identical from the outside.
+        self.last_listing = {
+            "endpoint": self.files_path(printer_id),
+            "rows": len(raw),
+            "named": len(rows),
+        }
         rows.sort(key=lambda row: (row["kind"] != "folder", row["name"].lower()))
         return rows
+
+    async def raw_listing(
+        self, *, path: str = "", printer_id: int | None = None
+    ) -> dict[str, Any]:
+        """The untouched response, for when the parsed answer is empty.
+
+        There is no way to guess from here why one particular self-hosted
+        instance returned something PrintFlow made nothing of. Showing the reply
+        turns that into a question somebody can actually answer.
+        """
+        endpoint = self.files_path(printer_id)
+        params: dict[str, Any] = {}
+        if path and path != "/":
+            params = {"path": path, "dir": path, "folder": path}
+        data = await self._call("GET", endpoint, params=params)
+        body = json.dumps(data, indent=2, default=str)
+        return {
+            "endpoint": self.url_for(endpoint),
+            "keys": sorted(data.keys()) if isinstance(data, dict) else None,
+            "kind": type(data).__name__,
+            "rows_found": len(file_rows(data)),
+            "body": body[:8000],
+            "body_truncated": len(body) > 8000,
+        }
 
     async def file_tree(
         self,
@@ -662,11 +760,22 @@ class BambuddyClient:
         instance that nests `children` inline is handled without extra calls.
 
         Paths already seen are never re-walked, so a folder that links to its
-        own parent cannot spin.
+        own parent cannot spin. Nor can an instance that ignores the folder
+        parameter and answers every request with its root: that hands back the
+        parent's listing under a deeper name each time, which is not a cycle by
+        path and used to build a tower of identical folders until the depth cap
+        stopped it. A folder whose contents are its parent's contents is not a
+        folder that was read — it is the parameter being ignored, and saying so
+        is more use than eight copies of the same three files.
         """
         root: list[dict[str, Any]] = []
         nodes: dict[str, dict[str, Any]] = {}
         truncated = False
+        flat = False
+        prints: dict[str, str] = {}
+
+        def fingerprint(rows: list[dict[str, Any]]) -> str:
+            return "|".join(sorted(f"{row['kind']}:{row['name']}" for row in rows))
 
         def take(rows: list[dict[str, Any]], parent: str, depth: int) -> list[dict[str, Any]]:
             """Record a folder's rows; hand back the folders worth descending."""
@@ -696,7 +805,12 @@ class BambuddyClient:
                     truncated = True
             return descend
 
-        root = take(await self.list_files(printer_id=printer_id), "", 0)
+        root_rows = await self.list_files(printer_id=printer_id)
+        # The root listing is the one worth reporting on: everything below it is
+        # only reached because the root named it.
+        listing = dict(self.last_listing)
+        prints["/"] = fingerprint(root_rows)
+        root = take(root_rows, "", 0)
         queue = list(root)
         while queue:
             folder = queue.pop(0)
@@ -710,17 +824,32 @@ class BambuddyClient:
                 # It stays in the tree, empty, rather than vanishing from it.
                 folder["unreadable"] = True
                 continue
+            if rows and fingerprint(rows) == prints.get(folder["parent"]):
+                # The parent's listing again. Descending would invent a folder
+                # per level for as deep as the cap allows.
+                folder["unreadable"] = True
+                flat = True
+                continue
+            prints[folder["path"]] = fingerprint(rows)
             queue.extend(take(rows, folder["path"], folder["depth"] + 1))
 
-        listing = sorted(
+        nodes_out = sorted(
             nodes.values(),
             key=lambda node: (node["path"].count("/"), node["path"].lower()),
         )
         return {
-            "files": listing,
+            "files": nodes_out,
             "truncated": truncated,
-            "printable": sum(1 for node in listing if node["printable"]),
-            "folders": sum(1 for node in listing if node["kind"] == "folder"),
+            "printable": sum(1 for node in nodes_out if node["printable"]),
+            "folders": sum(1 for node in nodes_out if node["kind"] == "folder"),
+            # What the root reply held, so nothing here has to be guessed at
+            # from an empty list.
+            "endpoint": listing.get("endpoint"),
+            "root_rows": listing.get("rows", 0),
+            "root_named": listing.get("named", 0),
+            # This instance answered a folder request with its root, so what is
+            # here is one level and the folders in it could not be opened.
+            "flat": flat,
         }
 
     async def list_printer_models(self) -> list[dict[str, Any]]:

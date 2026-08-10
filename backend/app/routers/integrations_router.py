@@ -950,6 +950,26 @@ async def bambuddy_files(
     return {"printer_id": printer_id, **tree}
 
 
+@router.get("/bambuddy/files/raw")
+async def bambuddy_files_raw(
+    printer_id: int | None = None,
+    path: str = "",
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """What Bambuddy actually replied, when what PrintFlow made of it was nothing.
+
+    Every instance of this is self-hosted and none of them are quite the same,
+    so an empty file manager cannot be diagnosed from here. It can be shown.
+    """
+    client = await _bambuddy_client(session)
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Reading the file manager"):
+            return await client.raw_listing(path=path, printer_id=printer_id)
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
 @router.get("/bambuddy/printer-models")
 async def bambuddy_printer_models(
     _: User = Depends(require_user),
