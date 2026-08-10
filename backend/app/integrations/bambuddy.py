@@ -1007,7 +1007,7 @@ class BambuddyClient:
         return rows
 
     async def _files_by_folder(
-        self, folders: list[dict[str, Any]], *, max_folders: int = 250
+        self, folders: list[dict[str, Any]], *, max_folders: int = 400
     ) -> tuple[list[dict[str, Any]], bool]:
         """One request per folder, for a files endpoint that needs to be asked.
 
@@ -1019,7 +1019,7 @@ class BambuddyClient:
         rows: list[dict[str, Any]] = []
         truncated = len(folders) > max_folders
         for folder in folders[:max_folders]:
-            folder_id = parse_library_folder(folder)["id"]
+            folder_id = folder["id"]
             if folder_id is None:
                 continue
             batch = await self._all_rows(
@@ -1032,25 +1032,86 @@ class BambuddyClient:
             rows += batch
         return rows, truncated
 
+    async def _descend_folders(
+        self,
+        folders: list[dict[str, Any]],
+        *,
+        max_folders: int = 400,
+        max_depth: int = 8,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Subfolders, for a folder list that only answers for one level.
+
+        A "list folders" that returns the top level and nothing else is a
+        reasonable thing for an API to be — it is the folder list you would draw
+        on a first screen. It is indistinguishable from a complete list, though,
+        right up until a folder that holds only subfolders shows as empty and
+        everything filed inside it is invisible.
+
+        So each known folder is asked what is under it. An instance that ignores
+        `parent_id` answers with the same top level, which is already known, and
+        the walk stops on the first round having learnt nothing.
+        """
+        found: list[dict[str, Any]] = []
+        seen = {folder["id"] for folder in folders if folder["id"] is not None}
+        queue = [(folder, 0) for folder in folders if folder["id"] is not None]
+        truncated = False
+
+        while queue:
+            folder, depth = queue.pop(0)
+            if depth >= max_depth or len(seen) >= max_folders:
+                truncated = truncated or bool(queue)
+                break
+            rows = await self._all_rows(
+                self.paths["library_folders"], params={"parent_id": folder["id"]}
+            )
+            for row in rows:
+                child = parse_library_folder(row)
+                if child["id"] is None or child["id"] in seen:
+                    continue
+                seen.add(child["id"])
+                # The parent is known from the question, whatever the row says —
+                # and some builds say nothing, having already been asked.
+                if child["parent_id"] is None:
+                    child["parent_id"] = folder["id"]
+                found.append(child)
+                queue.append((child, depth + 1))
+        return found, truncated
+
     async def library_tree(self, *, max_nodes: int = 8000) -> dict[str, Any]:
         """The library's whole structure, from its folder and file collections.
 
-        Two calls (plus paging), not one per folder: the rows carry their own
-        parent, so the shape is already in the data and does not have to be
-        discovered by walking into it.
+        Two calls where two calls will do: the rows carry their own parent, so
+        the shape is already in the data. Where they will not — a folder list
+        that answers for one level, a file list that wants a folder named — it
+        asks per folder rather than showing a library with holes in it.
         """
         folder_rows = await self._all_rows(self.paths["library_folders"])
-        file_rows_raw = await self._all_rows(self.paths["library_files"])
+        folders = [parse_library_folder(row) for row in folder_rows]
+        known = {folder["id"] for folder in folders if folder["id"] is not None}
         truncated = False
-        asked_per_folder = False
-        if not file_rows_raw and folder_rows:
+        notes: list[str] = []
+
+        # Does anything in this list sit inside anything else in it? If not, the
+        # list may be one level rather than all of them, and the only way to
+        # find out is to ask.
+        if folders and not any(folder["parent_id"] in known for folder in folders):
+            nested, cut = await self._descend_folders(folders)
+            if nested:
+                folders += nested
+                notes.append("subfolders asked for")
+            truncated = truncated or cut
+
+        file_rows_raw = await self._all_rows(self.paths["library_files"])
+        if not file_rows_raw and folders:
             # Folders but no files is not a library anybody keeps. Far likelier
             # is a files endpoint that only answers for a named folder.
-            file_rows_raw, truncated = await self._files_by_folder(folder_rows)
-            asked_per_folder = bool(file_rows_raw)
+            file_rows_raw, cut = await self._files_by_folder(folders)
+            truncated = truncated or cut
+            if file_rows_raw:
+                notes.append("files asked per folder")
 
         tree = build_library_tree(
-            [parse_library_folder(row) for row in folder_rows],
+            folders,
             [parse_library_file(row) for row in file_rows_raw],
             max_nodes=max_nodes,
         )
@@ -1059,9 +1120,9 @@ class BambuddyClient:
             "truncated": tree["truncated"] or truncated,
             "endpoint": (
                 f"{self.paths['library_folders']} + {self.paths['library_files']}"
-                + (" (asked per folder)" if asked_per_folder else "")
+                + (f" ({', '.join(notes)})" if notes else "")
             ),
-            "root_rows": len(folder_rows) + len(file_rows_raw),
+            "root_rows": len(folders) + len(file_rows_raw),
             "root_named": len(tree["files"]),
             "flat": False,
         }

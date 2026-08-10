@@ -297,11 +297,24 @@ with an empty list by an endpoint that validates its query, and an empty list
 from a collection that has rows in it is indistinguishable from an empty
 library.
 
-If the file collection comes back empty while folders did not, PrintFlow asks
-again per folder — `?folder_id=…`, once each. Some builds only answer for a
-named folder, and twenty folders each reporting nothing is a worse answer than a
-slower read. A file filed in no folder at all is the one thing that cannot be
-recovered that way, since there is no folder to ask about.
+Two things the collections may not hand over on the first ask, both of which
+look like an empty library rather than a missing question:
+
+* **A folder list that answers for the top level only.** That is a reasonable
+  thing for an API to be, and indistinguishable from a complete list until a
+  folder holding only subfolders shows as empty and everything filed inside is
+  invisible. So if nothing in the list sits inside anything else in it,
+  PrintFlow asks each folder what is under it — `?parent_id=…` — and keeps
+  going while that turns up folders it has not seen. An instance that ignores
+  the parameter answers with the top level again, which is already known, and
+  the walk stops having learnt nothing.
+* **A file list that wants a folder named.** If it comes back empty while
+  folders did not, PrintFlow asks again per folder — `?folder_id=…`, once each.
+  A file filed in no folder at all is the one thing that cannot be recovered
+  that way, since there is no folder to ask about.
+
+Both are recorded in the picker's endpoint line, so a slower read is never
+mistaken for the fast one.
 
 A build that instead lists one folder at a time is still supported and is used
 when the library collections are not there. All of these are discovered from the

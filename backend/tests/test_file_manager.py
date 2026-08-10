@@ -379,6 +379,82 @@ class TestLibraryTreeOverTheApi:
         assert len(client.calls) == 2
 
 
+class TestAFolderListThatAnswersForOneLevel:
+    """"List folders" returning the top level is a reasonable thing to be.
+
+    It is also indistinguishable from a complete list, right up until a folder
+    that holds only subfolders shows as empty and everything filed inside it is
+    invisible. Reported exactly that way: the folders whose files sat directly
+    in them were fine, and every folder with subfolders was empty.
+    """
+
+    class OneLevel(LibraryClient):
+        """Answers `parent_id`, defaulting to the top level."""
+
+        async def _call(self, method, path, *, retries=2, **kwargs):
+            params = kwargs.get("params") or {}
+            if path.endswith("folders"):
+                parent = params.get("parent_id")
+                self.calls.append((path, parent))
+                rows = [f for f in self.folders if f.get("parent_id") == parent]
+                return {"folders": rows, "total": len(rows)}
+            folder_id = params.get("folder_id")
+            self.calls.append((path, folder_id))
+            if folder_id is None:
+                return {"files": [], "total": 0}
+            return {"files": [f for f in self.files if f.get("folder_id") == folder_id]}
+
+    async def test_the_subfolders_and_their_files_are_found(self):
+        client = self.OneLevel()
+        tree = await client.library_tree()
+
+        by_path = {node["path"]: node for node in tree["files"]}
+        # Two levels below a folder the top-level list never mentioned.
+        assert "/Production/Bins" in by_path
+        assert "/Production/Dragons/Large" in by_path
+        assert "/Production/Dragons/Large/dragon-egg-large.3mf" in by_path
+        assert tree["folders"] == 5
+        assert "subfolders asked for" in tree["endpoint"]
+
+    async def test_a_child_row_that_omits_its_parent_still_nests(self):
+        # The parent is known from the question that was asked.
+        class Terse(self.OneLevel):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                data = await super()._call(method, path, retries=retries, **kwargs)
+                if path.endswith("folders"):
+                    return {"folders": [{k: v for k, v in row.items() if k != "parent_id"}
+                                        for row in data["folders"]]}
+                return data
+
+        tree = await Terse().library_tree()
+        assert "/Production/Bins" in [node["path"] for node in tree["files"]]
+
+    async def test_a_complete_list_is_not_walked_at_all(self):
+        # Rows that already sit inside each other: the list is whole, and asking
+        # each folder what is under it would be requests for nothing.
+        client = LibraryClient()
+        await client.library_tree()
+        assert len([1 for path, _ in client.calls if path.endswith("folders")]) == 1
+
+    async def test_an_instance_that_ignores_parent_id_stops_after_one_round(self):
+        class Ignores(LibraryClient):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                self.calls.append((path, (kwargs.get("params") or {}).get("parent_id")))
+                if path.endswith("folders"):
+                    # The same top level, whatever it is asked.
+                    return {"folders": [f for f in self.folders
+                                        if f.get("parent_id") is None]}
+                return {"files": self.files}
+
+        client = Ignores()
+        tree = await client.library_tree()
+        # One root call plus one per known folder, and then it has learnt
+        # nothing new and stops rather than asking the same question forever.
+        folder_calls = [1 for path, _ in client.calls if path.endswith("folders")]
+        assert len(folder_calls) == 2
+        assert tree["folders"] == 1
+
+
 class TestAFilesEndpointThatWantsToBeAsked:
     """Folders arrive, the flat file list is empty, and the library is not.
 
