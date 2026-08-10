@@ -299,14 +299,20 @@ export interface BambuddyFileTree {
   flat: boolean
 }
 
-/** The untouched reply from a folder listing, for diagnosing an empty tree. */
-export interface BambuddyRawListing {
+/** One untouched reply, for diagnosing a tree that is missing things. */
+export interface BambuddyProbe {
   endpoint: string
-  keys: string[] | null
-  kind: string
-  rows_found: number
-  body: string
-  body_truncated: boolean
+  error?: string
+  keys?: string[] | null
+  kind?: string
+  rows_found?: number
+  total?: number | null
+  body?: string
+  body_truncated?: boolean
+}
+
+export interface BambuddyRawListing {
+  probes: BambuddyProbe[]
 }
 
 /** One machine type on the farm, and how many of it there are. */

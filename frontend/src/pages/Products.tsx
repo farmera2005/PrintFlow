@@ -1374,7 +1374,9 @@ function PrintFilePicker({
                 No print file anywhere in here matches that.
               </p>
             ) : null}
-            {!busy && !needle && rows.length === 0 && tree ? (
+            {/* Folders with nothing printable in them is as much a dead end as
+                no folders at all, and needs the same explanation. */}
+            {!busy && !needle && tree && tree.printable === 0 ? (
               <EmptyFileManager tree={tree} printerId={printerId} />
             ) : null}
 
@@ -1475,7 +1477,8 @@ function EmptyFileManager({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const unreadable = tree.root_rows > 0
+  const unreadable = tree.root_rows > tree.root_named
+  const foldersOnly = tree.folders > 0 && tree.printable === 0
   const show = () => {
     setBusy(true)
     api
@@ -1494,17 +1497,23 @@ function EmptyFileManager({
   return (
     <div className="space-y-2 py-3 text-sm text-ink-600">
       <p>
-        {unreadable
-          ? `Bambuddy sent ${tree.root_rows} entr${tree.root_rows === 1 ? 'y' : 'ies'}, ` +
-            'but PrintFlow could not read any of them as a file or a folder.'
-          : 'Bambuddy listed nothing here.'}
+        {foldersOnly
+          ? `Bambuddy listed ${tree.folders} folder${tree.folders === 1 ? '' : 's'} but no ` +
+            'print files in any of them.'
+          : unreadable
+            ? `Bambuddy sent ${tree.root_rows} entr${tree.root_rows === 1 ? 'y' : 'ies'}, ` +
+              'but PrintFlow could not read any of them as a file or a folder.'
+            : 'Bambuddy listed nothing here.'}
       </p>
       <p className="text-xs text-ink-500">
         Read from <span className="font-mono">{tree.endpoint ?? 'the file manager'}</span>.
-        {unreadable
-          ? ' The endpoint answers but its reply is a shape PrintFlow has not seen.'
-          : ' If that is not your file manager, set the right endpoint under Settings →' +
-            ' Bambuddy → Advanced.'}
+        {foldersOnly
+          ? ' The folders arrived, so the address is right and it is the file list' +
+            ' that came back empty.'
+          : unreadable
+            ? ' The endpoint answers but its reply is a shape PrintFlow has not seen.'
+            : ' If that is not your file manager, set the right endpoint under Settings →' +
+              ' Bambuddy → Advanced.'}
       </p>
       {!raw ? (
         <Button size="sm" onClick={show} disabled={busy}>
@@ -1512,18 +1521,28 @@ function EmptyFileManager({
         </Button>
       ) : null}
       {error ? <Alert tone="error">{error}</Alert> : null}
-      {raw ? (
-        <div className="space-y-1">
+      {raw?.probes.map((probe) => (
+        <div key={probe.endpoint + (probe.body ?? '')} className="space-y-1">
           <p className="text-xs text-ink-500">
-            <span className="font-mono">{raw.endpoint}</span> returned {raw.kind}
-            {raw.keys?.length ? ` with keys: ${raw.keys.join(', ')}` : ''}.
+            <span className="font-mono">{probe.endpoint}</span>
+            {probe.error
+              ? ` failed: ${probe.error}`
+              : ` returned ${probe.kind}` +
+                (probe.keys?.length ? ` with keys: ${probe.keys.join(', ')}` : '') +
+                ` — ${probe.rows_found} row${probe.rows_found === 1 ? '' : 's'} read` +
+                (probe.total !== null && probe.total !== undefined
+                  ? ` of ${probe.total}`
+                  : '') +
+                '.'}
           </p>
-          <pre className="max-h-56 overflow-auto rounded-md bg-ink-900 p-2 text-[11px] leading-snug text-ink-100">
-            {raw.body}
-            {raw.body_truncated ? '\n… (truncated)' : ''}
-          </pre>
+          {probe.body ? (
+            <pre className="max-h-48 overflow-auto rounded-md bg-ink-900 p-2 text-[11px] leading-snug text-ink-100">
+              {probe.body}
+              {probe.body_truncated ? '\n… (truncated)' : ''}
+            </pre>
+          ) : null}
         </div>
-      ) : null}
+      ))}
     </div>
   )
 }

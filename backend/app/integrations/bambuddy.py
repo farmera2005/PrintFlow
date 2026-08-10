@@ -303,6 +303,17 @@ ENTRY_LIST_KEYS = (
 )
 
 
+def _envelope_total(data: Any) -> int | None:
+    """How many rows the collection says it has, when it says."""
+    if not isinstance(data, dict):
+        return None
+    for key in ("total", "count", "total_count", "totalCount", "total_items"):
+        value = data.get(key)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
 def file_rows(data: Any, _depth: int = 0) -> list[dict[str, Any]]:
     """Every entry in a file-manager listing, however this build packages one.
 
@@ -881,54 +892,105 @@ class BambuddyClient:
         rows.sort(key=lambda row: (row["kind"] != "folder", row["name"].lower()))
         return rows
 
-    async def raw_listing(
-        self, *, path: str = "", printer_id: int | None = None
-    ) -> dict[str, Any]:
-        """The untouched response, for when the parsed answer is empty.
-
-        There is no way to guess from here why one particular self-hosted
-        instance returned something PrintFlow made nothing of. Showing the reply
-        turns that into a question somebody can actually answer.
-        """
-        endpoint = self.files_path(printer_id)
-        params: dict[str, Any] = {}
-        if path and path != "/":
-            params = {"path": path, "dir": path, "folder": path}
-        data = await self._call("GET", endpoint, params=params)
+    async def _probe(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            data = await self._call("GET", endpoint, params=params or None)
+        except IntegrationError as exc:
+            return {"endpoint": self.url_for(endpoint), "error": str(exc)}
         body = json.dumps(data, indent=2, default=str)
         return {
             "endpoint": self.url_for(endpoint),
             "keys": sorted(data.keys()) if isinstance(data, dict) else None,
             "kind": type(data).__name__,
             "rows_found": len(file_rows(data)),
-            "body": body[:8000],
-            "body_truncated": len(body) > 8000,
+            "total": _envelope_total(data),
+            "body": body[:6000],
+            "body_truncated": len(body) > 6000,
         }
 
-    async def _all_rows(
-        self, path: str, *, page_size: int = 500, max_pages: int = 40
-    ) -> list[dict[str, Any]]:
-        """Every row of a collection, following its paging if it has any.
+    async def raw_listing(
+        self, *, path: str = "", printer_id: int | None = None
+    ) -> dict[str, Any]:
+        """The untouched responses, for when the parsed answer is missing things.
 
-        Sends limit/offset and page/per_page together: instances disagree on
-        which they take, and one that reads neither simply returns everything
-        on the first call, which ends the loop anyway. Deduplicated by identity
-        so an instance that ignores both cannot spin.
+        There is no way to guess from here why one particular self-hosted
+        instance returned something PrintFlow made nothing of. Showing the
+        replies turns that into a question somebody can actually answer — every
+        endpoint that feeds the picker, because "folders but no files" is a
+        different fault from "nothing at all" and both land here.
         """
-        seen: set[Any] = set()
-        rows: list[dict[str, Any]] = []
-        for page in range(max_pages):
-            offset = page * page_size
+        if printer_id is not None:
+            return {"probes": [await self._probe(self.files_path(printer_id))]}
+        probes = [
+            await self._probe(self.paths["library_folders"]),
+            await self._probe(self.paths["library_files"]),
+        ]
+        # If the flat file list came back empty, show what one folder's worth
+        # looks like too: that is the call the fallback makes, and its reply is
+        # the thing that says whether the endpoint wants to be asked.
+        if not probes[1].get("rows_found"):
+            folders = file_rows(
+                await self._call("GET", self.paths["library_folders"], params=None)
+            )
+            first = next(
+                (parse_library_folder(row)["id"] for row in folders
+                 if parse_library_folder(row)["id"] is not None),
+                None,
+            )
+            if first is not None:
+                probes.append(
+                    await self._probe(
+                        self.paths["library_files"], {"folder_id": first}
+                    )
+                )
+        if path:
+            probes.append(await self._probe(self.files_path(None), {"path": path}))
+        return {"probes": probes}
+
+    async def _all_rows(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        page_size: int = 500,
+        max_pages: int = 40,
+    ) -> list[dict[str, Any]]:
+        """Every row of a collection, following its paging only if it has any.
+
+        The first request carries no paging at all. An endpoint that validates
+        its query strictly, or that reads `page` while being handed `offset`
+        too, can answer a well-meant pile of paging parameters with nothing —
+        and "nothing" from a collection that has rows in it is the worst answer
+        available, because it looks exactly like an empty library. Asking
+        plainly first means the common case never depends on guessing the
+        paging dialect right.
+
+        Paging is entered only on evidence: a `total` in the envelope larger
+        than what came back, or a full-looking first page. Rows are deduplicated
+        by identity, so an instance that ignores limit/offset cannot spin.
+        """
+        first = await self._call("GET", path, params=params or None)
+        rows = file_rows(first)
+        total = _envelope_total(first)
+        if not rows:
+            return []
+        if total is not None and len(rows) >= total:
+            return rows
+        if total is None and len(rows) < page_size:
+            # No count, and a short first page: there is no reason to think a
+            # second one exists.
+            return rows
+
+        seen = {json.dumps(row, sort_keys=True, default=str) for row in rows}
+        for page in range(1, max_pages):
             batch = file_rows(
                 await self._call(
                     "GET",
                     path,
                     params={
-                        "limit": page_size,
-                        "offset": offset,
-                        "page": page + 1,
-                        "per_page": page_size,
-                        "page_size": page_size,
+                        **(params or {}),
+                        "limit": len(rows) or page_size,
+                        "offset": len(rows),
                     },
                 )
             )
@@ -940,9 +1002,35 @@ class BambuddyClient:
                 seen.add(key)
                 rows.append(row)
                 fresh += 1
-            if len(batch) < page_size or not fresh:
+            if not fresh or (total is not None and len(rows) >= total):
                 break
         return rows
+
+    async def _files_by_folder(
+        self, folders: list[dict[str, Any]], *, max_folders: int = 250
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One request per folder, for a files endpoint that needs to be asked.
+
+        The flat list is the right way to do this and is tried first. Some
+        builds only answer for a named folder, though, and a shop whose library
+        is all folders would otherwise be shown twenty empty ones — which is
+        worse than a slower read.
+        """
+        rows: list[dict[str, Any]] = []
+        truncated = len(folders) > max_folders
+        for folder in folders[:max_folders]:
+            folder_id = parse_library_folder(folder)["id"]
+            if folder_id is None:
+                continue
+            batch = await self._all_rows(
+                self.paths["library_files"], params={"folder_id": folder_id}
+            )
+            for row in batch:
+                # The folder is known from the question that was asked, so a row
+                # that does not repeat it is still placed correctly.
+                row.setdefault("folder_id", folder_id)
+            rows += batch
+        return rows, truncated
 
     async def library_tree(self, *, max_nodes: int = 8000) -> dict[str, Any]:
         """The library's whole structure, from its folder and file collections.
@@ -953,6 +1041,14 @@ class BambuddyClient:
         """
         folder_rows = await self._all_rows(self.paths["library_folders"])
         file_rows_raw = await self._all_rows(self.paths["library_files"])
+        truncated = False
+        asked_per_folder = False
+        if not file_rows_raw and folder_rows:
+            # Folders but no files is not a library anybody keeps. Far likelier
+            # is a files endpoint that only answers for a named folder.
+            file_rows_raw, truncated = await self._files_by_folder(folder_rows)
+            asked_per_folder = bool(file_rows_raw)
+
         tree = build_library_tree(
             [parse_library_folder(row) for row in folder_rows],
             [parse_library_file(row) for row in file_rows_raw],
@@ -960,8 +1056,10 @@ class BambuddyClient:
         )
         return {
             **tree,
+            "truncated": tree["truncated"] or truncated,
             "endpoint": (
                 f"{self.paths['library_folders']} + {self.paths['library_files']}"
+                + (" (asked per folder)" if asked_per_folder else "")
             ),
             "root_rows": len(folder_rows) + len(file_rows_raw),
             "root_named": len(tree["files"]),

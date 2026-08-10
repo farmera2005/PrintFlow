@@ -265,8 +265,10 @@ It reads all the usual shapes — a bare list, any of the common envelopes, one
 wrapper around the payload, and builds that keep folders in one array and models
 in another — but it cannot know them all. So an empty file manager says which
 endpoint it read, how many rows came back, and offers **Show what Bambuddy
-sent**: the raw reply, so the shape can be seen rather than guessed at. Send it
-along with an issue and the reader can be taught it.
+sent**: the raw reply from every endpoint that feeds the picker, so the shape
+can be seen rather than guessed at. Send it along with an issue and the reader
+can be taught it. Folders that arrived with no files in them get the same
+treatment — that is a different fault from nothing at all, and it says so.
 
 An instance that ignores the folder parameter and answers every request with its
 top level says so too, rather than drawing the same folder nested inside itself
@@ -288,8 +290,21 @@ a person reads; names are not unique, so two files that would land on the same
 path both survive, disambiguated by id rather than one silently overwriting the
 other.
 
+Both collections are asked plainly first — no paging parameters at all — and
+paged only on evidence, a count in the reply larger than what came back. A pile
+of well-meant `limit`/`offset`/`page` parameters is a good way to be answered
+with an empty list by an endpoint that validates its query, and an empty list
+from a collection that has rows in it is indistinguishable from an empty
+library.
+
+If the file collection comes back empty while folders did not, PrintFlow asks
+again per folder — `?folder_id=…`, once each. Some builds only answer for a
+named folder, and twenty folders each reporting nothing is a worse answer than a
+slower read. A file filed in no folder at all is the one thing that cannot be
+recovered that way, since there is no folder to ask about.
+
 A build that instead lists one folder at a time is still supported and is used
-when the library collections are not there. Both are discovered from the
+when the library collections are not there. All of these are discovered from the
 instance's own OpenAPI document, like the others, and can be corrected under
 **Settings → Bambuddy → Advanced** — including the per-printer one, where
 `{printer_id}` is substituted.

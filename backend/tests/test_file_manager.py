@@ -318,10 +318,12 @@ class LibraryClient(BambuddyClient):
         self.files = files
         self.page_size = page_size
         self.calls: list[tuple[str, int]] = []
+        self.params: list[dict | None] = []
 
     async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
-        params = kwargs.get("params") or {}
-        offset = int(params.get("offset") or 0)
+        params = kwargs.get("params")
+        self.params.append(params)
+        offset = int((params or {}).get("offset") or 0)
         self.calls.append((path, offset))
         rows = self.folders if path.endswith("folders") else self.files
         if self.page_size:
@@ -341,26 +343,103 @@ class TestLibraryTreeOverTheApi:
         ]
         assert tree["flat"] is False
 
-    async def test_a_paged_collection_is_followed_to_the_end(self):
+    async def test_the_first_request_carries_no_paging_at_all(self):
+        """A pile of paging parameters is a good way to be answered with nothing.
+
+        An endpoint that validates its query strictly, or that reads `page`
+        while being handed `offset` too, can return an empty list for a
+        collection that is full — and empty is indistinguishable from an empty
+        library. Asking plainly first means the common case never rests on
+        guessing the paging dialect.
+        """
+        client = LibraryClient()
+        await client.library_tree()
+        assert client.params == [None, None]
+
+    async def test_paging_is_entered_only_on_evidence(self):
+        # `total` says there is more than came back, so there is more to ask for.
         client = LibraryClient(page_size=2)
-        # page_size on the stub is smaller than the client's, so the client's
-        # first request already comes back short and it stops. Force real paging
-        # by asking for the pages the stub actually serves.
-        rows = await client._all_rows("/api/v1/library/files", page_size=2)
+        rows = await client._all_rows("/api/v1/library/files")
         assert len(rows) == len(LIB_FILES)
-        assert [offset for _, offset in client.calls] == [0, 2, 4]
+        # Two requests, then it stops: the count is reached, so a third would
+        # only be asking an instance to confirm it has nothing left.
+        assert [offset for _, offset in client.calls] == [0, 2]
 
     async def test_an_instance_that_ignores_paging_does_not_spin(self):
         class Ignores(LibraryClient):
             async def _call(self, method, path, *, retries=2, **kwargs):
                 self.calls.append((path, 0))
-                return {"files": self.files}
+                # Always everything, and always claiming there is more.
+                return {"files": self.files, "total": 99}
 
         client = Ignores()
-        rows = await client._all_rows("/api/v1/library/files", page_size=2)
+        rows = await client._all_rows("/api/v1/library/files")
         # The same rows every time: taken once, then stopped.
         assert len(rows) == len(LIB_FILES)
         assert len(client.calls) == 2
+
+
+class TestAFilesEndpointThatWantsToBeAsked:
+    """Folders arrive, the flat file list is empty, and the library is not.
+
+    The reported symptom: twenty folders, every one of them saying "0 items".
+    A files endpoint that only answers for a named folder is far likelier than
+    a shop keeping twenty empty folders, so it is worth one request each to
+    find out.
+    """
+
+    class PerFolder(LibraryClient):
+        async def _call(self, method, path, *, retries=2, **kwargs):
+            params = kwargs.get("params") or {}
+            self.calls.append((path, params.get("folder_id")))
+            if path.endswith("folders"):
+                return {"folders": self.folders}
+            folder_id = params.get("folder_id")
+            if folder_id is None:
+                return {"files": [], "total": 0}
+            return {"files": [f for f in self.files if f.get("folder_id") == folder_id]}
+
+    async def test_the_files_are_found_by_asking_per_folder(self):
+        client = self.PerFolder()
+        tree = await client.library_tree()
+
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert "/Production/Bins/bin-fan-yes.3mf" in by_path
+        assert "/Production/Dragons/Large/dragon-egg-large.3mf" in by_path
+        # A file in no folder cannot be asked for by folder, so it is the one
+        # thing this path does not recover. Everything filed is here.
+        assert "/loose.3mf" not in by_path
+        assert tree["printable"] == 2
+        # And it says so, rather than looking like the flat read worked.
+        assert "asked per folder" in tree["endpoint"]
+        # One request per folder, after the flat one came back empty.
+        assert [fid for path, fid in client.calls if path.endswith("files")] == [
+            None, 1, 2, 3, 4, 5
+        ]
+
+    async def test_a_row_that_omits_its_folder_still_lands_in_it(self):
+        # The folder is known from the question that was asked.
+        class Terse(self.PerFolder):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                data = await super()._call(method, path, retries=retries, **kwargs)
+                if path.endswith("files"):
+                    return {"files": [{k: v for k, v in row.items() if k != "folder_id"}
+                                      for row in data["files"]]}
+                return data
+
+        tree = await Terse().library_tree()
+        assert "/Production/Bins/bin-fan-yes.3mf" in [n["path"] for n in tree["files"]]
+
+    async def test_a_library_with_no_folders_does_not_start_asking(self):
+        class Empty(self.PerFolder):
+            def __init__(self):
+                super().__init__(folders=[], files=[])
+
+        client = Empty()
+        tree = await client.library_tree()
+        assert tree["files"] == []
+        # Nothing to ask about, so the flat call is the only file call made.
+        assert len([1 for path, _ in client.calls if path.endswith("files")]) == 1
 
 
 # --------------------------------------------------------------------------
