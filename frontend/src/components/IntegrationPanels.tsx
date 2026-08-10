@@ -707,7 +707,21 @@ const PATH_ROLES: {
   { key: 'printers', label: 'Printers', hint: 'Listed during setup and shown on the queue.' },
   { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a product to a print file.' },
   { key: 'queue', label: 'Queue', hint: 'Read for job status, and posted to when a plate is sent.' },
-  { key: 'files', label: 'File manager', hint: 'The folder tree the file picker walks.' },
+  {
+    key: 'library_folders',
+    label: 'Library folders',
+    hint: 'Every folder, with the id of its parent. The picker builds the tree from this.',
+  },
+  {
+    key: 'library_files',
+    label: 'Library files',
+    hint: 'Every file, with the id of its folder.',
+  },
+  {
+    key: 'files',
+    label: 'File manager (one folder at a time)',
+    hint: 'Only used by builds that have no library collections.',
+  },
   {
     key: 'printer_files',
     label: "One printer's files",

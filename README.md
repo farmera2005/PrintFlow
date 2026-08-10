@@ -8,7 +8,7 @@ between them and the single pane of glass over the whole fulfilment flow.
 | ------------------ | ------------------------------------------- | ------------------------------- |
 | Etsy               | Sales channel — source of orders            | Read only (poll receipts)       |
 | QuickBooks Online  | Inventory system of record — quantity on hand | Read for orders; writes only a made-items sheet you post |
-| Bambuddy           | Print farm manager — queue, archives, file manager | Read/write (queue, track) |
+| Bambuddy           | Print farm manager — queue, archives, library | Read/write (queue, track) |
 | ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, buy labels) |
 
 PrintFlow itself owns the order state machine, the flow board, the bundle
@@ -272,17 +272,36 @@ An instance that ignores the folder parameter and answers every request with its
 top level says so too, rather than drawing the same folder nested inside itself
 as deep as the walk is allowed to go.
 
-The file manager endpoints are discovered from the instance's own OpenAPI
-document, like the others, and can be corrected under **Settings → Bambuddy →
-Advanced** — including the per-printer one, where `{printer_id}` is substituted.
+### Where the structure comes from
+
+Bambuddy's library is two collections, not a browsable path: `GET
+/api/v1/library/folders` returns every folder with the id of its parent, and
+`GET /api/v1/library/files` returns every file with the id of its folder. The
+shape is already in the data, so PrintFlow reads both collections — following
+their paging — and assembles the tree by id. Two calls, not one per folder, and
+it brings back things a walk cannot reach: an empty folder, and a folder whose
+parent has gone missing, which keeps its files instead of taking them with it.
+
+The library's own file id is what is stored, so it is the same id Bambuddy's
+other endpoints take. Paths are built from folder names because a path is what
+a person reads; names are not unique, so two files that would land on the same
+path both survive, disambiguated by id rather than one silently overwriting the
+other.
+
+A build that instead lists one folder at a time is still supported and is used
+when the library collections are not there. Both are discovered from the
+instance's own OpenAPI document, like the others, and can be corrected under
+**Settings → Bambuddy → Advanced** — including the per-printer one, where
+`{printer_id}` is substituted.
 
 **You do not have to re-save Settings after upgrading.** Bambuddy serves several
 hundred endpoints and moves them between releases, so a role added in a *later
 PrintFlow* release was never discovered for a connection made before it existed
 and would otherwise fall back to a default that is only a guess — a 404 on a
-path nobody chose. So a 404 here re-reads the instance's document, adopts what
-it says, and remembers it. If your instance calls the file manager
-`/api/library`, that is what PrintFlow will use, without being told.
+path nobody chose. So a 404 on **any** Bambuddy endpoint re-reads the instance's
+document, adopts what it now says, and remembers it. An instance whose library
+is at `/api/v1/library` has almost certainly moved its printers and its queue as
+well, and none of that should be an operator's problem to notice.
 
 Not every build has one. If the instance has no *per-printer* file endpoint,
 picking a printer reads the shared library instead and says so — the machine is

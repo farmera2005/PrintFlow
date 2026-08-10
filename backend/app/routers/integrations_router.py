@@ -894,9 +894,12 @@ async def bambuddy_printers(
     client = await _bambuddy_client(session)
     try:
         async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing printers"):
-            printers = await client.list_printers()
+            printers = await bambuddy_api.with_healing(
+                session, client, ("printers",), client.list_printers
+            )
     except IntegrationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    await session.commit()
     return {"printers": printers}
 
 
@@ -914,7 +917,9 @@ async def bambuddy_archives(
     client = await _bambuddy_client(session)
     try:
         async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing archives"):
-            archives, truncated = await client.iter_archives(search=search)
+            archives, truncated = await bambuddy_api.with_healing(
+                session, client, ("archives",), lambda: client.iter_archives(search=search)
+            )
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()
@@ -979,7 +984,9 @@ async def bambuddy_printer_models(
     client = await _bambuddy_client(session)
     try:
         async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing printers"):
-            models = await client.list_printer_models()
+            models = await bambuddy_api.with_healing(
+                session, client, ("printers",), client.list_printer_models
+            )
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()

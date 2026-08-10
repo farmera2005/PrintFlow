@@ -193,6 +193,177 @@ class TestAnEmptyAnswerExplainsItself:
 
 
 # --------------------------------------------------------------------------
+# The library: folders and files as two collections
+# --------------------------------------------------------------------------
+
+
+# Bambuddy's own library, as its API describes it: a folder collection whose
+# rows carry a parent id, and a file collection whose rows carry a folder id.
+LIB_FOLDERS = [
+    {"id": 1, "name": "Production", "parent_id": None},
+    {"id": 2, "name": "Bins", "parent_id": 1},
+    {"id": 3, "name": "Dragons", "parent_id": 1},
+    {"id": 4, "name": "Large", "parent_id": 3},
+    {"id": 5, "name": "Empty shelf", "parent_id": 1},
+]
+LIB_FILES = [
+    {"id": 101, "name": "bin-fan-yes.3mf", "folder_id": 2, "size": 2_400_000},
+    {"id": 102, "name": "render.png", "folder_id": 2},
+    {"id": 103, "name": "dragon-egg-large.3mf", "folder_id": 4},
+    {"id": 104, "name": "loose.3mf", "folder_id": None},
+]
+
+
+def _library(folders=LIB_FOLDERS, files=LIB_FILES, **kwargs):
+    from app.integrations.bambuddy import (
+        build_library_tree,
+        parse_library_file,
+        parse_library_folder,
+    )
+
+    return build_library_tree(
+        [parse_library_folder(row) for row in folders],
+        [parse_library_file(row) for row in files],
+        **kwargs,
+    )
+
+
+class TestBuildLibraryTree:
+    """The shape is in the data — parent ids — so this is arithmetic, not a walk."""
+
+    def test_the_structure_comes_out_of_the_parent_ids(self):
+        by_path = {node["path"]: node for node in _library()["files"]}
+        assert by_path["/Production"]["parent"] == "/"
+        assert by_path["/Production/Bins"]["parent"] == "/Production"
+        assert by_path["/Production/Dragons/Large"]["depth"] == 2
+        assert by_path["/Production/Dragons/Large/dragon-egg-large.3mf"]["depth"] == 3
+
+    def test_a_file_with_no_folder_sits_at_the_top(self):
+        by_path = {node["path"]: node for node in _library()["files"]}
+        assert by_path["/loose.3mf"]["parent"] == "/"
+
+    def test_an_empty_folder_is_still_a_folder(self):
+        # The thing a walk cannot find, because nothing points into it.
+        paths = [node["path"] for node in _library()["files"]]
+        assert "/Production/Empty shelf" in paths
+
+    def test_the_library_id_is_kept_as_the_file_id(self):
+        by_path = {node["path"]: node for node in _library()["files"]}
+        assert by_path["/Production/Bins/bin-fan-yes.3mf"]["archive_id"] == 101
+        assert by_path["/Production/Bins/bin-fan-yes.3mf"]["printable"] is True
+        assert by_path["/Production/Bins/render.png"]["printable"] is False
+
+    def test_counts_are_of_what_is_there(self):
+        tree = _library()
+        assert (tree["folders"], tree["printable"]) == (5, 3)
+
+    def test_a_folder_whose_parent_is_missing_keeps_its_files(self):
+        # Deleted mid-read, or outside whatever page came back. Losing the
+        # subtree would silently hide files that really are printable.
+        tree = _library(
+            folders=[{"id": 9, "name": "Orphan", "parent_id": 404}],
+            files=[{"id": 1, "name": "a.3mf", "folder_id": 9}],
+        )
+        assert [node["path"] for node in tree["files"]] == ["/Orphan", "/Orphan/a.3mf"]
+
+    def test_a_folder_that_is_its_own_ancestor_does_not_recurse(self):
+        tree = _library(
+            folders=[{"id": 1, "name": "A", "parent_id": 2},
+                     {"id": 2, "name": "B", "parent_id": 1}],
+            files=[{"id": 7, "name": "a.3mf", "folder_id": 1}],
+        )
+        # Where a cycle hangs is arbitrary — it is a cycle. What matters is that
+        # it ends, that each folder appears once, and that the file inside one
+        # is still reachable rather than lost with the loop.
+        assert len(tree["files"]) == 3
+        assert {node["archive_id"] for node in tree["files"]} == {1, 2, 7}
+        assert tree["printable"] == 1
+
+    def test_two_files_of_the_same_name_in_one_folder_both_survive(self):
+        # Names are not unique in a library; ids are. Overwriting one with the
+        # other would quietly lose a file somebody can see in Bambuddy.
+        tree = _library(
+            folders=[],
+            files=[{"id": 1, "name": "a.3mf", "folder_id": None},
+                   {"id": 2, "name": "a.3mf", "folder_id": None}],
+        )
+        assert sorted(node["path"] for node in tree["files"]) == ["/a.3mf", "/a.3mf (2)"]
+        assert {node["archive_id"] for node in tree["files"]} == {1, 2}
+
+    def test_a_node_cap_admits_itself(self):
+        tree = _library(max_nodes=3)
+        assert len(tree["files"]) == 3
+        assert tree["truncated"] is True
+
+    def test_rows_that_name_nothing_are_dropped_not_drawn_blank(self):
+        tree = _library(folders=[], files=[{"id": 1, "folder_id": None}])
+        assert tree["files"] == []
+
+    def test_a_related_object_stands_in_for_its_id(self):
+        # Some serialisers nest the parent rather than sending a bare id.
+        tree = _library(
+            folders=[{"id": 1, "name": "Top", "parent": None},
+                     {"id": 2, "name": "Under", "parent": {"id": 1}}],
+            files=[{"id": 5, "name": "a.3mf", "folder": {"id": 2}}],
+        )
+        assert "/Top/Under/a.3mf" in [node["path"] for node in tree["files"]]
+
+
+class LibraryClient(BambuddyClient):
+    """Serves the two collections the way Bambuddy's API describes them."""
+
+    def __init__(self, *, folders=LIB_FOLDERS, files=LIB_FILES, page_size=None):
+        super().__init__({"base_url": "http://bambuddy.local"})
+        self.folders = folders
+        self.files = files
+        self.page_size = page_size
+        self.calls: list[tuple[str, int]] = []
+
+    async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
+        params = kwargs.get("params") or {}
+        offset = int(params.get("offset") or 0)
+        self.calls.append((path, offset))
+        rows = self.folders if path.endswith("folders") else self.files
+        if self.page_size:
+            rows = rows[offset:offset + self.page_size]
+        key = "folders" if path.endswith("folders") else "files"
+        return {key: rows, "total": len(self.folders if key == "folders" else self.files)}
+
+
+class TestLibraryTreeOverTheApi:
+    async def test_two_calls_bring_the_whole_structure(self):
+        client = LibraryClient()
+        tree = await client.library_tree()
+        assert (tree["folders"], tree["printable"]) == (5, 3)
+        # One call per collection — not one per folder.
+        assert [path for path, _ in client.calls] == [
+            "/api/v1/library/folders", "/api/v1/library/files"
+        ]
+        assert tree["flat"] is False
+
+    async def test_a_paged_collection_is_followed_to_the_end(self):
+        client = LibraryClient(page_size=2)
+        # page_size on the stub is smaller than the client's, so the client's
+        # first request already comes back short and it stops. Force real paging
+        # by asking for the pages the stub actually serves.
+        rows = await client._all_rows("/api/v1/library/files", page_size=2)
+        assert len(rows) == len(LIB_FILES)
+        assert [offset for _, offset in client.calls] == [0, 2, 4]
+
+    async def test_an_instance_that_ignores_paging_does_not_spin(self):
+        class Ignores(LibraryClient):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                self.calls.append((path, 0))
+                return {"files": self.files}
+
+        client = Ignores()
+        rows = await client._all_rows("/api/v1/library/files", page_size=2)
+        # The same rows every time: taken once, then stopped.
+        assert len(rows) == len(LIB_FILES)
+        assert len(client.calls) == 2
+
+
+# --------------------------------------------------------------------------
 # Walking the whole thing
 # --------------------------------------------------------------------------
 
@@ -388,6 +559,34 @@ class TestHealingAWrongEndpoint:
         assert "listable endpoints" in message
         assert "Advanced" in message
 
+    async def test_any_endpoint_heals_the_same_way(self, db):
+        """A library at /api/v1 means the rest moved too, printers included."""
+        from app.integrations import bambuddy as api
+        from app.models import PROVIDER_BAMBUDDY
+        from app.services import credentials
+
+        await credentials.save(db, PROVIDER_BAMBUDDY,
+                               {"base_url": "http://b.local", "api_key": "k"})
+        await db.commit()
+
+        class Farm(HealingClient):
+            async def _call(self, method, path, *, retries=2, **kwargs):
+                from app.integrations.base import IntegrationError
+
+                if path not in self.spec_paths:
+                    raise IntegrationError("bambuddy", "HTTP 404", status_code=404)
+                return [{"id": 1, "name": "X1C-01", "model": "X1 Carbon", "online": True}]
+
+        client = Farm(spec_paths={"/api/v1/printers": {"get": {}}})
+        # The default is /api/printers, which this instance does not have.
+        printers = await api.with_healing(db, client, ("printers",), client.list_printers)
+        await db.commit()
+
+        assert [p["name"] for p in printers] == ["X1C-01"]
+        assert client.paths["printers"] == "/api/v1/printers"
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["discovered_paths"]["printers"] == "/api/v1/printers"
+
     async def test_a_failure_that_is_not_a_404_is_left_alone(self, db):
         from app.integrations import bambuddy as api
         from app.integrations.base import IntegrationError
@@ -407,7 +606,11 @@ class TestHealingAWrongEndpoint:
 
 
 class HealingClient(BambuddyClient):
-    """404s until its `files` path is the one its spec actually describes."""
+    """404s on every endpoint its spec does not describe.
+
+    Stubbed at the transport so the real path resolution runs — which endpoint
+    is called, and in which order, is the whole subject here.
+    """
 
     def __init__(self, *, spec_paths: dict, never_found: bool = False, status: int = 404):
         super().__init__({"base_url": "http://b.local"})
@@ -426,15 +629,16 @@ class HealingClient(BambuddyClient):
             ],
         }
 
-    async def list_files(self, *, path: str = "", printer_id: int | None = None):
+    async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
         from app.integrations.base import IntegrationError
 
-        endpoint = self.files_path(printer_id)
-        if self.never_found or endpoint not in self.spec_paths:
-            raise IntegrationError("bambuddy", f"HTTP {self.status}", status_code=self.status)
-        if (path or "/") != "/":
-            return []
-        return [parse_file_entry({"name": "found.3mf", "type": "file"}, parent="/")]
+        if self.never_found or path not in self.spec_paths:
+            raise IntegrationError(
+                "bambuddy", f"HTTP {self.status}", status_code=self.status
+            )
+        if (kwargs.get("params") or {}).get("path"):
+            return {"files": []}
+        return {"files": [{"name": "found.3mf", "type": "file"}]}
 
 
 class TestDiscovery:

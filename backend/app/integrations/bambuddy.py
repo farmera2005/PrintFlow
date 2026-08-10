@@ -41,7 +41,15 @@ DEFAULT_PATHS: dict[str, str] = {
     "printers": "/api/printers",
     "archives": "/api/archives",
     "queue": "/api/queue",
-    # The file manager, as its own folder tree rather than a flat archive list.
+    # The library, which is what Bambuddy calls its file manager. Folders and
+    # files are two separate collections and the structure is carried by parent
+    # ids on the rows, so the whole thing is two calls rather than one per
+    # folder — and every folder comes back, including the empty ones a walk
+    # would never have reached.
+    "library_folders": "/api/v1/library/folders",
+    "library_files": "/api/v1/library/files",
+    # A file manager that instead lists one folder at a time, for builds whose
+    # library is not shaped like the above.
     "files": "/api/files",
     # The same thing scoped to one machine. `{printer_id}` is substituted; an
     # instance that keeps one shared library can point this at the same path as
@@ -113,6 +121,11 @@ PATH_ROLES: dict[str, dict[str, Any]] = {
         "keywords": ("file", "library", "filemanager", "storage", "folder", "browse"),
         "methods": ("get",),
     },
+    # The library's two collections. Named apart from `files` because an
+    # instance that has these does not need the folder-at-a-time endpoint at
+    # all, and one that has neither must not have them guessed at.
+    "library_folders": {"keywords": ("folder", "directory"), "methods": ("get",)},
+    "library_files": {"keywords": ("file", "model"), "methods": ("get",)},
 }
 
 # The file manager scoped to one machine. Kept out of PATH_ROLES because every
@@ -411,6 +424,157 @@ def parse_file_entry(row: dict[str, Any], *, parent: str = "") -> dict[str, Any]
         "archive_id": _first(row, "archive_id", "archiveId", "model_id", "id"),
         "printable": False if folder else is_printable(name),
         "children": children if isinstance(children, list) else None,
+    }
+
+
+def _ref_id(value: Any) -> Any:
+    """An id, whether the row carried the id or the whole related object."""
+    if isinstance(value, dict):
+        return _first(value, "id", "folder_id", "uuid")
+    return value
+
+
+def parse_library_folder(row: dict[str, Any]) -> dict[str, Any]:
+    """One row of the library's folder collection."""
+    return {
+        "id": _first(row, "id", "folder_id", "folderId", "uuid"),
+        "name": str(
+            _first(row, "name", "title", "label", "folder_name", "display_name") or ""
+        ).strip().strip("/"),
+        "parent_id": _ref_id(
+            _first(
+                row, "parent_id", "parentId", "parent_folder_id", "parentFolderId",
+                "folder_id", "parent",
+            )
+        ),
+    }
+
+
+def parse_library_file(row: dict[str, Any]) -> dict[str, Any]:
+    """One row of the library's file collection."""
+    return {
+        "id": _first(row, "id", "file_id", "fileId", "uuid"),
+        "name": str(
+            _first(
+                row, "name", "filename", "file_name", "title", "label", "display_name",
+                "original_filename",
+            )
+            or ""
+        ).strip().strip("/"),
+        "folder_id": _ref_id(
+            _first(row, "folder_id", "folderId", "parent_id", "parentId", "folder")
+        ),
+        "size": _first(row, "size", "file_size", "bytes", "length"),
+        "modified": _first(
+            row, "modified", "modified_at", "updated_at", "created_at", "mtime"
+        ),
+        "plates": _first(row, "plates", "plate_count", "plateCount"),
+    }
+
+
+def build_library_tree(
+    folders: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+    *,
+    max_nodes: int = 8000,
+) -> dict[str, Any]:
+    """Folders and files, two flat collections, assembled into the structure.
+
+    The library carries its shape as a parent id on every row rather than as
+    something you discover by walking, so this is arithmetic on two lists — and
+    it gets things a walk cannot: empty folders, and folders whose parent is
+    missing, which would otherwise be silently unreachable.
+
+    Paths are built from names because a path is what a person reads and what
+    the mapping stores. Names are not unique and ids are, so a collision keeps
+    both by disambiguating with the id rather than letting one file overwrite
+    another.
+    """
+    by_id = {folder["id"]: folder for folder in folders if folder["id"] is not None}
+    paths: dict[Any, str] = {}
+    truncated = False
+
+    def path_of(folder_id: Any, seen: frozenset = frozenset()) -> str:
+        """A folder's absolute path, resolving its parents on the way up."""
+        if folder_id in paths:
+            return paths[folder_id]
+        folder = by_id.get(folder_id)
+        # A parent that is not in the collection, or a folder that is its own
+        # ancestor, hangs off the root rather than disappearing with its files.
+        if folder is None or folder_id in seen:
+            return ""
+        parent = path_of(folder["parent_id"], seen | {folder_id})
+        paths[folder_id] = join_path(parent, folder["name"] or str(folder_id))
+        return paths[folder_id]
+
+    nodes: dict[str, dict[str, Any]] = {}
+
+    def folderish_parent(path: str) -> str:
+        cut = path.rfind("/")
+        return path[:cut] if cut > 0 else "/"
+
+    def place(path: str, node: dict[str, Any]) -> None:
+        """Add a node, keeping both when two rows want the same path."""
+        nonlocal truncated
+        if len(nodes) >= max_nodes:
+            truncated = True
+            return
+        unique = path
+        if unique in nodes:
+            unique = f"{path} ({node.get('library_id')})"
+            if unique in nodes:
+                return
+        node["path"] = unique
+        node["parent"] = folderish_parent(unique)
+        node["depth"] = max(0, unique.count("/") - 1)
+        nodes[unique] = node
+
+    for folder in folders:
+        if folder["id"] is None:
+            continue
+        path = path_of(folder["id"])
+        if not path:
+            continue
+        place(
+            path,
+            {
+                "name": folder["name"] or str(folder["id"]),
+                "kind": "folder",
+                "size": None,
+                "modified": None,
+                "archive_id": folder["id"],
+                "printable": False,
+                "library_id": folder["id"],
+            },
+        )
+
+    for row in files:
+        if not row["name"]:
+            continue
+        parent = path_of(row["folder_id"]) if row["folder_id"] is not None else ""
+        place(
+            join_path(parent, row["name"]),
+            {
+                "name": row["name"],
+                "kind": "file",
+                "size": row["size"],
+                "modified": row["modified"],
+                # The library's own id for this file, which is what everything
+                # else in its API takes.
+                "archive_id": row["id"],
+                "printable": is_printable(row["name"]),
+                "library_id": row["id"],
+            },
+        )
+
+    listing = sorted(
+        nodes.values(), key=lambda node: (node["path"].count("/"), node["path"].lower())
+    )
+    return {
+        "files": listing,
+        "truncated": truncated,
+        "printable": sum(1 for node in listing if node["printable"]),
+        "folders": sum(1 for node in listing if node["kind"] == "folder"),
     }
 
 
@@ -741,6 +905,69 @@ class BambuddyClient:
             "body_truncated": len(body) > 8000,
         }
 
+    async def _all_rows(
+        self, path: str, *, page_size: int = 500, max_pages: int = 40
+    ) -> list[dict[str, Any]]:
+        """Every row of a collection, following its paging if it has any.
+
+        Sends limit/offset and page/per_page together: instances disagree on
+        which they take, and one that reads neither simply returns everything
+        on the first call, which ends the loop anyway. Deduplicated by identity
+        so an instance that ignores both cannot spin.
+        """
+        seen: set[Any] = set()
+        rows: list[dict[str, Any]] = []
+        for page in range(max_pages):
+            offset = page * page_size
+            batch = file_rows(
+                await self._call(
+                    "GET",
+                    path,
+                    params={
+                        "limit": page_size,
+                        "offset": offset,
+                        "page": page + 1,
+                        "per_page": page_size,
+                        "page_size": page_size,
+                    },
+                )
+            )
+            fresh = 0
+            for row in batch:
+                key = json.dumps(row, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+                fresh += 1
+            if len(batch) < page_size or not fresh:
+                break
+        return rows
+
+    async def library_tree(self, *, max_nodes: int = 8000) -> dict[str, Any]:
+        """The library's whole structure, from its folder and file collections.
+
+        Two calls (plus paging), not one per folder: the rows carry their own
+        parent, so the shape is already in the data and does not have to be
+        discovered by walking into it.
+        """
+        folder_rows = await self._all_rows(self.paths["library_folders"])
+        file_rows_raw = await self._all_rows(self.paths["library_files"])
+        tree = build_library_tree(
+            [parse_library_folder(row) for row in folder_rows],
+            [parse_library_file(row) for row in file_rows_raw],
+            max_nodes=max_nodes,
+        )
+        return {
+            **tree,
+            "endpoint": (
+                f"{self.paths['library_folders']} + {self.paths['library_files']}"
+            ),
+            "root_rows": len(folder_rows) + len(file_rows_raw),
+            "root_named": len(tree["files"]),
+            "flat": False,
+        }
+
     async def file_tree(
         self,
         *,
@@ -958,13 +1185,42 @@ async def remember_paths(session: AsyncSession, adopted: dict[str, str]) -> None
     await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
 
 
+async def with_healing(
+    session: AsyncSession,
+    client: BambuddyClient,
+    roles: tuple[str, ...],
+    call: Any,
+) -> Any:
+    """Run a call; on a 404, re-read the instance's spec and run it once more.
+
+    The same reason as the file manager: a path that 404s is a path nobody
+    chose, either because it was never discovered for this connection or
+    because the instance moved it in an upgrade. An instance whose library is
+    at /api/v1/library is unlikely to have left everything else at /api.
+    """
+    try:
+        return await call()
+    except IntegrationError as exc:
+        if exc.status_code != 404:
+            raise
+    adopted = await client.resolve_paths(roles)
+    await remember_paths(session, adopted)
+    return await call()
+
+
 async def read_file_manager(
     session: AsyncSession, client: BambuddyClient, *, printer_id: int | None = None
 ) -> dict[str, Any]:
     """The file manager, healing a wrong endpoint on the way.
 
-    A 404 here means the path is wrong rather than the instance being down, and
-    there are three reasons it can be wrong, each with its own answer:
+    There are two shapes of file manager and PrintFlow does not get to choose
+    which one an instance has. The library — folders and files as two
+    collections, each row carrying its parent — is preferred where it exists,
+    because two calls beat one per folder and it brings back the empty folders
+    a walk would never reach. Failing that, a folder-at-a-time endpoint.
+
+    A 404 means the path is wrong rather than the instance being down, and there
+    are three reasons it can be wrong, each with its own answer:
 
     * the role was added after this connection was made, so it was never
       discovered — re-read the document and adopt what it says;
@@ -976,37 +1232,58 @@ async def read_file_manager(
       does serve, so the operator can point it at the right endpoint under
       Advanced instead of being told a number.
     """
-    try:
-        return {**await client.file_tree(printer_id=printer_id), "shared": False}
-    except IntegrationError as exc:
-        if exc.status_code != 404:
-            raise
+    ROLES = ("library_folders", "library_files", "files", "printer_files")
 
-    adopted = await client.resolve_paths(("files", "printer_files"))
+    async def attempt(shared: bool) -> dict[str, Any] | None:
+        """The library, then the walk. None means neither answered."""
+        if printer_id is None or shared:
+            try:
+                return {**await client.library_tree(), "shared": shared}
+            except IntegrationError as exc:
+                if exc.status_code != 404:
+                    raise
+        try:
+            return {
+                **await client.file_tree(printer_id=None if shared else printer_id),
+                "shared": shared,
+            }
+        except IntegrationError as exc:
+            if exc.status_code != 404:
+                raise
+        return None
+
+    found = await attempt(shared=False)
+    if found is not None:
+        return found
+
+    adopted = await client.resolve_paths(ROLES)
     await remember_paths(session, adopted)
-    try:
-        return {**await client.file_tree(printer_id=printer_id), "shared": False}
-    except IntegrationError as exc:
-        if exc.status_code != 404:
-            raise
-        if printer_id is None:
-            raise await _no_file_manager(client, exc) from exc
+    found = await attempt(shared=False)
+    if found is not None:
+        return found
 
     # This build keeps one library for the whole farm. Reading it is the right
     # answer — the file exists, and the printer chosen alongside it is still
     # where the plate is going.
-    try:
-        return {**await client.file_tree(printer_id=None), "shared": True}
-    except IntegrationError as exc:
-        raise await _no_file_manager(client, exc) from exc
+    if printer_id is not None:
+        found = await attempt(shared=True)
+        if found is not None:
+            return found
+
+    raise await _no_file_manager(client)
 
 
-async def _no_file_manager(
-    client: BambuddyClient, exc: IntegrationError
-) -> IntegrationError:
+async def _no_file_manager(client: BambuddyClient) -> IntegrationError:
     """Turn "404" into something an operator can act on."""
     tried = ", ".join(
-        dict.fromkeys([client.paths["files"], client.paths["printer_files"]])
+        dict.fromkeys(
+            [
+                client.paths["library_folders"],
+                client.paths["library_files"],
+                client.paths["files"],
+                client.paths["printer_files"],
+            ]
+        )
     )
     spec = getattr(client, "last_spec", None)
     if spec is None:
@@ -1042,6 +1319,5 @@ async def _no_file_manager(
     return IntegrationError(
         PROVIDER_BAMBUDDY,
         f"This Bambuddy has no file manager at {tried}. {hint}",
-        status_code=exc.status_code,
-        body=exc.body,
+        status_code=404,
     )
