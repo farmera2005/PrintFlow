@@ -228,24 +228,34 @@ Two ways back from a wrong match:
 
 A printed product needs two answers: which file, and what can print it.
 
-**The file** comes off Bambuddy. **Browse Bambuddy files** opens one picker with
-three places to look, chosen at the top:
+**The file** comes off Bambuddy. **Browse Bambuddy files** opens on the **file
+manager**, showing Bambuddy's own folder structure — the whole tree, already
+expanded, on screen the moment it opens. Nothing has to be typed and no folder
+has to be clicked through to see what the farm has. A shop that has sorted its
+files into folders has already said what is what; a picker that hides that
+behind a search box is a picker for people who already know the answer.
 
-* **Bambuddy library (archives)** — every archived 3MF the instance has, not the
-  first page of them, as a flat searchable list.
-* **File manager (all printers)** — Bambuddy's own file manager, with its folder
-  structure intact: folders open, breadcrumbs walk back up, and searching cuts
-  across the whole tree and shows full paths. A shop that has sorted its files
-  into folders has already said what is what, and flattening that into a list of
-  filenames would throw the work away.
+Folders collapse and expand individually, and **Collapse all** / **Expand all**
+does the lot. The search box is still there — it cuts across every folder at
+once and shows full paths, which is the one time folders get in the way — but
+it is an optional shortcut, not the way in. Past a few hundred entries
+"everything open" would be a wall of rows rather than a view, so the top level
+stands in and Expand all is one click.
+
+Two other places to look, from the same control at the top:
+
 * **One printer** — that machine's own storage. See below; this is the case
   where picking the file also picks the printer.
+* **Bambuddy library** — every archived 3MF the instance has, not the first page
+  of them, as a flat searchable list. This is the fallback for a build with no
+  file manager, and PrintFlow switches to it on its own rather than opening on
+  an error.
 
 Only what a printer can take is offered — 3MF and GCODE — and the count at the
-bottom says how many other files were in the folder, so a picker with nothing in
-it is never mistaken for an empty folder. If the file manager is bigger than
-PrintFlow walks in one pass, or a folder cannot be read, it says so rather than
-showing a short list and letting you conclude the file is missing.
+bottom says how many other files there were, so a picker with nothing in it is
+never mistaken for an empty folder. If the file manager is bigger than PrintFlow
+walks in one pass, or a folder cannot be read, it says so rather than showing a
+short list and letting you conclude the file is missing.
 
 The file manager endpoints are discovered from the instance's own OpenAPI
 document, like the others, and can be corrected under **Settings → Bambuddy →
@@ -262,9 +272,11 @@ it says, and remembers it. If your instance calls the file manager
 Not every build has one. If the instance has no *per-printer* file endpoint,
 picking a printer reads the shared library instead and says so — the machine is
 still a real answer to where the plate goes, even when it is not where the file
-is kept. If it has no file manager at all, the picker says which endpoints the
-instance *does* serve, so you can name the right one under Advanced, and offers
-the archive library, which is always there.
+is kept. If it has no file manager at all, the picker falls back to the archive
+library by itself and says so, rather than greeting you with an error you did
+not ask for — name the right endpoint under Advanced and the folders come back.
+Choose the file manager *deliberately* on such an instance and you get the
+error, with the endpoints it really does serve listed in it.
 
 **The machines** are chosen by *model*, and you can tick more than one. A shop
 with four printers usually has more than one tool for a given job, and pinning a
