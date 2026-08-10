@@ -11,6 +11,7 @@ instance; responses are parsed defensively so a renamed field degrades to
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -39,13 +40,25 @@ DEFAULT_PATHS: dict[str, str] = {
     "printers": "/api/printers",
     "archives": "/api/archives",
     "queue": "/api/queue",
+    # The file manager, as its own folder tree rather than a flat archive list.
+    "files": "/api/files",
+    # The same thing scoped to one machine. `{printer_id}` is substituted; an
+    # instance that keeps one shared library can point this at the same path as
+    # `files` and the printer simply becomes where the plate is sent.
+    "printer_files": "/api/printers/{printer_id}/files",
 }
 
 DEFAULT_FIELDS: dict[str, str] = {
     "archive_id": "archive_id",
     "plate_number": "plate",
     "printer_id": "printer_id",
+    "file_path": "file_path",
 }
+
+# What can go on a printer. Anything else in the file manager — timelapses,
+# thumbnails, logs — is real, and is counted, but is not something to map a
+# product onto.
+PRINTABLE_SUFFIXES = (".3mf", ".gcode", ".gcode.3mf", ".gco", ".bgcode")
 
 DEFAULT_AUTH_HEADER = "X-API-Key"
 
@@ -91,6 +104,16 @@ PATH_ROLES: dict[str, dict[str, Any]] = {
     "archives": {"keywords": ("archive", "model", "project", "file"), "methods": ("get",)},
     # The queue is the only one we write to, so it has to accept a POST.
     "queue": {"keywords": ("queue", "job", "task"), "methods": ("get", "post")},
+    # The file manager. "file" first here, where it is last under archives, so
+    # the two roles do not both claim /api/files on an instance that has one.
+    "files": {"keywords": ("file", "filemanager", "storage", "folder"), "methods": ("get",)},
+}
+
+# The file manager scoped to one machine. Kept out of PATH_ROLES because every
+# rule there rejects a templated path, and this role is nothing but a template.
+PRINTER_FILES_ROLE: dict[str, Any] = {
+    "keywords": ("file", "filemanager", "storage", "folder", "model"),
+    "parents": ("printer", "device"),
 }
 
 
@@ -143,13 +166,67 @@ def collection_paths(spec_paths: dict[str, Any], limit: int = 400) -> list[dict[
     return rows[:limit]
 
 
+def _score_printer_files(path: str, methods: set[str]) -> int | None:
+    """Rank a spec path as "one printer's file manager".
+
+    Shaped nothing like the others: it must be templated, the template must be
+    the printer, and the leaf must be the files. `/api/printers/{id}/files`
+    scores; `/api/files/{id}` does not, because there the template is the file.
+    """
+    if "get" not in methods:
+        return None
+    segments = [s for s in path.split("/") if s]
+    if len(segments) < 3:
+        return None
+    templated = [i for i, s in enumerate(segments) if s.startswith("{")]
+    if len(templated) != 1:
+        return None
+    slot = templated[0]
+    if slot == len(segments) - 1:
+        # The template is the last thing, so this reads a single item.
+        return None
+
+    parent = segments[slot - 1].lower().rstrip("s")
+    if parent not in PRINTER_FILES_ROLE["parents"]:
+        return None
+    leaf = segments[-1].lower().rstrip("s")
+    try:
+        rank = list(PRINTER_FILES_ROLE["keywords"]).index(leaf)
+    except ValueError:
+        return None
+    return 100 - rank * 10 - len(segments)
+
+
+def discover_printer_files(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    """The per-printer file endpoint, rewritten to name its parameter ours.
+
+    Instances call the path parameter every one of id / printer_id / printerId,
+    and PrintFlow substitutes `{printer_id}`, so the winner is normalised on the
+    way out rather than at every call site.
+    """
+    scored: list[tuple[int, str]] = []
+    for path, operations in spec_paths.items():
+        if not isinstance(operations, dict):
+            continue
+        methods = {m.lower() for m in operations if isinstance(m, str)}
+        score = _score_printer_files(str(path), methods)
+        if score is not None:
+            scored.append((score, str(path)))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    normalized = [re.sub(r"\{[^}]+\}", "{printer_id}", path) for _, path in scored]
+    return {
+        "path": normalized[0] if normalized else None,
+        "alternatives": normalized[1:6],
+    }
+
+
 def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
     """Read our endpoints off an OpenAPI document.
 
     Returns the best candidate per role plus every runner-up, because a guess
     the operator cannot see is a guess they cannot correct.
     """
-    found: dict[str, Any] = {}
+    found: dict[str, Any] = {"printer_files": discover_printer_files(spec_paths)}
     for name, role in PATH_ROLES.items():
         scored: list[tuple[int, str]] = []
         for path, operations in spec_paths.items():
@@ -187,7 +264,10 @@ def _as_list(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [row for row in data if isinstance(row, dict)]
     if isinstance(data, dict):
-        for key in ("results", "items", "data", "queue", "archives", "printers"):
+        for key in (
+            "results", "items", "data", "queue", "archives", "printers",
+            "files", "entries", "children", "contents", "nodes",
+        ):
             value = data.get(key)
             if isinstance(value, list):
                 return [row for row in value if isinstance(row, dict)]
@@ -211,6 +291,59 @@ def parse_printer(row: dict[str, Any]) -> dict[str, Any]:
         "model": _first(row, "model", "printer_model", "dev_model"),
         "status": _first(row, "status", "state", "print_status"),
         "online": _first(row, "online", "is_online", "connected"),
+    }
+
+
+def join_path(parent: str, name: str) -> str:
+    """Folder + entry, as one absolute file-manager path."""
+    return "/" + "/".join(part for part in f"{parent}/{name}".split("/") if part)
+
+
+def is_printable(name: str) -> bool:
+    return str(name or "").lower().endswith(PRINTABLE_SUFFIXES)
+
+
+def parse_file_entry(row: dict[str, Any], *, parent: str = "") -> dict[str, Any]:
+    """One row of a file-manager listing, whatever this build calls its columns.
+
+    Folder or file is the one thing that must be right — get it wrong and the
+    walk either stops at the top level or recurses into a 3MF — so it is read
+    from an explicit type, an explicit flag, or the presence of children, and
+    only falls back to "file" when the row says none of those.
+    """
+    name = str(
+        _first(row, "name", "filename", "file_name", "basename", "title") or ""
+    ).strip().strip("/")
+    raw_path = _first(row, "path", "full_path", "fullPath", "key", "location")
+    path = str(raw_path).strip() if raw_path else ""
+    if path:
+        path = join_path("", path)
+    else:
+        path = join_path(parent, name)
+    if not name:
+        name = path.rsplit("/", 1)[-1]
+
+    kind = str(_first(row, "type", "kind", "entry_type", "mime_type") or "").strip().lower()
+    children = row.get("children")
+    if kind in {"dir", "directory", "folder"} or kind.startswith("folder"):
+        folder = True
+    elif kind in {"file", "model", "archive"} or "/" in kind:
+        folder = False
+    else:
+        flag = _first(row, "is_dir", "isDir", "is_directory", "isDirectory", "is_folder")
+        folder = bool(flag) if flag is not None else isinstance(children, list)
+
+    return {
+        "name": name,
+        "path": path,
+        "kind": "folder" if folder else "file",
+        "size": _first(row, "size", "file_size", "bytes", "length"),
+        "modified": _first(row, "modified", "modified_at", "updated_at", "mtime", "date"),
+        # A file manager entry that is also a known archive can be queued by id,
+        # which is the older and better-supported of the two ways to send it.
+        "archive_id": _first(row, "archive_id", "archiveId", "model_id", "id"),
+        "printable": False if folder else is_printable(name),
+        "children": children if isinstance(children, list) else None,
     }
 
 
@@ -454,6 +587,112 @@ class BambuddyClient:
                 truncated = True
         return list(seen.values()), truncated
 
+    def files_path(self, printer_id: int | None) -> str:
+        """Which endpoint holds the files — the farm's, or one machine's."""
+        if printer_id is None:
+            return self.paths["files"]
+        template = self.paths["printer_files"]
+        if "{printer_id}" not in template:
+            # An operator has pointed the per-printer role at a plain path, which
+            # is how an instance with one shared library is configured. The
+            # printer then only says where the plate goes.
+            return template
+        return template.replace("{printer_id}", str(printer_id))
+
+    async def list_files(
+        self, *, path: str = "", printer_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """One folder of the file manager, folders first then files by name."""
+        params: dict[str, Any] = {}
+        if path and path != "/":
+            # Instances differ on what they call the folder; send the common ones.
+            params = {"path": path, "dir": path, "folder": path}
+        data = await self._call("GET", self.files_path(printer_id), params=params)
+        rows = [parse_file_entry(row, parent=path) for row in _as_list(data)]
+        rows = [row for row in rows if row["name"]]
+        rows.sort(key=lambda row: (row["kind"] != "folder", row["name"].lower()))
+        return rows
+
+    async def file_tree(
+        self,
+        *,
+        printer_id: int | None = None,
+        max_nodes: int = 4000,
+        max_depth: int = 8,
+    ) -> dict[str, Any]:
+        """The file manager's whole structure, flattened to a list of nodes.
+
+        The point is to bring the *structure*, not a heap of filenames: every
+        node carries its own path and its parent's, so the picker can redraw the
+        same folders the operator sees in Bambuddy.
+
+        Walked breadth-first so that a wide, shallow library is complete before
+        a deep corner of it is explored, and capped on both nodes and depth —
+        a file manager rooted at a filesystem could otherwise be unbounded. An
+        instance that nests `children` inline is handled without extra calls.
+
+        Paths already seen are never re-walked, so a folder that links to its
+        own parent cannot spin.
+        """
+        root: list[dict[str, Any]] = []
+        nodes: dict[str, dict[str, Any]] = {}
+        truncated = False
+
+        def take(rows: list[dict[str, Any]], parent: str, depth: int) -> list[dict[str, Any]]:
+            """Record a folder's rows; hand back the folders worth descending."""
+            nonlocal truncated
+            descend: list[dict[str, Any]] = []
+            for row in rows:
+                if row["path"] in nodes:
+                    continue
+                if len(nodes) >= max_nodes:
+                    truncated = True
+                    break
+                children = row.pop("children", None)
+                node = {**row, "parent": parent or "/", "depth": depth}
+                nodes[node["path"]] = node
+                if node["kind"] != "folder":
+                    continue
+                if isinstance(children, list):
+                    take(
+                        [parse_file_entry(child, parent=node["path"]) for child in children
+                         if isinstance(child, dict)],
+                        node["path"],
+                        depth + 1,
+                    )
+                elif depth + 1 < max_depth:
+                    descend.append(node)
+                else:
+                    truncated = True
+            return descend
+
+        root = take(await self.list_files(printer_id=printer_id), "", 0)
+        queue = list(root)
+        while queue:
+            folder = queue.pop(0)
+            if len(nodes) >= max_nodes:
+                truncated = True
+                break
+            try:
+                rows = await self.list_files(path=folder["path"], printer_id=printer_id)
+            except IntegrationError:
+                # One unreadable folder is not a reason to have no file manager.
+                # It stays in the tree, empty, rather than vanishing from it.
+                folder["unreadable"] = True
+                continue
+            queue.extend(take(rows, folder["path"], folder["depth"] + 1))
+
+        listing = sorted(
+            nodes.values(),
+            key=lambda node: (node["path"].count("/"), node["path"].lower()),
+        )
+        return {
+            "files": listing,
+            "truncated": truncated,
+            "printable": sum(1 for node in listing if node["printable"]),
+            "folders": sum(1 for node in listing if node["kind"] == "folder"),
+        }
+
     async def list_printer_models(self) -> list[dict[str, Any]]:
         """The distinct models this farm has, with how many of each.
 
@@ -484,12 +723,20 @@ class BambuddyClient:
     def build_queue_body(
         self,
         *,
-        archive_id: int,
+        archive_id: int | None,
         plate_number: int | None,
         printer_id: int | None,
         print_options: dict[str, Any] | None,
+        file_path: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {self.fields["archive_id"]: archive_id}
+        body: dict[str, Any] = {}
+        if archive_id is not None:
+            body[self.fields["archive_id"]] = archive_id
+        # Sent alongside the id when there is one: an instance that only knows
+        # about paths still gets a path, and one that only knows about ids
+        # ignores a field it does not read.
+        if file_path:
+            body[self.fields["file_path"]] = file_path
         if plate_number is not None:
             body[self.fields["plate_number"]] = plate_number
         # Omitting printer_id lets Bambuddy dispatch to whichever printer is free.
@@ -502,16 +749,18 @@ class BambuddyClient:
     async def enqueue(
         self,
         *,
-        archive_id: int,
+        archive_id: int | None = None,
         plate_number: int | None = None,
         printer_id: int | None = None,
         print_options: dict[str, Any] | None = None,
+        file_path: str | None = None,
     ) -> dict[str, Any]:
         body = self.build_queue_body(
             archive_id=archive_id,
             plate_number=plate_number,
             printer_id=printer_id,
             print_options=print_options,
+            file_path=file_path,
         )
         data = await self._call("POST", self.paths["queue"], json=body)
         item = parse_queue_item(data if isinstance(data, dict) else {})

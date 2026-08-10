@@ -8,7 +8,7 @@ between them and the single pane of glass over the whole fulfilment flow.
 | ------------------ | ------------------------------------------- | ------------------------------- |
 | Etsy               | Sales channel — source of orders            | Read only (poll receipts)       |
 | QuickBooks Online  | Inventory system of record — quantity on hand | Read for orders; writes only a made-items sheet you post |
-| Bambuddy           | Print farm manager — queue + archived 3MFs  | Read/write (queue, track)       |
+| Bambuddy           | Print farm manager — queue, archives, file manager | Read/write (queue, track) |
 | ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, buy labels) |
 
 PrintFlow itself owns the order state machine, the flow board, the bundle
@@ -228,11 +228,30 @@ Two ways back from a wrong match:
 
 A printed product needs two answers: which file, and what can print it.
 
-**The file** comes off Bambuddy. **Browse Bambuddy archives** lists every
-archived 3MF the instance has — not the first page of them — with a search box
-that filters the list you are already looking at. If the instance holds more
-than PrintFlow reads in one pass, the picker says so rather than quietly
+**The file** comes off Bambuddy. **Browse Bambuddy files** opens one picker with
+three places to look, chosen at the top:
+
+* **Bambuddy library (archives)** — every archived 3MF the instance has, not the
+  first page of them, as a flat searchable list.
+* **File manager (all printers)** — Bambuddy's own file manager, with its folder
+  structure intact: folders open, breadcrumbs walk back up, and searching cuts
+  across the whole tree and shows full paths. A shop that has sorted its files
+  into folders has already said what is what, and flattening that into a list of
+  filenames would throw the work away.
+* **One printer** — that machine's own storage. See below; this is the case
+  where picking the file also picks the printer.
+
+Only what a printer can take is offered — 3MF and GCODE — and the count at the
+bottom says how many other files were in the folder, so a picker with nothing in
+it is never mistaken for an empty folder. If the file manager is bigger than
+PrintFlow walks in one pass, or a folder cannot be read, it says so rather than
 showing a short list and letting you conclude the file is missing.
+
+The file manager endpoints are discovered from the instance's own OpenAPI
+document, like the others, and can be corrected under **Settings → Bambuddy →
+Advanced** — including the per-printer one, where `{printer_id}` is substituted.
+An instance with one shared library can point both at the same path; the printer
+then only decides where the plate goes.
 
 **The machines** are chosen by *model*, and you can tick more than one. A shop
 with four printers usually has more than one tool for a given job, and pinning a
@@ -258,10 +277,25 @@ A variation can name its own models, which is how a taller version of the same
 part ends up restricted to the bigger machine while the standard one still runs
 anywhere. Left blank, it uses the product's.
 
-Upgrading replaces the old single **preferred printer ID** with this. There is
-no way to translate one into the other — which model a printer id is belongs to
-Bambuddy, not to PrintFlow's database — so existing mappings come through with
-nothing ticked, which is the behaviour they already had.
+### Picking a printer, then a file on it
+
+Choosing a printer in the picker browses *that machine's* file manager, and the
+models disappear — there is nothing left for them to decide. A file on one
+printer's storage does not exist on any other, so the machine is settled by the
+same act that settled the file, and dispatch sends the plate there without
+consulting the model rules at all. Even a mapping whose models say something
+else goes to the machine the file is on, because that is the only place it can
+be printed.
+
+Point the same mapping back at the library or the shared file manager and the
+models come back with it.
+
+Upgrading replaces the old single **preferred printer ID** with the models
+above. There is no way to translate one into the other — which model a printer
+id is belongs to Bambuddy, not to PrintFlow's database — so existing mappings
+come through with nothing ticked, which is the behaviour they already had. A
+mapping now needs an archive id *or* a file-manager path rather than an id
+outright, since a file manager entry may have no id at all.
 
 ## Bills of materials, from QuickBooks
 
@@ -677,7 +711,7 @@ an audit row**.
 - **Ready to Ship** — every line ready. The Create Label button goes live.
 - **Shipped** — label bought, tracking shown.
 
-Other screens: **Products** (CRUD, QBO item picker, Bambuddy archive browser,
+Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
 printer models, BOM editor), **Print Queue** (every plate across all orders,
 re-queue/cancel),
 **Sync Log** (background runs + audit trail), **Settings**.

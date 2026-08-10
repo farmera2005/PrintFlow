@@ -96,6 +96,7 @@ def _job(job: PrintJob) -> dict[str, Any]:
         "status": job.status,
         "bambuddy_queue_id": job.bambuddy_queue_id,
         "bambuddy_archive_id": job.bambuddy_archive_id,
+        "bambuddy_file_path": job.bambuddy_file_path,
         "plate_number": job.plate_number,
         "printer_id": job.printer_id,
         "units_expected": job.units_expected,

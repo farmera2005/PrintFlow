@@ -367,6 +367,8 @@ class ProductVariation(Base):
     # means "use the product's print mapping".
     bambuddy_archive_id: Mapped[int | None] = mapped_column(Integer)
     bambuddy_archive_name: Mapped[str | None] = mapped_column(Text)
+    bambuddy_file_path: Mapped[str | None] = mapped_column(Text)
+    bambuddy_printer_id: Mapped[int | None] = mapped_column(Integer)
     plate_number: Mapped[int | None] = mapped_column(Integer)
     units_per_plate: Mapped[int | None] = mapped_column(Integer)
     # Empty means "whatever the product's mapping says".
@@ -485,8 +487,18 @@ class PrintMapping(Base):
     product_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("products.id", ondelete="CASCADE"), unique=True, nullable=False
     )
-    bambuddy_archive_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Two ways to say the same thing, because instances differ on which they
+    # accept: the archive's id, and its path in the file manager. A file picked
+    # out of the file manager has a path and may have no id at all, so neither
+    # can be required — but one of them has to be there, which the check
+    # constraint enforces.
+    bambuddy_archive_id: Mapped[int | None] = mapped_column(Integer)
     bambuddy_archive_name: Mapped[str | None] = mapped_column(Text)
+    bambuddy_file_path: Mapped[str | None] = mapped_column(Text)
+    # The machine this file was picked from, when it was picked from one
+    # machine's file manager rather than the farm-wide library. It is where the
+    # plate goes: a file that lives on one printer cannot be printed elsewhere.
+    bambuddy_printer_id: Mapped[int | None] = mapped_column(Integer)
     plate_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     units_per_plate: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     print_options: Mapped[dict[str, Any]] = mapped_column(
@@ -505,6 +517,10 @@ class PrintMapping(Base):
     __table_args__ = (
         CheckConstraint("units_per_plate > 0", name="ck_mapping_units_per_plate_positive"),
         CheckConstraint("plate_number > 0", name="ck_mapping_plate_positive"),
+        CheckConstraint(
+            "bambuddy_archive_id IS NOT NULL OR bambuddy_file_path IS NOT NULL",
+            name="ck_mapping_has_a_source",
+        ),
     )
 
     product: Mapped[Product] = relationship(back_populates="print_mapping")
@@ -643,9 +659,13 @@ class PrintJob(Base):
         ForeignKey("order_lines.id", ondelete="CASCADE"), nullable=False, index=True
     )
     bambuddy_queue_id: Mapped[int | None] = mapped_column(Integer)
-    bambuddy_archive_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # What to print, copied off the mapping when the plate was planned. Either
+    # of these identifies the file; see PrintMapping for why there are two.
+    bambuddy_archive_id: Mapped[int | None] = mapped_column(Integer)
+    bambuddy_file_path: Mapped[str | None] = mapped_column(Text)
     plate_number: Mapped[int | None] = mapped_column(Integer)
-    # The machine this actually went to, chosen when it was sent.
+    # The machine this actually went to, chosen when it was sent — or fixed in
+    # advance, when the file only exists on one printer.
     printer_id: Mapped[int | None] = mapped_column(Integer)
     # The models that could have taken it, recorded when the plate was planned.
     # Kept on the job so dispatch does not have to re-derive it, and so a job

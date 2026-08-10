@@ -124,8 +124,12 @@ export interface BomEntry {
 
 export interface PrintMapping {
   id: string
-  bambuddy_archive_id: number
+  /** Either of these identifies the file; a file-manager pick may have no id. */
+  bambuddy_archive_id: number | null
   bambuddy_archive_name: string | null
+  bambuddy_file_path: string | null
+  /** Set when the file lives on one machine — that machine gets the plate. */
+  bambuddy_printer_id: number | null
   plate_number: number
   units_per_plate: number
   print_options: Record<string, unknown>
@@ -208,6 +212,8 @@ export interface ProductVariation {
   etsy_product_id: number | null
   bambuddy_archive_id: number | null
   bambuddy_archive_name: string | null
+  bambuddy_file_path: string | null
+  bambuddy_printer_id: number | null
   plate_number: number | null
   units_per_plate: number | null
   /** Printer models that can take this plate. Empty falls back to the product's. */
@@ -252,6 +258,32 @@ export interface BambuddyPrinter {
   model: string | null
   status: string | null
   online: boolean | null
+}
+
+/** One entry in Bambuddy's file manager, folder or file. */
+export interface BambuddyFile {
+  name: string
+  path: string
+  kind: 'folder' | 'file'
+  size: number | null
+  modified: string | null
+  archive_id: number | null
+  /** False for folders, and for files that are not something a printer takes. */
+  printable: boolean
+  /** The folder this sits in, as a path. "/" at the top. */
+  parent: string
+  depth: number
+  /** A folder Bambuddy would not list. It is shown, empty, rather than dropped. */
+  unreadable?: boolean
+}
+
+export interface BambuddyFileTree {
+  printer_id: number | null
+  files: BambuddyFile[]
+  /** The walk hit its cap, so this is not the whole file manager. */
+  truncated: boolean
+  printable: number
+  folders: number
 }
 
 /** One machine type on the farm, and how many of it there are. */

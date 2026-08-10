@@ -697,10 +697,23 @@ interface BambuddyEndpoints {
   current: Record<string, string>
 }
 
-const PATH_ROLES: { key: string; label: string; hint: string }[] = [
+const PATH_ROLES: {
+  key: string
+  label: string
+  hint: string
+  /** Carries {printer_id}, so it is never one of the listable collections. */
+  templated?: boolean
+}[] = [
   { key: 'printers', label: 'Printers', hint: 'Listed during setup and shown on the queue.' },
   { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a product to a print file.' },
   { key: 'queue', label: 'Queue', hint: 'Read for job status, and posted to when a plate is sent.' },
+  { key: 'files', label: 'File manager', hint: 'The folder tree the file picker walks.' },
+  {
+    key: 'printer_files',
+    label: "One printer's files",
+    hint: 'Files on a single machine. {printer_id} is substituted.',
+    templated: true,
+  },
 ]
 
 export function BambuddyPanel({ status, onChange }: PanelProps) {
@@ -828,8 +841,16 @@ export function BambuddyPanel({ status, onChange }: PanelProps) {
             const current =
               pathOverrides[role.key] ?? endpoints?.current?.[role.key] ?? ''
             return (
-              <Field key={role.key} label={`${role.label} endpoint`} hint={role.hint}>
-                {endpoints?.collections.length ? (
+              <Field
+                key={role.key}
+                label={`${role.label} endpoint`}
+                hint={
+                  suggestion && role.templated
+                    ? `${role.hint} This instance suggests ${suggestion}.`
+                    : role.hint
+                }
+              >
+                {endpoints?.collections.length && !role.templated ? (
                   <select
                     className={inputClass}
                     value={current}

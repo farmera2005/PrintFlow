@@ -87,11 +87,21 @@ def automatch(
 class PrintPlan:
     """Where a line's prints come from, once the variation has had its say."""
 
-    bambuddy_archive_id: int
+    # One of these two identifies the file. Both can be set — an archive that is
+    # also a file-manager entry — and Bambuddy takes whichever it understands.
+    bambuddy_archive_id: int | None
+    bambuddy_file_path: str | None
     plate_number: int
     units_per_plate: int
     # Which printer models can take it. Empty means any of them.
     printer_models: tuple[str, ...]
+    # The one machine it has to go to, when the file lives on that machine
+    # rather than in the farm's shared library. None leaves the choice open.
+    printer_id: int | None
+
+
+def _names_a_file(row: PrintMapping | ProductVariation) -> bool:
+    return row.bambuddy_archive_id is not None or bool(row.bambuddy_file_path)
 
 
 def print_plan(
@@ -99,21 +109,27 @@ def print_plan(
 ) -> PrintPlan | None:
     """The product's mapping, with anything the variation overrides applied.
 
-    A variation that names its own archive replaces the file outright; without
-    one it can still adjust the plate, the yield or which models can take it.
+    A variation that names its own file replaces the file outright — and takes
+    its printer with it, because a file picked off one machine's file manager
+    cannot be printed anywhere else. Without a file of its own it can still
+    adjust the plate, the yield or which models can take it.
+
     Returns None when there is nothing to print from at all.
     """
-    if variation is not None and variation.bambuddy_archive_id is not None:
+    if variation is not None and _names_a_file(variation):
         return PrintPlan(
             bambuddy_archive_id=variation.bambuddy_archive_id,
+            bambuddy_file_path=variation.bambuddy_file_path,
             plate_number=variation.plate_number or 1,
             units_per_plate=variation.units_per_plate or 1,
             printer_models=tuple(variation.printer_models or ()),
+            printer_id=variation.bambuddy_printer_id,
         )
     if mapping is None:
         return None
     return PrintPlan(
         bambuddy_archive_id=mapping.bambuddy_archive_id,
+        bambuddy_file_path=mapping.bambuddy_file_path,
         plate_number=(
             variation.plate_number
             if variation is not None and variation.plate_number
@@ -129,6 +145,7 @@ def print_plan(
             if variation is not None and variation.printer_models
             else (mapping.printer_models or ())
         ),
+        printer_id=mapping.bambuddy_printer_id,
     )
 
 

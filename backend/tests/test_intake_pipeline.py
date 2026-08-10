@@ -57,11 +57,20 @@ class FakeBambuddy:
         self.next_id = 1000
         self.queue: list[dict] = []
 
-    async def enqueue(self, *, archive_id, plate_number=None, printer_id=None, print_options=None):
+    async def enqueue(
+        self,
+        *,
+        archive_id=None,
+        plate_number=None,
+        printer_id=None,
+        print_options=None,
+        file_path=None,
+    ):
         self.next_id += 1
         self.enqueued.append(
             {
                 "archive_id": archive_id,
+                "file_path": file_path,
                 "plate_number": plate_number,
                 "printer_id": printer_id,
                 "print_options": print_options,

@@ -115,6 +115,7 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
             if job.status == JOB_PENDING
             and (
                 job.bambuddy_archive_id != plan.bambuddy_archive_id
+                or job.bambuddy_file_path != plan.bambuddy_file_path
                 or job.plate_number != plan.plate_number
             )
         ]
@@ -129,7 +130,9 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
             job = PrintJob(
                 order_line_id=line.id,
                 bambuddy_archive_id=plan.bambuddy_archive_id,
+                bambuddy_file_path=plan.bambuddy_file_path,
                 plate_number=plan.plate_number,
+                printer_id=plan.printer_id,
                 printer_models=list(plan.printer_models),
                 units_expected=plan.units_per_plate,
                 status=JOB_PENDING,
@@ -232,7 +235,7 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
     # dispatch.
     printers: list[dict] | None = None
     placed: dict[int, int] = {}
-    if any(job.printer_models for job in pending):
+    if any(job.printer_models and job.printer_id is None for job in pending):
         try:
             printers = await client.list_printers()
         except IntegrationError as exc:
@@ -242,8 +245,11 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
     for job in pending:
         mapping = mappings.get(job.id)
 
+        # A job that already names a machine keeps it: the file was picked out
+        # of that machine's file manager and does not exist anywhere else, so
+        # there is no choice left to make.
         printer_id = job.printer_id
-        if job.printer_models:
+        if job.printer_models and printer_id is None:
             printer_id = choose_printer(job.printer_models, printers or [], placed)
             if printer_id is None:
                 # Sending it anyway would put the plate on a machine that cannot
@@ -262,6 +268,7 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
         try:
             item = await client.enqueue(
                 archive_id=job.bambuddy_archive_id,
+                file_path=job.bambuddy_file_path,
                 plate_number=job.plate_number,
                 printer_id=printer_id,
                 print_options=(mapping.print_options if mapping else None) or {},
@@ -436,6 +443,7 @@ async def open_jobs_overview(session: AsyncSession) -> list[dict]:
                 "status": job.status,
                 "bambuddy_queue_id": job.bambuddy_queue_id,
                 "bambuddy_archive_id": job.bambuddy_archive_id,
+                "bambuddy_file_path": job.bambuddy_file_path,
                 "plate_number": job.plate_number,
                 "printer_id": job.printer_id,
                 "units_expected": job.units_expected,

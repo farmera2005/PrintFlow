@@ -923,6 +923,29 @@ async def bambuddy_archives(
     return {"archives": archives, "truncated": truncated}
 
 
+@router.get("/bambuddy/files")
+async def bambuddy_files(
+    printer_id: int | None = None,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Bambuddy's file manager, folders and all.
+
+    The whole structure in one call rather than a folder at a time: the picker
+    needs to search across it, and a shop's library is a few thousand entries at
+    most. `printer_id` reads one machine's files instead of the farm's.
+    """
+    client = await _bambuddy_client(session)
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Reading the file manager"):
+            tree = await client.file_tree(printer_id=printer_id)
+    except IntegrationError as exc:
+        await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
+        await session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"printer_id": printer_id, **tree}
+
+
 @router.get("/bambuddy/printer-models")
 async def bambuddy_printer_models(
     _: User = Depends(require_user),

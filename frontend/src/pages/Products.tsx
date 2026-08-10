@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import type {
   BambuddyArchive,
+  BambuddyFile,
+  BambuddyFileTree,
+  BambuddyPrinter,
   BambuddyPrinterModel,
   BomEntry,
   Catalog,
@@ -501,18 +504,23 @@ function ProductEditor({
       ) : null}
 
       {archivePickerOpen && product ? (
-        <ArchivePicker
-          models={product.print_mapping?.printer_models ?? []}
+        <PrintFilePicker
+          choice={{
+            printer_id: product.print_mapping?.bambuddy_printer_id ?? null,
+            printer_models: product.print_mapping?.printer_models ?? [],
+          }}
           onClose={() => setArchivePickerOpen(false)}
-          onPick={async (archive, printerModels) => {
+          onPick={async (picked) => {
             setArchivePickerOpen(false)
             const saved = await api.put<Product>(`/api/products/${product.id}/print-mapping`, {
-              bambuddy_archive_id: archive.id,
-              bambuddy_archive_name: archive.name,
+              bambuddy_archive_id: picked.archive_id,
+              bambuddy_archive_name: picked.name,
+              bambuddy_file_path: picked.file_path,
+              bambuddy_printer_id: picked.printer_id,
               plate_number: product.print_mapping?.plate_number ?? 1,
               units_per_plate: product.print_mapping?.units_per_plate ?? 1,
               print_options: product.print_mapping?.print_options ?? {},
-              printer_models: printerModels,
+              printer_models: picked.printer_models,
             })
             await onSaved(saved)
           }}
@@ -723,6 +731,8 @@ function PrintMappingEditor({
       const saved = await api.put<Product>(`/api/products/${product.id}/print-mapping`, {
         bambuddy_archive_id: mapping?.bambuddy_archive_id,
         bambuddy_archive_name: mapping?.bambuddy_archive_name,
+        bambuddy_file_path: mapping?.bambuddy_file_path,
+        bambuddy_printer_id: mapping?.bambuddy_printer_id,
         plate_number: plate,
         units_per_plate: units,
         print_options: options.trim() ? JSON.parse(options) : {},
@@ -745,26 +755,35 @@ function PrintMappingEditor({
       {!mapping ? (
         <div className="mt-2 space-y-2">
           <p className="text-sm text-red-800">
-            No archive attached — orders needing this product cannot be queued.
+            No file attached — orders needing this product cannot be queued.
           </p>
           <Button variant="primary" size="sm" onClick={onOpenPicker}>
-            Browse Bambuddy archives
+            Browse Bambuddy files
           </Button>
         </div>
       ) : (
         <div className="mt-2 space-y-3">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-ink-700">
-              {mapping.bambuddy_archive_name ?? `Archive ${mapping.bambuddy_archive_id}`}
+              {mapping.bambuddy_archive_name ??
+                mapping.bambuddy_file_path ??
+                `Archive ${mapping.bambuddy_archive_id}`}
             </span>
-            <Badge>id {mapping.bambuddy_archive_id}</Badge>
+            {mapping.bambuddy_archive_id !== null ? (
+              <Badge>id {mapping.bambuddy_archive_id}</Badge>
+            ) : null}
             <Button size="sm" onClick={onOpenPicker}>
-              Change archive
+              Change file
             </Button>
             <Button size="sm" variant="ghost" onClick={clear}>
               Remove mapping
             </Button>
           </div>
+          {mapping.bambuddy_file_path ? (
+            <p className="-mt-1 truncate font-mono text-[11px] text-ink-400">
+              {mapping.bambuddy_file_path}
+            </p>
+          ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Plate number">
               <input
@@ -785,7 +804,14 @@ function PrintMappingEditor({
               />
             </Field>
           </div>
-          <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
+          {mapping.bambuddy_printer_id !== null ? (
+            <p className="text-xs text-ink-500">
+              This file lives on printer {mapping.bambuddy_printer_id}, so that is
+              where the plate goes. Change the file to print it elsewhere.
+            </p>
+          ) : (
+            <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
+          )}
           <Field label="Print options (JSON)" hint="Merged into the Bambuddy queue request.">
             <input
               className={inputClass}
@@ -954,44 +980,365 @@ function PrinterModelPicker({
   )
 }
 
-/** Every archived print file Bambuddy has, so one can be picked off a list.
+/** What picking a print file settles: which file, and where it prints. */
+export interface FileChoice {
+  archive_id: number | null
+  file_path: string | null
+  name: string
+  /** Set when the file came off one machine — that machine gets the plate. */
+  printer_id: number | null
+  printer_models: string[]
+}
+
+/** Where the file is being looked for. */
+type FileSource =
+  | { kind: 'library' }
+  | { kind: 'files' }
+  | { kind: 'printer'; id: number; label: string }
+
+const sourceKey = (source: FileSource) =>
+  source.kind === 'printer' ? `printer:${source.id}` : source.kind
+
+function folderOf(path: string): string {
+  const cut = path.lastIndexOf('/')
+  return cut <= 0 ? '/' : path.slice(0, cut)
+}
+
+function humanSize(bytes: number | null): string | null {
+  if (bytes === null || bytes === undefined || bytes < 0) return null
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+}
+
+/** Bambuddy's file manager, folders and all, plus the flat archive library.
  *
- * The whole catalogue is fetched once and searched here rather than a page at a
- * time: a shop's archive is a few hundred files at most, and typing should not
- * cost a round trip. `truncated` says Bambuddy had more than the page cap could
- * walk, which is worth saying out loud instead of quietly showing a short list.
+ * Two things are being chosen here and they are not independent, which is why
+ * they share a screen: *which printer* and *which file*. Pick a machine and you
+ * are browsing that machine's file manager, and the plate can only go there —
+ * a file on one printer's storage does not exist on another. Pick the library
+ * or the shared file manager and any capable machine will do, so the printer
+ * models come back as the thing to narrow instead.
+ *
+ * The folder structure is Bambuddy's own, not a flattened list of names: a shop
+ * that has sorted its files into folders has already done the work of saying
+ * what is what, and throwing that away would make the picker harder to use the
+ * more organised you are. Searching cuts across the whole tree and shows full
+ * paths, because that is the one time folders get in the way.
  */
-function ArchivePicker({
-  models,
+function PrintFilePicker({
+  choice,
   onClose,
   onPick,
 }: {
-  models: string[]
+  choice: Pick<FileChoice, 'printer_id' | 'printer_models'>
   onClose: () => void
-  onPick: (archive: BambuddyArchive, printerModels: string[]) => void | Promise<void>
+  onPick: (picked: FileChoice) => void | Promise<void>
 }) {
+  const [printers, setPrinters] = useState<BambuddyPrinter[]>([])
+  const [source, setSource] = useState<FileSource>(
+    choice.printer_id !== null
+      ? { kind: 'printer', id: choice.printer_id, label: `Printer ${choice.printer_id}` }
+      : { kind: 'library' },
+  )
+  const [printerModels, setPrinterModels] = useState<string[]>(choice.printer_models)
   const [query, setQuery] = useState('')
+  const [cwd, setCwd] = useState('/')
+
   const [archives, setArchives] = useState<BambuddyArchive[]>([])
-  const [truncated, setTruncated] = useState(false)
-  const [printerModels, setPrinterModels] = useState<string[]>(models)
+  const [archivesTruncated, setArchivesTruncated] = useState(false)
+  const [tree, setTree] = useState<BambuddyFileTree | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
 
   useEffect(() => {
     api
-      .get<{ archives: BambuddyArchive[]; truncated: boolean }>(
-        '/api/integrations/bambuddy/archives',
-      )
-      .then((data) => {
-        setArchives(data.archives.filter((a) => a.id !== null))
-        setTruncated(data.truncated)
-        setError(null)
-      })
-      .catch((err) => setError(errorMessage(err)))
-      .finally(() => setBusy(false))
+      .get<{ printers: BambuddyPrinter[] }>('/api/integrations/bambuddy/printers')
+      .then((data) => setPrinters(data.printers.filter((p) => p.id !== null)))
+      .catch(() => undefined)
   }, [])
 
+  // One load per source. Switching back to one already read still refetches,
+  // which costs a call and buys a file manager that is not stale by an hour.
+  const key = sourceKey(source)
+  useEffect(() => {
+    let live = true
+    setBusy(true)
+    setError(null)
+    setCwd('/')
+    setTree(null)
+    const request =
+      source.kind === 'library'
+        ? api
+            .get<{ archives: BambuddyArchive[]; truncated: boolean }>(
+              '/api/integrations/bambuddy/archives',
+            )
+            .then((data) => {
+              if (!live) return
+              setArchives(data.archives.filter((a) => a.id !== null))
+              setArchivesTruncated(data.truncated)
+            })
+        : api
+            .get<BambuddyFileTree>(
+              '/api/integrations/bambuddy/files' +
+                (source.kind === 'printer' ? `?printer_id=${source.id}` : ''),
+            )
+            .then((data) => {
+              if (live) setTree(data)
+            })
+    request
+      .catch((err) => {
+        if (live) setError(errorMessage(err))
+      })
+      .finally(() => {
+        if (live) setBusy(false)
+      })
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+
+  const pickSource = (value: string) => {
+    setQuery('')
+    if (value === 'library') return setSource({ kind: 'library' })
+    if (value === 'files') return setSource({ kind: 'files' })
+    const printer = printers.find((p) => String(p.id) === value)
+    if (printer)
+      setSource({
+        kind: 'printer',
+        id: Number(printer.id),
+        label: printer.name ?? `Printer ${printer.id}`,
+      })
+  }
+
   const needle = query.trim().toLowerCase()
+  const printerId = source.kind === 'printer' ? source.id : null
+
+  const take = (file: BambuddyFile) =>
+    onPick({
+      archive_id: file.archive_id,
+      file_path: file.path,
+      name: file.name,
+      printer_id: printerId,
+      printer_models: printerId === null ? printerModels : [],
+    })
+
+  const nodes = tree?.files ?? []
+  const here = nodes.filter((file) => file.parent === cwd)
+  const matches = needle
+    ? nodes.filter((file) => file.printable && file.path.toLowerCase().includes(needle))
+    : []
+  const hidden = here.filter((file) => file.kind === 'file' && !file.printable).length
+  const crumbs = cwd === '/' ? [] : cwd.split('/').filter(Boolean)
+
+  return (
+    <Modal open title="Pick a print file" onClose={onClose} wide>
+      <Field
+        label="Where the file is"
+        hint={
+          printerId !== null
+            ? "This machine's own files — the plate goes to this printer."
+            : 'Shared across the farm, so any capable machine can take the plate.'
+        }
+      >
+        <select
+          className={inputClass}
+          value={source.kind === 'printer' ? String(source.id) : source.kind}
+          onChange={(e) => pickSource(e.target.value)}
+        >
+          <option value="library">Bambuddy library (archives)</option>
+          <option value="files">File manager (all printers)</option>
+          {printers.length ? (
+            <optgroup label="One printer's files">
+              {printers.map((printer) => (
+                <option key={printer.id} value={String(printer.id)}>
+                  {printer.name ?? `Printer ${printer.id}`}
+                  {printer.model ? ` — ${printer.model}` : ''}
+                  {printer.online ? '' : ' (offline)'}
+                </option>
+              ))}
+            </optgroup>
+          ) : null}
+        </select>
+      </Field>
+
+      {printerId === null ? (
+        <div className="mt-3">
+          <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
+        </div>
+      ) : null}
+
+      <input
+        className={cx(inputClass, 'mt-3')}
+        placeholder={
+          source.kind === 'library' ? 'Search archived 3MF files…' : 'Search every folder…'
+        }
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      {error ? (
+        <div className="mt-3">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+
+      {source.kind === 'library' ? (
+        <ArchiveList
+          archives={archives}
+          truncated={archivesTruncated}
+          busy={busy}
+          needle={needle}
+          onPick={(archive) =>
+            onPick({
+              archive_id: archive.id,
+              file_path: null,
+              name: archive.name ?? `Archive ${archive.id}`,
+              printer_id: null,
+              printer_models: printerModels,
+            })
+          }
+        />
+      ) : (
+        <>
+          {tree?.truncated ? (
+            <div className="mt-3">
+              <Alert tone="warning">
+                This file manager is bigger than PrintFlow walks in one go, so some
+                folders are missing. Narrow it in Bambuddy, or pick from the library.
+              </Alert>
+            </div>
+          ) : null}
+
+          {!needle ? (
+            <div className="mt-3 flex flex-wrap items-center gap-1 text-xs text-ink-500">
+              <button
+                type="button"
+                className="rounded px-1.5 py-0.5 hover:bg-ink-100"
+                onClick={() => setCwd('/')}
+              >
+                {source.kind === 'printer' ? source.label : 'File manager'}
+              </button>
+              {crumbs.map((crumb, index) => (
+                <span key={crumb + index} className="flex items-center gap-1">
+                  <span className="text-ink-300">/</span>
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-0.5 text-ink-700 hover:bg-ink-100"
+                    onClick={() => setCwd('/' + crumbs.slice(0, index + 1).join('/'))}
+                  >
+                    {crumb}
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="mt-2 max-h-80 space-y-0.5 overflow-y-auto">
+            {busy ? <Spinner /> : null}
+            {!busy && needle && matches.length === 0 ? (
+              <p className="py-4 text-center text-sm text-ink-500">
+                No print file anywhere in here matches that.
+              </p>
+            ) : null}
+            {!busy && !needle && here.length === 0 ? (
+              <p className="py-4 text-center text-sm text-ink-500">
+                {nodes.length ? 'This folder is empty.' : 'Bambuddy listed no files.'}
+              </p>
+            ) : null}
+
+            {needle
+              ? matches.map((file) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    onClick={() => take(file)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
+                  >
+                    <span className="text-ink-400">▤</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-ink-800">{file.name}</span>
+                      <span className="block truncate font-mono text-[11px] text-ink-400">
+                        {folderOf(file.path)}
+                      </span>
+                    </span>
+                    {humanSize(file.size) ? <Badge>{humanSize(file.size)}</Badge> : null}
+                  </button>
+                ))
+              : here.map((file) =>
+                  file.kind === 'folder' ? (
+                    <button
+                      key={file.path}
+                      type="button"
+                      onClick={() => setCwd(file.path)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
+                    >
+                      <span className="text-ink-400">▸</span>
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-800">
+                        {file.name}
+                      </span>
+                      {file.unreadable ? (
+                        <Badge className="bg-amber-100 text-amber-800 ring-amber-300">
+                          could not be read
+                        </Badge>
+                      ) : (
+                        <Badge>
+                          {nodes.filter((child) => child.parent === file.path).length} items
+                        </Badge>
+                      )}
+                    </button>
+                  ) : file.printable ? (
+                    <button
+                      key={file.path}
+                      type="button"
+                      onClick={() => take(file)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
+                    >
+                      <span className="text-ink-400">▤</span>
+                      <span className="min-w-0 flex-1 truncate text-sm text-ink-800">
+                        {file.name}
+                      </span>
+                      {humanSize(file.size) ? <Badge>{humanSize(file.size)}</Badge> : null}
+                    </button>
+                  ) : null,
+                )}
+          </div>
+
+          {!busy && tree ? (
+            <p className="mt-2 text-xs text-ink-500">
+              {tree.printable} print file{tree.printable === 1 ? '' : 's'} in{' '}
+              {tree.folders} folder{tree.folders === 1 ? '' : 's'}.
+              {hidden && !needle
+                ? ` ${hidden} other file${hidden === 1 ? ' here is' : 's here are'} not something a printer takes.`
+                : ''}
+            </p>
+          ) : null}
+        </>
+      )}
+    </Modal>
+  )
+}
+
+/** The flat archive library — the same list Bambuddy's own archives page shows. */
+function ArchiveList({
+  archives,
+  truncated,
+  busy,
+  needle,
+  onPick,
+}: {
+  archives: BambuddyArchive[]
+  truncated: boolean
+  busy: boolean
+  needle: string
+  onPick: (archive: BambuddyArchive) => void
+}) {
   const shown = needle
     ? archives.filter((archive) =>
         `${archive.name ?? ''} ${archive.id ?? ''}`.toLowerCase().includes(needle),
@@ -999,21 +1346,7 @@ function ArchivePicker({
     : archives
 
   return (
-    <Modal open title="Attach a Bambuddy archive" onClose={onClose}>
-      <input
-        className={inputClass}
-        placeholder="Search archived 3MF files…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-      <div className="mt-3">
-        <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
-      </div>
-      {error ? (
-        <div className="mt-3">
-          <Alert tone="error">{error}</Alert>
-        </div>
-      ) : null}
+    <>
       {truncated ? (
         <div className="mt-3">
           <Alert tone="warning">
@@ -1022,7 +1355,7 @@ function ArchivePicker({
           </Alert>
         </div>
       ) : null}
-      <div className="mt-3 max-h-72 space-y-1 overflow-y-auto">
+      <div className="mt-3 max-h-80 space-y-0.5 overflow-y-auto">
         {busy ? <Spinner /> : null}
         {!busy && shown.length === 0 ? (
           <p className="py-4 text-center text-sm text-ink-500">
@@ -1033,7 +1366,7 @@ function ArchivePicker({
           <button
             key={String(archive.id)}
             type="button"
-            onClick={() => onPick(archive, printerModels)}
+            onClick={() => onPick(archive)}
             className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
           >
             <span className="min-w-0 flex-1 truncate text-sm text-ink-800">
@@ -1051,7 +1384,7 @@ function ArchivePicker({
             : `${shown.length} of ${archives.length} archives.`}
         </p>
       ) : null}
-    </Modal>
+    </>
   )
 }
 
@@ -1440,6 +1773,8 @@ function VariationsEditor({
           {
             bambuddy_archive_id: body.bambuddy_archive_id,
             bambuddy_archive_name: body.bambuddy_archive_name,
+            bambuddy_file_path: body.bambuddy_file_path,
+            bambuddy_printer_id: body.bambuddy_printer_id,
             plate_number: body.plate_number,
             units_per_plate: body.units_per_plate,
             printer_models: body.printer_models ?? [],
@@ -1615,10 +1950,11 @@ function VariationsEditor({
               {product.fulfillment === 'printed' && !variation.variant_product_id ? (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-ink-500">Prints:</span>
-                  {variation.bambuddy_archive_id ? (
+                  {variation.bambuddy_archive_id || variation.bambuddy_file_path ? (
                     <>
                       <span className="text-ink-700">
                         {variation.bambuddy_archive_name ??
+                          variation.bambuddy_file_path ??
                           `archive ${variation.bambuddy_archive_id}`}
                         {variation.plate_number ? `, plate ${variation.plate_number}` : ''}
                       </span>
@@ -1630,6 +1966,8 @@ function VariationsEditor({
                           save(variation, {
                             bambuddy_archive_id: null,
                             bambuddy_archive_name: null,
+                            bambuddy_file_path: null,
+                            bambuddy_printer_id: null,
                             plate_number: null,
                             units_per_plate: null,
                             printer_models: [],
@@ -1647,9 +1985,11 @@ function VariationsEditor({
                         Change
                       </Button>
                       <span className="basis-full">
-                        {variation.printer_models?.length
-                          ? `On: ${variation.printer_models.join(', ')}`
-                          : "On: whatever the product's mapping says"}
+                        {variation.bambuddy_printer_id !== null
+                          ? `On: printer ${variation.bambuddy_printer_id}, where the file lives`
+                          : variation.printer_models?.length
+                            ? `On: ${variation.printer_models.join(', ')}`
+                            : "On: whatever the product's mapping says"}
                       </span>
                     </>
                   ) : (
@@ -1696,18 +2036,23 @@ function VariationsEditor({
       )}
 
       {picking && product.fulfillment === 'printed' ? (
-        <ArchivePicker
-          models={picking.printer_models ?? []}
+        <PrintFilePicker
+          choice={{
+            printer_id: picking.bambuddy_printer_id,
+            printer_models: picking.printer_models ?? [],
+          }}
           onClose={() => setPicking(null)}
-          onPick={async (archive, printerModels) => {
+          onPick={async (picked) => {
             const variation = picking
             setPicking(null)
             await save(variation, {
-              bambuddy_archive_id: archive.id,
-              bambuddy_archive_name: archive.name,
+              bambuddy_archive_id: picked.archive_id,
+              bambuddy_archive_name: picked.name,
+              bambuddy_file_path: picked.file_path,
+              bambuddy_printer_id: picked.printer_id,
               plate_number: variation.plate_number ?? 1,
               units_per_plate: variation.units_per_plate ?? 1,
-              printer_models: printerModels,
+              printer_models: picked.printer_models,
             })
           }}
         />

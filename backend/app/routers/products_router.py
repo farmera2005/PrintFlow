@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +55,8 @@ def _serialize(product: Product) -> dict[str, Any]:
                 "id": mapping.id,
                 "bambuddy_archive_id": mapping.bambuddy_archive_id,
                 "bambuddy_archive_name": mapping.bambuddy_archive_name,
+                "bambuddy_file_path": mapping.bambuddy_file_path,
+                "bambuddy_printer_id": mapping.bambuddy_printer_id,
                 "plate_number": mapping.plate_number,
                 "units_per_plate": mapping.units_per_plate,
                 "print_options": mapping.print_options,
@@ -98,6 +100,8 @@ def _serialize(product: Product) -> dict[str, Any]:
                 "etsy_product_id": variation.etsy_product_id,
                 "bambuddy_archive_id": variation.bambuddy_archive_id,
                 "bambuddy_archive_name": variation.bambuddy_archive_name,
+                "bambuddy_file_path": variation.bambuddy_file_path,
+                "bambuddy_printer_id": variation.bambuddy_printer_id,
                 "plate_number": variation.plate_number,
                 "units_per_plate": variation.units_per_plate,
                 "printer_models": variation.printer_models or [],
@@ -687,12 +691,23 @@ async def delete_bom_line(
 
 
 class PrintMappingRequest(BaseModel):
-    bambuddy_archive_id: int
+    bambuddy_archive_id: int | None = None
     bambuddy_archive_name: str | None = None
+    bambuddy_file_path: str | None = None
+    bambuddy_printer_id: int | None = None
     plate_number: int = Field(default=1, gt=0)
     units_per_plate: int = Field(default=1, gt=0)
     print_options: dict[str, Any] = Field(default_factory=dict)
     printer_models: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def _names_a_file(self) -> "PrintMappingRequest":
+        if self.bambuddy_archive_id is None and not (self.bambuddy_file_path or "").strip():
+            raise ValueError(
+                "A print mapping needs a file: either a Bambuddy archive id or a "
+                "path from the file manager."
+            )
+        return self
 
 
 @router.put("/{product_id}/print-mapping")
@@ -711,10 +726,17 @@ async def upsert_print_mapping(
     mapping = product.print_mapping or PrintMapping(product_id=product.id)
     mapping.bambuddy_archive_id = body.bambuddy_archive_id
     mapping.bambuddy_archive_name = body.bambuddy_archive_name
+    mapping.bambuddy_file_path = (body.bambuddy_file_path or "").strip() or None
+    mapping.bambuddy_printer_id = body.bambuddy_printer_id
     mapping.plate_number = body.plate_number
     mapping.units_per_plate = body.units_per_plate
     mapping.print_options = body.print_options
-    mapping.printer_models = _clean_models(body.printer_models)
+    # A file that lives on one machine is printed on that machine, so the models
+    # have nothing left to decide and keeping them would only read as a second,
+    # contradictory answer to the same question.
+    mapping.printer_models = (
+        [] if body.bambuddy_printer_id is not None else _clean_models(body.printer_models)
+    )
     session.add(mapping)
     await session.flush()
     await audit.record(
@@ -724,6 +746,8 @@ async def upsert_print_mapping(
         action="print_mapping_set",
         detail={
             "archive_id": body.bambuddy_archive_id,
+            "file_path": mapping.bambuddy_file_path,
+            "printer_id": body.bambuddy_printer_id,
             "plate_number": body.plate_number,
             "units_per_plate": body.units_per_plate,
         },
@@ -1240,6 +1264,8 @@ class VariationRequest(BaseModel):
 
     bambuddy_archive_id: int | None = None
     bambuddy_archive_name: str | None = None
+    bambuddy_file_path: str | None = None
+    bambuddy_printer_id: int | None = None
     plate_number: int | None = Field(default=None, gt=0)
     units_per_plate: int | None = Field(default=None, gt=0)
     printer_models: list[str] = Field(default_factory=list, max_length=50)
@@ -1262,9 +1288,13 @@ async def update_variation(
 
     variation.bambuddy_archive_id = body.bambuddy_archive_id
     variation.bambuddy_archive_name = body.bambuddy_archive_name
+    variation.bambuddy_file_path = (body.bambuddy_file_path or "").strip() or None
+    variation.bambuddy_printer_id = body.bambuddy_printer_id
     variation.plate_number = body.plate_number
     variation.units_per_plate = body.units_per_plate
-    variation.printer_models = _clean_models(body.printer_models)
+    variation.printer_models = (
+        [] if body.bambuddy_printer_id is not None else _clean_models(body.printer_models)
+    )
     variation.qbo_item_id = body.qbo_item_id
     variation.qbo_item_name = body.qbo_item_name
     variation.active = body.active
@@ -1275,7 +1305,12 @@ async def update_variation(
         entity_type="product",
         entity_id=product_id,
         action="variation_update",
-        detail={"variation": variation.label, "archive": body.bambuddy_archive_id},
+        detail={
+            "variation": variation.label,
+            "archive": body.bambuddy_archive_id,
+            "file_path": variation.bambuddy_file_path,
+            "printer_id": body.bambuddy_printer_id,
+        },
         actor=user.username,
     )
     await session.commit()
