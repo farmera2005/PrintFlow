@@ -139,7 +139,8 @@ def _mapping(**fields):
     fields.setdefault("bambuddy_archive_id", 10)
     fields.setdefault("plate_number", 1)
     fields.setdefault("units_per_plate", 4)
-    fields.setdefault("preferred_printer_id", None)
+    # No printer models: this plate can go on anything.
+    fields.setdefault("printer_models", [])
     return PrintMapping(**fields)
 
 

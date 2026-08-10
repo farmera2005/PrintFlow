@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import type {
   BambuddyArchive,
-  BambuddyPrinter,
+  BambuddyPrinterModel,
   BomEntry,
   Catalog,
   CatalogRow,
@@ -502,8 +502,9 @@ function ProductEditor({
 
       {archivePickerOpen && product ? (
         <ArchivePicker
+          models={product.print_mapping?.printer_models ?? []}
           onClose={() => setArchivePickerOpen(false)}
-          onPick={async (archive, printerId) => {
+          onPick={async (archive, printerModels) => {
             setArchivePickerOpen(false)
             const saved = await api.put<Product>(`/api/products/${product.id}/print-mapping`, {
               bambuddy_archive_id: archive.id,
@@ -511,7 +512,7 @@ function ProductEditor({
               plate_number: product.print_mapping?.plate_number ?? 1,
               units_per_plate: product.print_mapping?.units_per_plate ?? 1,
               print_options: product.print_mapping?.print_options ?? {},
-              preferred_printer_id: printerId,
+              printer_models: printerModels,
             })
             await onSaved(saved)
           }}
@@ -706,16 +707,14 @@ function PrintMappingEditor({
   const [options, setOptions] = useState(
     JSON.stringify(mapping?.print_options ?? {}, null, 0),
   )
-  const [printerId, setPrinterId] = useState<string>(
-    mapping?.preferred_printer_id ? String(mapping.preferred_printer_id) : '',
-  )
+  const [printerModels, setPrinterModels] = useState<string[]>(mapping?.printer_models ?? [])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     setPlate(mapping?.plate_number ?? 1)
     setUnits(mapping?.units_per_plate ?? 1)
     setOptions(JSON.stringify(mapping?.print_options ?? {}, null, 0))
-    setPrinterId(mapping?.preferred_printer_id ? String(mapping.preferred_printer_id) : '')
+    setPrinterModels(mapping?.printer_models ?? [])
   }, [mapping])
 
   const save = async () => {
@@ -727,7 +726,7 @@ function PrintMappingEditor({
         plate_number: plate,
         units_per_plate: units,
         print_options: options.trim() ? JSON.parse(options) : {},
-        preferred_printer_id: printerId ? Number(printerId) : null,
+        printer_models: printerModels,
       })
       await onSaved(saved)
     } catch (err) {
@@ -766,7 +765,7 @@ function PrintMappingEditor({
               Remove mapping
             </Button>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Plate number">
               <input
                 className={inputClass}
@@ -785,14 +784,8 @@ function PrintMappingEditor({
                 onChange={(e) => setUnits(Number(e.target.value))}
               />
             </Field>
-            <Field label="Preferred printer ID" hint="Blank lets Bambuddy dispatch.">
-              <input
-                className={inputClass}
-                value={printerId}
-                onChange={(e) => setPrinterId(e.target.value)}
-              />
-            </Field>
           </div>
+          <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
           <Field label="Print options (JSON)" hint="Merged into the Bambuddy queue request.">
             <input
               className={inputClass}
@@ -868,40 +861,142 @@ function QboItemPicker({
   )
 }
 
-function ArchivePicker({
-  onClose,
-  onPick,
+/** Which kinds of machine can take this plate. Nothing ticked means any of them.
+ *
+ * The farm runs more than one model and a plate that fits one often fits
+ * another, so this is a set rather than a single printer: dispatch picks a free
+ * machine of any ticked model. Models the farm no longer reports still appear,
+ * ticked — dropping one silently would quietly widen the job to everything.
+ */
+function PrinterModelPicker({
+  value,
+  onChange,
 }: {
-  onClose: () => void
-  onPick: (archive: BambuddyArchive, printerId: number | null) => void | Promise<void>
+  value: string[]
+  onChange: (models: string[]) => void
 }) {
-  const [query, setQuery] = useState('')
-  const [archives, setArchives] = useState<BambuddyArchive[]>([])
-  const [printers, setPrinters] = useState<BambuddyPrinter[]>([])
-  const [printerId, setPrinterId] = useState('')
+  const [models, setModels] = useState<BambuddyPrinterModel[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState(true)
 
   useEffect(() => {
     api
-      .get<{ printers: BambuddyPrinter[] }>('/api/integrations/bambuddy/printers')
-      .then((data) => setPrinters(data.printers))
-      .catch(() => undefined)
-  }, [])
-
-  useEffect(() => {
-    setBusy(true)
-    api
-      .get<{ archives: BambuddyArchive[] }>(
-        `/api/integrations/bambuddy/archives?search=${encodeURIComponent(query)}`,
-      )
+      .get<{ models: BambuddyPrinterModel[] }>('/api/integrations/bambuddy/printer-models')
       .then((data) => {
-        setArchives(data.archives.filter((a) => a.id !== null))
+        setModels(data.models)
         setError(null)
       })
       .catch((err) => setError(errorMessage(err)))
       .finally(() => setBusy(false))
-  }, [query])
+  }, [])
+
+  const has = (model: string) =>
+    value.some((chosen) => chosen.toLowerCase() === model.toLowerCase())
+
+  const rows: BambuddyPrinterModel[] = [
+    ...models,
+    ...value
+      .filter((chosen) => !models.some((m) => m.model.toLowerCase() === chosen.toLowerCase()))
+      .map((model) => ({ model, printers: 0, online: 0, names: [] })),
+  ]
+
+  const toggle = (model: string) =>
+    onChange(
+      has(model)
+        ? value.filter((chosen) => chosen.toLowerCase() !== model.toLowerCase())
+        : [...value, model],
+    )
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-xs font-medium text-ink-700">Printer models</span>
+        <span className="text-xs text-ink-500">
+          {value.length ? 'Any free machine of these.' : 'Nothing ticked — any printer.'}
+        </span>
+      </div>
+      {error ? (
+        <div className="mt-1">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+      {busy ? <Spinner /> : null}
+      {!busy && rows.length === 0 ? (
+        <p className="mt-1 text-xs text-ink-500">
+          Bambuddy reported no printers, so there are no models to choose from.
+        </p>
+      ) : null}
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {rows.map((row) => (
+          <label
+            key={row.model}
+            className={cx(
+              'flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-xs',
+              has(row.model)
+                ? 'border-sky-400 bg-sky-50 text-sky-900'
+                : 'border-ink-200 text-ink-700 hover:bg-ink-50',
+            )}
+          >
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5"
+              checked={has(row.model)}
+              onChange={() => toggle(row.model)}
+            />
+            <span>{row.model}</span>
+            <span className="text-ink-400">
+              {row.printers ? `${row.online}/${row.printers} online` : 'none on the farm'}
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Every archived print file Bambuddy has, so one can be picked off a list.
+ *
+ * The whole catalogue is fetched once and searched here rather than a page at a
+ * time: a shop's archive is a few hundred files at most, and typing should not
+ * cost a round trip. `truncated` says Bambuddy had more than the page cap could
+ * walk, which is worth saying out loud instead of quietly showing a short list.
+ */
+function ArchivePicker({
+  models,
+  onClose,
+  onPick,
+}: {
+  models: string[]
+  onClose: () => void
+  onPick: (archive: BambuddyArchive, printerModels: string[]) => void | Promise<void>
+}) {
+  const [query, setQuery] = useState('')
+  const [archives, setArchives] = useState<BambuddyArchive[]>([])
+  const [truncated, setTruncated] = useState(false)
+  const [printerModels, setPrinterModels] = useState<string[]>(models)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(true)
+
+  useEffect(() => {
+    api
+      .get<{ archives: BambuddyArchive[]; truncated: boolean }>(
+        '/api/integrations/bambuddy/archives',
+      )
+      .then((data) => {
+        setArchives(data.archives.filter((a) => a.id !== null))
+        setTruncated(data.truncated)
+        setError(null)
+      })
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setBusy(false))
+  }, [])
+
+  const needle = query.trim().toLowerCase()
+  const shown = needle
+    ? archives.filter((archive) =>
+        `${archive.name ?? ''} ${archive.id ?? ''}`.toLowerCase().includes(needle),
+      )
+    : archives
 
   return (
     <Modal open title="Attach a Bambuddy archive" onClose={onClose}>
@@ -912,36 +1007,33 @@ function ArchivePicker({
         onChange={(e) => setQuery(e.target.value)}
       />
       <div className="mt-3">
-        <Field label="Preferred printer" hint="Leave as Any to let Bambuddy dispatch.">
-          <select
-            className={inputClass}
-            value={printerId}
-            onChange={(e) => setPrinterId(e.target.value)}
-          >
-            <option value="">Any printer</option>
-            {printers.map((printer) => (
-              <option key={printer.id} value={printer.id ?? ''}>
-                {printer.name ?? `Printer ${printer.id}`}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
       </div>
       {error ? (
         <div className="mt-3">
           <Alert tone="error">{error}</Alert>
         </div>
       ) : null}
+      {truncated ? (
+        <div className="mt-3">
+          <Alert tone="warning">
+            Bambuddy has more archives than PrintFlow reads in one go — search for the
+            file by name if it is not in this list.
+          </Alert>
+        </div>
+      ) : null}
       <div className="mt-3 max-h-72 space-y-1 overflow-y-auto">
         {busy ? <Spinner /> : null}
-        {!busy && archives.length === 0 ? (
-          <p className="py-4 text-center text-sm text-ink-500">No archives found.</p>
+        {!busy && shown.length === 0 ? (
+          <p className="py-4 text-center text-sm text-ink-500">
+            {archives.length ? 'Nothing matches that.' : 'No archives found.'}
+          </p>
         ) : null}
-        {archives.map((archive) => (
+        {shown.map((archive) => (
           <button
             key={String(archive.id)}
             type="button"
-            onClick={() => onPick(archive, printerId ? Number(printerId) : null)}
+            onClick={() => onPick(archive, printerModels)}
             className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-ink-50"
           >
             <span className="min-w-0 flex-1 truncate text-sm text-ink-800">
@@ -952,6 +1044,13 @@ function ArchivePicker({
           </button>
         ))}
       </div>
+      {!busy && archives.length ? (
+        <p className="mt-2 text-xs text-ink-500">
+          {shown.length === archives.length
+            ? `${archives.length} archive${archives.length === 1 ? '' : 's'} on Bambuddy.`
+            : `${shown.length} of ${archives.length} archives.`}
+        </p>
+      ) : null}
     </Modal>
   )
 }
@@ -1343,7 +1442,7 @@ function VariationsEditor({
             bambuddy_archive_name: body.bambuddy_archive_name,
             plate_number: body.plate_number,
             units_per_plate: body.units_per_plate,
-            preferred_printer_id: body.preferred_printer_id,
+            printer_models: body.printer_models ?? [],
             qbo_item_id: body.qbo_item_id,
             qbo_item_name: body.qbo_item_name,
             active: body.active,
@@ -1533,12 +1632,25 @@ function VariationsEditor({
                             bambuddy_archive_name: null,
                             plate_number: null,
                             units_per_plate: null,
-                            preferred_printer_id: null,
+                            printer_models: [],
                           })
                         }
                       >
                         Use the product's file
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => setPicking(variation)}
+                      >
+                        Change
+                      </Button>
+                      <span className="basis-full">
+                        {variation.printer_models?.length
+                          ? `On: ${variation.printer_models.join(', ')}`
+                          : "On: whatever the product's mapping says"}
+                      </span>
                     </>
                   ) : (
                     <>
@@ -1585,8 +1697,9 @@ function VariationsEditor({
 
       {picking && product.fulfillment === 'printed' ? (
         <ArchivePicker
+          models={picking.printer_models ?? []}
           onClose={() => setPicking(null)}
-          onPick={async (archive, printerId) => {
+          onPick={async (archive, printerModels) => {
             const variation = picking
             setPicking(null)
             await save(variation, {
@@ -1594,7 +1707,7 @@ function VariationsEditor({
               bambuddy_archive_name: archive.name,
               plate_number: variation.plate_number ?? 1,
               units_per_plate: variation.units_per_plate ?? 1,
-              preferred_printer_id: printerId,
+              printer_models: printerModels,
             })
           }}
         />

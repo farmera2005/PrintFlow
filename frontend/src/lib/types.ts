@@ -129,7 +129,8 @@ export interface PrintMapping {
   plate_number: number
   units_per_plate: number
   print_options: Record<string, unknown>
-  preferred_printer_id: number | null
+  /** Printer models that can take this plate. Empty means any of them. */
+  printer_models: string[]
 }
 
 /** An option name and the values seen for it — from past orders, or from the
@@ -209,7 +210,8 @@ export interface ProductVariation {
   bambuddy_archive_name: string | null
   plate_number: number | null
   units_per_plate: number | null
-  preferred_printer_id: number | null
+  /** Printer models that can take this plate. Empty falls back to the product's. */
+  printer_models: string[]
   qbo_item_id: string | null
   qbo_item_name: string | null
   /** The product this combination is, when it has one of its own. */
@@ -250,6 +252,14 @@ export interface BambuddyPrinter {
   model: string | null
   status: string | null
   online: boolean | null
+}
+
+/** One machine type on the farm, and how many of it there are. */
+export interface BambuddyPrinterModel {
+  model: string
+  printers: number
+  online: number
+  names: string[]
 }
 
 export interface QueueJob extends PrintJob {

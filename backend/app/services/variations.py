@@ -90,7 +90,8 @@ class PrintPlan:
     bambuddy_archive_id: int
     plate_number: int
     units_per_plate: int
-    preferred_printer_id: int | None
+    # Which printer models can take it. Empty means any of them.
+    printer_models: tuple[str, ...]
 
 
 def print_plan(
@@ -99,15 +100,15 @@ def print_plan(
     """The product's mapping, with anything the variation overrides applied.
 
     A variation that names its own archive replaces the file outright; without
-    one it can still adjust the plate, the yield or the printer. Returns None
-    when there is nothing to print from at all.
+    one it can still adjust the plate, the yield or which models can take it.
+    Returns None when there is nothing to print from at all.
     """
     if variation is not None and variation.bambuddy_archive_id is not None:
         return PrintPlan(
             bambuddy_archive_id=variation.bambuddy_archive_id,
             plate_number=variation.plate_number or 1,
             units_per_plate=variation.units_per_plate or 1,
-            preferred_printer_id=variation.preferred_printer_id,
+            printer_models=tuple(variation.printer_models or ()),
         )
     if mapping is None:
         return None
@@ -123,10 +124,10 @@ def print_plan(
             if variation is not None and variation.units_per_plate
             else mapping.units_per_plate
         ),
-        preferred_printer_id=(
-            variation.preferred_printer_id
-            if variation is not None and variation.preferred_printer_id is not None
-            else mapping.preferred_printer_id
+        printer_models=tuple(
+            variation.printer_models
+            if variation is not None and variation.printer_models
+            else (mapping.printer_models or ())
         ),
     )
 

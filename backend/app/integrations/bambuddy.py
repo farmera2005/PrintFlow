@@ -426,6 +426,57 @@ class BambuddyClient:
                 return filtered
         return rows
 
+    async def iter_archives(
+        self, *, search: str = "", page_size: int = 200, max_pages: int = 25
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Every archive, not just the first page.
+
+        A shop with three hundred print files could only ever see fifty of them,
+        which made the picker a search box you had to already know the answer
+        for. Returns (archives, truncated) — truncated says the cap was hit, so
+        a partial list is never presented as the whole thing.
+
+        Deduplicated by id: an instance that ignores `offset` would otherwise
+        hand back the same page until the cap ran out.
+        """
+        seen: dict[Any, dict[str, Any]] = {}
+        truncated = False
+        for page in range(max_pages):
+            rows = await self.list_archives(
+                search=search, limit=page_size, offset=page * page_size
+            )
+            fresh = [row for row in rows if row.get("id") not in seen]
+            for row in fresh:
+                seen[row.get("id")] = row
+            if len(rows) < page_size or not fresh:
+                break
+            if page == max_pages - 1:
+                truncated = True
+        return list(seen.values()), truncated
+
+    async def list_printer_models(self) -> list[dict[str, Any]]:
+        """The distinct models this farm has, with how many of each.
+
+        A job is described by what can print it, not by which machine is free —
+        so the thing to choose from is the model, and the count is what tells
+        an operator whether choosing it strands the job on one machine.
+        """
+        printers = await self.list_printers()
+        models: dict[str, dict[str, Any]] = {}
+        for printer in printers:
+            name = str(printer.get("model") or "").strip()
+            if not name:
+                continue
+            entry = models.setdefault(
+                name, {"model": name, "printers": 0, "online": 0, "names": []}
+            )
+            entry["printers"] += 1
+            if printer.get("online"):
+                entry["online"] += 1
+            if printer.get("name"):
+                entry["names"].append(str(printer["name"]))
+        return sorted(models.values(), key=lambda entry: entry["model"].lower())
+
     async def list_queue(self) -> list[dict[str, Any]]:
         data = await self._call("GET", self.paths["queue"])
         return [parse_queue_item(row) for row in _as_list(data)]

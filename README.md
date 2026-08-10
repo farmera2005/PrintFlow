@@ -224,6 +224,45 @@ Two ways back from a wrong match:
   order — a listing linked, variations added, a BOM corrected. Plain **Re-run
   intake** keeps whatever each line already matched; reset throws it away first.
 
+## Print files, and which machines can make them
+
+A printed product needs two answers: which file, and what can print it.
+
+**The file** comes off Bambuddy. **Browse Bambuddy archives** lists every
+archived 3MF the instance has — not the first page of them — with a search box
+that filters the list you are already looking at. If the instance holds more
+than PrintFlow reads in one pass, the picker says so rather than quietly
+showing a short list and letting you conclude the file is missing.
+
+**The machines** are chosen by *model*, and you can tick more than one. A shop
+with four printers usually has more than one tool for a given job, and pinning a
+file to a single machine means every plate of it queues behind that one machine
+even when its twin is idle. The models come from the farm itself, with a count
+of how many of each are online, so ticking one tells you straight away whether
+it strands the job on a single printer.
+
+* **Nothing ticked** means any printer: PrintFlow names no machine and Bambuddy
+  places the plate itself. That is still the right answer for a shop with one
+  kind of printer.
+* **One or more ticked** and PrintFlow places the plate: a machine of a ticked
+  model, preferring one that is online and idle over one that is merely busy,
+  and a busy one over an offline one — a busy machine works through its queue,
+  an unreachable one never starts. A run of plates spreads across the machines
+  that can take them rather than stacking behind the first.
+* **Nothing on the farm matches** and the plate stays queued in PrintFlow with
+  a note saying what it was looking for. Sending it anyway would put it on a
+  machine that cannot make it. The next poll tries again, so plugging in the
+  right printer is enough to release it — no re-queueing by hand.
+
+A variation can name its own models, which is how a taller version of the same
+part ends up restricted to the bigger machine while the standard one still runs
+anywhere. Left blank, it uses the product's.
+
+Upgrading replaces the old single **preferred printer ID** with this. There is
+no way to translate one into the other — which model a printer id is belongs to
+Bambuddy, not to PrintFlow's database — so existing mappings come through with
+nothing ticked, which is the behaviour they already had.
+
 ## Bills of materials, from QuickBooks
 
 A bundle's BOM lists what it consumes. Components can be picked from the
@@ -639,7 +678,8 @@ an audit row**.
 - **Shipped** — label bought, tracking shown.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy archive browser,
-BOM editor), **Print Queue** (every plate across all orders, re-queue/cancel),
+printer models, BOM editor), **Print Queue** (every plate across all orders,
+re-queue/cancel),
 **Sync Log** (background runs + audit trail), **Settings**.
 
 ## How the decisioning works

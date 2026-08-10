@@ -130,7 +130,7 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
                 order_line_id=line.id,
                 bambuddy_archive_id=plan.bambuddy_archive_id,
                 plate_number=plan.plate_number,
-                printer_id=plan.preferred_printer_id,
+                printer_models=list(plan.printer_models),
                 units_expected=plan.units_per_plate,
                 status=JOB_PENDING,
             )
@@ -139,6 +139,54 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
 
     await session.flush()
     return created
+
+
+def choose_printer(
+    models: list[str],
+    printers: list[dict],
+    placed: dict[int, int] | None = None,
+) -> int | None:
+    """A printer of one of these models, or None if the farm has none free.
+
+    Online and idle first, then online, then anything of the right model — a
+    machine that is merely busy will get to it, whereas one that is offline
+    will not, and a job placed on an unreachable printer just sits there.
+
+    `placed` counts what this dispatch pass has already sent to each printer, so
+    ten plates of the same part spread across the machines that can make them
+    instead of stacking up behind one. Ties break on printer id, which keeps the
+    same farm and the same queue producing the same answer twice running.
+    """
+    wanted = {str(model).strip().casefold() for model in models if str(model).strip()}
+    if not wanted:
+        return None
+
+    candidates = [
+        printer
+        for printer in printers
+        if str(printer.get("model") or "").strip().casefold() in wanted
+        and str(printer.get("id") or "").lstrip("-").isdigit()
+    ]
+    if not candidates:
+        return None
+
+    def rank(printer: dict) -> tuple[int, int, int]:
+        online = bool(printer.get("online"))
+        busy = str(printer.get("status") or "").strip().casefold() in BUSY_STATUSES
+        printer_id = int(printer["id"])
+        return (
+            0 if online and not busy else 1 if online else 2,
+            (placed or {}).get(printer_id, 0),
+            printer_id,
+        )
+
+    return int(sorted(candidates, key=rank)[0]["id"])
+
+
+# Printer states that mean "this one is mid-job". Anything else — idle, ready,
+# unknown — counts as free, because refusing to place work on a machine whose
+# status we cannot read would stall the queue on a vocabulary mismatch.
+BUSY_STATUSES = {"printing", "running", "busy", "working", "paused"}
 
 
 async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[str, int]:
@@ -179,13 +227,43 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
     mappings = await _mappings_for_jobs(session, pending)
     touched_orders: set = set()
 
+    # Only read the farm if some job actually asks for a model. A shop that says
+    # "any printer" everywhere should not pay for a printer listing on every
+    # dispatch.
+    printers: list[dict] | None = None
+    placed: dict[int, int] = {}
+    if any(job.printer_models for job in pending):
+        try:
+            printers = await client.list_printers()
+        except IntegrationError as exc:
+            log.warning("Could not read printers to place jobs by model: %s", exc)
+            printers = []
+
     for job in pending:
         mapping = mappings.get(job.id)
+
+        printer_id = job.printer_id
+        if job.printer_models:
+            printer_id = choose_printer(job.printer_models, printers or [], placed)
+            if printer_id is None:
+                # Sending it anyway would put the plate on a machine that cannot
+                # make it. Leave it pending and say what it was looking for; the
+                # next poll tries again, and the operator can see why.
+                job.error = (
+                    "No printer of "
+                    + ", ".join(job.printer_models)
+                    + " is available — leaving this plate queued here."
+                )
+                stats["failed"] += 1
+                continue
+            job.printer_id = printer_id
+            placed[printer_id] = placed.get(printer_id, 0) + 1
+
         try:
             item = await client.enqueue(
                 archive_id=job.bambuddy_archive_id,
                 plate_number=job.plate_number,
-                printer_id=job.printer_id,
+                printer_id=printer_id,
                 print_options=(mapping.print_options if mapping else None) or {},
             )
         except IntegrationError as exc:

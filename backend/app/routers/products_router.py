@@ -58,7 +58,7 @@ def _serialize(product: Product) -> dict[str, Any]:
                 "plate_number": mapping.plate_number,
                 "units_per_plate": mapping.units_per_plate,
                 "print_options": mapping.print_options,
-                "preferred_printer_id": mapping.preferred_printer_id,
+                "printer_models": mapping.printer_models or [],
             }
             if mapping
             else None
@@ -100,7 +100,7 @@ def _serialize(product: Product) -> dict[str, Any]:
                 "bambuddy_archive_name": variation.bambuddy_archive_name,
                 "plate_number": variation.plate_number,
                 "units_per_plate": variation.units_per_plate,
-                "preferred_printer_id": variation.preferred_printer_id,
+                "printer_models": variation.printer_models or [],
                 "qbo_item_id": variation.qbo_item_id,
                 "qbo_item_name": variation.qbo_item_name,
                 "variant_product_id": variation.variant_product_id,
@@ -195,6 +195,16 @@ class ProductRequest(BaseModel):
     qbo_item_id: str | None = None
     qbo_item_name: str | None = None
     active: bool = True
+
+
+def _clean_models(models: list[str]) -> list[str]:
+    """Trimmed, de-duplicated, order preserved. Empty means any printer."""
+    seen: dict[str, str] = {}
+    for model in models:
+        name = str(model).strip()
+        if name and name.casefold() not in seen:
+            seen[name.casefold()] = name
+    return list(seen.values())
 
 
 def _validate_fulfillment(value: str) -> str:
@@ -682,7 +692,7 @@ class PrintMappingRequest(BaseModel):
     plate_number: int = Field(default=1, gt=0)
     units_per_plate: int = Field(default=1, gt=0)
     print_options: dict[str, Any] = Field(default_factory=dict)
-    preferred_printer_id: int | None = None
+    printer_models: list[str] = Field(default_factory=list, max_length=50)
 
 
 @router.put("/{product_id}/print-mapping")
@@ -704,7 +714,7 @@ async def upsert_print_mapping(
     mapping.plate_number = body.plate_number
     mapping.units_per_plate = body.units_per_plate
     mapping.print_options = body.print_options
-    mapping.preferred_printer_id = body.preferred_printer_id
+    mapping.printer_models = _clean_models(body.printer_models)
     session.add(mapping)
     await session.flush()
     await audit.record(
@@ -1232,7 +1242,7 @@ class VariationRequest(BaseModel):
     bambuddy_archive_name: str | None = None
     plate_number: int | None = Field(default=None, gt=0)
     units_per_plate: int | None = Field(default=None, gt=0)
-    preferred_printer_id: int | None = None
+    printer_models: list[str] = Field(default_factory=list, max_length=50)
     qbo_item_id: str | None = None
     qbo_item_name: str | None = None
     active: bool = True
@@ -1254,7 +1264,7 @@ async def update_variation(
     variation.bambuddy_archive_name = body.bambuddy_archive_name
     variation.plate_number = body.plate_number
     variation.units_per_plate = body.units_per_plate
-    variation.preferred_printer_id = body.preferred_printer_id
+    variation.printer_models = _clean_models(body.printer_models)
     variation.qbo_item_id = body.qbo_item_id
     variation.qbo_item_name = body.qbo_item_name
     variation.active = body.active

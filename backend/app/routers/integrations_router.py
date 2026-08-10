@@ -903,23 +903,41 @@ async def bambuddy_printers(
 @router.get("/bambuddy/archives")
 async def bambuddy_archives(
     search: str = "",
-    limit: int = 50,
-    offset: int = 0,
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Archive browser behind the mapping helper — no manual ID entry (§4.3)."""
+    """Every archived print file, so the picker is a list and not a guess.
+
+    It used to return one page of fifty. A shop with more files than that could
+    only reach the rest by typing a name it already knew, which is not a picker.
+    """
     client = await _bambuddy_client(session)
     try:
         async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing archives"):
-            archives = await client.list_archives(
-                search=search, limit=max(1, min(limit, 200)), offset=max(0, offset)
-            )
+            archives, truncated = await client.iter_archives(search=search)
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return {"archives": archives}
+    archives.sort(key=lambda row: str(row.get("name") or "").lower())
+    return {"archives": archives, "truncated": truncated}
+
+
+@router.get("/bambuddy/printer-models")
+async def bambuddy_printer_models(
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The distinct printer models on the farm, with how many of each."""
+    client = await _bambuddy_client(session)
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Listing printers"):
+            models = await client.list_printer_models()
+    except IntegrationError as exc:
+        await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
+        await session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"models": models}
 
 
 async def _bambuddy_client(session: AsyncSession) -> bambuddy_api.BambuddyClient:

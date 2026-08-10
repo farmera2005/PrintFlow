@@ -369,7 +369,10 @@ class ProductVariation(Base):
     bambuddy_archive_name: Mapped[str | None] = mapped_column(Text)
     plate_number: Mapped[int | None] = mapped_column(Integer)
     units_per_plate: Mapped[int | None] = mapped_column(Integer)
-    preferred_printer_id: Mapped[int | None] = mapped_column(Integer)
+    # Empty means "whatever the product's mapping says".
+    printer_models: Mapped[list[str]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
 
     # Stock override. Null means "use the product's QuickBooks item".
     qbo_item_id: Mapped[str | None] = mapped_column(Text)
@@ -489,7 +492,13 @@ class PrintMapping(Base):
     print_options: Mapped[dict[str, Any]] = mapped_column(
         JsonType, nullable=False, default=dict
     )
-    preferred_printer_id: Mapped[int | None] = mapped_column(Integer)
+    # Which printer models can make this — ["P1S", "X1C"]. A job is described by
+    # what is capable of it, not by which machine happened to be free, and a
+    # farm usually has several that qualify. Empty means any of them; the
+    # printer itself is chosen when the plate is actually sent.
+    printer_models: Mapped[list[str]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
@@ -636,7 +645,14 @@ class PrintJob(Base):
     bambuddy_queue_id: Mapped[int | None] = mapped_column(Integer)
     bambuddy_archive_id: Mapped[int] = mapped_column(Integer, nullable=False)
     plate_number: Mapped[int | None] = mapped_column(Integer)
+    # The machine this actually went to, chosen when it was sent.
     printer_id: Mapped[int | None] = mapped_column(Integer)
+    # The models that could have taken it, recorded when the plate was planned.
+    # Kept on the job so dispatch does not have to re-derive it, and so a job
+    # that cannot find a machine can say what it was looking for.
+    printer_models: Mapped[list[str]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
     units_expected: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default=JOB_PENDING)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
