@@ -938,11 +938,15 @@ async def bambuddy_files(
     client = await _bambuddy_client(session)
     try:
         async with base_api.deadline(PROVIDER_BAMBUDDY, "Reading the file manager"):
-            tree = await client.file_tree(printer_id=printer_id)
+            tree = await bambuddy_api.read_file_manager(
+                session, client, printer_id=printer_id
+            )
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_BAMBUDDY, str(exc))
         await session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    # read_file_manager may have adopted a corrected endpoint on the way.
+    await session.commit()
     return {"printer_id": printer_id, **tree}
 
 

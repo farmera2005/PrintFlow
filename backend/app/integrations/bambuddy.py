@@ -106,13 +106,18 @@ PATH_ROLES: dict[str, dict[str, Any]] = {
     "queue": {"keywords": ("queue", "job", "task"), "methods": ("get", "post")},
     # The file manager. "file" first here, where it is last under archives, so
     # the two roles do not both claim /api/files on an instance that has one.
-    "files": {"keywords": ("file", "filemanager", "storage", "folder"), "methods": ("get",)},
+    # Bambuddy itself calls this domain "library"; the rest are what other
+    # builds have called the same screen.
+    "files": {
+        "keywords": ("file", "library", "filemanager", "storage", "folder", "browse"),
+        "methods": ("get",),
+    },
 }
 
 # The file manager scoped to one machine. Kept out of PATH_ROLES because every
 # rule there rejects a templated path, and this role is nothing but a template.
 PRINTER_FILES_ROLE: dict[str, Any] = {
-    "keywords": ("file", "filemanager", "storage", "folder", "model"),
+    "keywords": ("file", "library", "filemanager", "storage", "folder", "model"),
     "parents": ("printer", "device"),
 }
 
@@ -377,6 +382,10 @@ class BambuddyClient:
         self.paths = {**DEFAULT_PATHS, **self.discovered_paths, **self.explicit_paths}
         self.fields = {**DEFAULT_FIELDS, **(payload.get("fields") or {})}
         self.auth_header = str(payload.get("auth_header") or DEFAULT_AUTH_HEADER)
+        # The instance's OpenAPI document, once anything in this request has
+        # had cause to read it. Per client, so it lives exactly as long as the
+        # request does and never goes stale between them.
+        self.last_spec: dict[str, Any] | None = None
 
     def url_for(self, path: str) -> str:
         """The absolute URL a call will actually hit.
@@ -511,6 +520,27 @@ class BambuddyClient:
                 self.paths[name] = path
                 adopted[name] = path
         return adopted
+
+    async def resolve_paths(self, roles: tuple[str, ...]) -> dict[str, str]:
+        """Re-read the instance's spec and adopt what it now says for these roles.
+
+        Bambuddy serves several hundred endpoints and moves them between
+        releases, which is why PrintFlow reads them off the instance rather than
+        assuming. The gap that leaves: a role added in a *later PrintFlow*
+        release was never discovered for a connection made before that role
+        existed, so it silently falls back to a default that may be a guess. The
+        symptom is a 404 on an endpoint nobody chose, and the fix — re-saving
+        Settings — is not something anyone would think of.
+
+        So a 404 re-reads the document instead. Roles the operator set by hand
+        are left alone, because adopt_discovered will not overwrite them.
+        """
+        spec = await self.fetch_openapi()
+        # Kept so that explaining a failure afterwards does not re-fetch a
+        # document that was read moments ago, on a request already failing.
+        self.last_spec = spec
+        discovered = spec.get("discovered") or {}
+        return self.adopt_discovered({name: discovered.get(name) for name in roles})
 
     def _explain_404(
         self, exc: IntegrationError, role: str, spec: dict[str, Any]
@@ -786,3 +816,103 @@ class BambuddyClient:
 async def client_for(session: AsyncSession) -> BambuddyClient:
     payload = await credentials.require(session, PROVIDER_BAMBUDDY)
     return BambuddyClient(payload)
+
+
+async def remember_paths(session: AsyncSession, adopted: dict[str, str]) -> None:
+    """Keep a re-discovered path, so the next call does not have to find it again."""
+    if not adopted:
+        return
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY)
+    if not payload:
+        return
+    payload["discovered_paths"] = {**(payload.get("discovered_paths") or {}), **adopted}
+    await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
+
+
+async def read_file_manager(
+    session: AsyncSession, client: BambuddyClient, *, printer_id: int | None = None
+) -> dict[str, Any]:
+    """The file manager, healing a wrong endpoint on the way.
+
+    A 404 here means the path is wrong rather than the instance being down, and
+    there are three reasons it can be wrong, each with its own answer:
+
+    * the role was added after this connection was made, so it was never
+      discovered — re-read the document and adopt what it says;
+    * the instance has no per-printer file endpoint at all, only one shared
+      library — read that instead, and say so, because the printer is still a
+      real answer to *where the plate goes* even when it is not where the file
+      is kept;
+    * the instance genuinely serves no file manager — say that, and name what it
+      does serve, so the operator can point it at the right endpoint under
+      Advanced instead of being told a number.
+    """
+    try:
+        return {**await client.file_tree(printer_id=printer_id), "shared": False}
+    except IntegrationError as exc:
+        if exc.status_code != 404:
+            raise
+
+    adopted = await client.resolve_paths(("files", "printer_files"))
+    await remember_paths(session, adopted)
+    try:
+        return {**await client.file_tree(printer_id=printer_id), "shared": False}
+    except IntegrationError as exc:
+        if exc.status_code != 404:
+            raise
+        if printer_id is None:
+            raise await _no_file_manager(client, exc) from exc
+
+    # This build keeps one library for the whole farm. Reading it is the right
+    # answer — the file exists, and the printer chosen alongside it is still
+    # where the plate is going.
+    try:
+        return {**await client.file_tree(printer_id=None), "shared": True}
+    except IntegrationError as exc:
+        raise await _no_file_manager(client, exc) from exc
+
+
+async def _no_file_manager(
+    client: BambuddyClient, exc: IntegrationError
+) -> IntegrationError:
+    """Turn "404" into something an operator can act on."""
+    tried = ", ".join(
+        dict.fromkeys([client.paths["files"], client.paths["printer_files"]])
+    )
+    spec = getattr(client, "last_spec", None)
+    if spec is None:
+        try:
+            spec = await client.fetch_openapi()
+        except IntegrationError:
+            spec = {}
+    listable = [row["path"] for row in (spec.get("collections") or [])]
+    likely = [
+        path
+        for path in listable
+        if any(word in path.lower() for word in ("file", "librar", "folder", "storage"))
+    ]
+    if likely:
+        hint = (
+            "Its OpenAPI document does list "
+            + ", ".join(likely[:5])
+            + " — set the File manager endpoint to whichever of those is the "
+            "file browser, under Settings → Bambuddy → Advanced."
+        )
+    elif listable:
+        hint = (
+            f"Its OpenAPI document describes {len(listable)} listable endpoints and "
+            "none of them look like a file browser. This build may not have one — "
+            "the Bambuddy library still works as a source of print files — or you "
+            "can name the endpoint yourself under Settings → Bambuddy → Advanced."
+        )
+    else:
+        hint = (
+            "PrintFlow could not read its OpenAPI document either, so it cannot "
+            "look the right path up. Set it under Settings → Bambuddy → Advanced."
+        )
+    return IntegrationError(
+        PROVIDER_BAMBUDDY,
+        f"This Bambuddy has no file manager at {tried}. {hint}",
+        status_code=exc.status_code,
+        body=exc.body,
+    )

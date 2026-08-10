@@ -1142,9 +1142,11 @@ function PrintFilePicker({
       <Field
         label="Where the file is"
         hint={
-          printerId !== null
-            ? "This machine's own files — the plate goes to this printer."
-            : 'Shared across the farm, so any capable machine can take the plate.'
+          printerId === null
+            ? 'Shared across the farm, so any capable machine can take the plate.'
+            : tree?.shared
+              ? 'The plate goes to this printer.'
+              : "This machine's own files — the plate goes to this printer."
         }
       >
         <select
@@ -1184,8 +1186,15 @@ function PrintFilePicker({
       />
 
       {error ? (
-        <div className="mt-3">
+        <div className="mt-3 space-y-2">
           <Alert tone="error">{error}</Alert>
+          {source.kind !== 'library' ? (
+            // Not every Bambuddy has a file manager, and a product still has to
+            // get a print file today. The library is always there.
+            <Button size="sm" onClick={() => setSource({ kind: 'library' })}>
+              Use the Bambuddy library instead
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
@@ -1212,6 +1221,16 @@ function PrintFilePicker({
               <Alert tone="warning">
                 This file manager is bigger than PrintFlow walks in one go, so some
                 folders are missing. Narrow it in Bambuddy, or pick from the library.
+              </Alert>
+            </div>
+          ) : null}
+
+          {tree?.shared && printerId !== null ? (
+            <div className="mt-3">
+              <Alert tone="info">
+                This Bambuddy keeps one library for the whole farm rather than files
+                per machine, so these are the shared files. The plate still goes to{' '}
+                {source.kind === 'printer' ? source.label : 'this printer'}.
               </Alert>
             </div>
           ) : null}

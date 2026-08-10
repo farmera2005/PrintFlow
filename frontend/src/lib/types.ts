@@ -282,6 +282,9 @@ export interface BambuddyFileTree {
   files: BambuddyFile[]
   /** The walk hit its cap, so this is not the whole file manager. */
   truncated: boolean
+  /** This build keeps one library for the farm; the printer only says where
+   *  the plate goes, not where the file is kept. */
+  shared: boolean
   printable: number
   folders: number
 }

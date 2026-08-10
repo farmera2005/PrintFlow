@@ -202,6 +202,131 @@ class TestFilesPath:
         assert client.files_path(3) == "/api/files"
 
 
+class TestHealingAWrongEndpoint:
+    """A 404 on a path nobody chose is PrintFlow's problem, not the operator's.
+
+    The roles here were added after the Bambuddy connection was made, so they
+    were never discovered for it and fell back to a default that is a guess.
+    Nobody would think to fix that by re-saving Settings, so a 404 re-reads the
+    instance's document instead.
+    """
+
+    async def test_a_stale_default_is_rediscovered_and_kept(self, db):
+        from app.integrations import bambuddy as api
+        from app.models import PROVIDER_BAMBUDDY
+        from app.services import credentials
+
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY,
+            {"base_url": "http://b.local", "api_key": "k",
+             # What a connection made before this release looks like: the three
+             # older roles discovered, and nothing for the file manager.
+             "discovered_paths": {"printers": "/api/printers"}},
+        )
+        await db.commit()
+
+        client = HealingClient(spec_paths={"/api/library": {"get": {}}})
+        tree = await api.read_file_manager(db, client, printer_id=None)
+        await db.commit()
+
+        assert [node["name"] for node in tree["files"]] == ["found.3mf"]
+        assert client.paths["files"] == "/api/library"
+        # And it is remembered, so the next call does not go looking again.
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["discovered_paths"]["files"] == "/api/library"
+        # The older discovered path is not lost on the way.
+        assert payload["discovered_paths"]["printers"] == "/api/printers"
+
+    async def test_no_per_printer_endpoint_falls_back_to_the_shared_library(self, db):
+        from app.integrations import bambuddy as api
+        from app.models import PROVIDER_BAMBUDDY
+        from app.services import credentials
+
+        await credentials.save(db, PROVIDER_BAMBUDDY,
+                               {"base_url": "http://b.local", "api_key": "k"})
+        await db.commit()
+
+        # This build has one library for the farm and nothing per machine.
+        client = HealingClient(spec_paths={"/api/library": {"get": {}}})
+        tree = await api.read_file_manager(db, client, printer_id=3)
+
+        # The files are the shared ones, and it says so rather than pretending
+        # they came off that machine — the printer is still where it prints.
+        assert tree["shared"] is True
+        assert [node["name"] for node in tree["files"]] == ["found.3mf"]
+
+    async def test_an_instance_with_no_file_manager_says_what_it_does_serve(self, db):
+        from app.integrations import bambuddy as api
+        from app.integrations.base import IntegrationError
+        from app.models import PROVIDER_BAMBUDDY
+        from app.services import credentials
+
+        await credentials.save(db, PROVIDER_BAMBUDDY,
+                               {"base_url": "http://b.local", "api_key": "k"})
+        await db.commit()
+
+        client = HealingClient(
+            spec_paths={"/api/printers": {"get": {}}, "/api/projects": {"get": {}}},
+            never_found=True,
+        )
+        with pytest.raises(IntegrationError) as caught:
+            await api.read_file_manager(db, client, printer_id=None)
+
+        message = str(caught.value)
+        assert "no file manager" in message
+        # A number is not actionable; the endpoints it really has are.
+        assert "listable endpoints" in message
+        assert "Advanced" in message
+
+    async def test_a_failure_that_is_not_a_404_is_left_alone(self, db):
+        from app.integrations import bambuddy as api
+        from app.integrations.base import IntegrationError
+        from app.models import PROVIDER_BAMBUDDY
+        from app.services import credentials
+
+        await credentials.save(db, PROVIDER_BAMBUDDY,
+                               {"base_url": "http://b.local", "api_key": "k"})
+        await db.commit()
+
+        client = HealingClient(spec_paths={}, status=500)
+        with pytest.raises(IntegrationError) as caught:
+            await api.read_file_manager(db, client, printer_id=None)
+        # Rediscovery answers "wrong path". This is not that.
+        assert caught.value.status_code == 500
+        assert client.specs_read == 0
+
+
+class HealingClient(BambuddyClient):
+    """404s until its `files` path is the one its spec actually describes."""
+
+    def __init__(self, *, spec_paths: dict, never_found: bool = False, status: int = 404):
+        super().__init__({"base_url": "http://b.local"})
+        self.spec_paths = spec_paths
+        self.never_found = never_found
+        self.status = status
+        self.specs_read = 0
+
+    async def fetch_openapi(self):
+        self.specs_read += 1
+        return {
+            "path": "/openapi.json",
+            "discovered": discover_paths(self.spec_paths),
+            "collections": [
+                {"path": path, "methods": ["get"]} for path in sorted(self.spec_paths)
+            ],
+        }
+
+    async def list_files(self, *, path: str = "", printer_id: int | None = None):
+        from app.integrations.base import IntegrationError
+
+        endpoint = self.files_path(printer_id)
+        if self.never_found or endpoint not in self.spec_paths:
+            raise IntegrationError("bambuddy", f"HTTP {self.status}", status_code=self.status)
+        if (path or "/") != "/":
+            return []
+        return [parse_file_entry({"name": "found.3mf", "type": "file"}, parent="/")]
+
+
 class TestDiscovery:
     def test_the_file_manager_is_read_off_the_spec(self):
         found = discover_paths(

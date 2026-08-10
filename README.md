@@ -250,8 +250,21 @@ showing a short list and letting you conclude the file is missing.
 The file manager endpoints are discovered from the instance's own OpenAPI
 document, like the others, and can be corrected under **Settings → Bambuddy →
 Advanced** — including the per-printer one, where `{printer_id}` is substituted.
-An instance with one shared library can point both at the same path; the printer
-then only decides where the plate goes.
+
+**You do not have to re-save Settings after upgrading.** Bambuddy serves several
+hundred endpoints and moves them between releases, so a role added in a *later
+PrintFlow* release was never discovered for a connection made before it existed
+and would otherwise fall back to a default that is only a guess — a 404 on a
+path nobody chose. So a 404 here re-reads the instance's document, adopts what
+it says, and remembers it. If your instance calls the file manager
+`/api/library`, that is what PrintFlow will use, without being told.
+
+Not every build has one. If the instance has no *per-printer* file endpoint,
+picking a printer reads the shared library instead and says so — the machine is
+still a real answer to where the plate goes, even when it is not where the file
+is kept. If it has no file manager at all, the picker says which endpoints the
+instance *does* serve, so you can name the right one under Advanced, and offers
+the archive library, which is always there.
 
 **The machines** are chosen by *model*, and you can tick more than one. A shop
 with four printers usually has more than one tool for a given job, and pinning a
