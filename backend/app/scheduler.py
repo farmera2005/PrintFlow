@@ -24,7 +24,7 @@ from .models import (
     PROVIDER_SHIPSTATION,
     Order,
 )
-from .services import credentials, intake, printing, shipping, sync_log
+from .services import credentials, finance, intake, printing, shipping, sync_log
 from .services.credentials import IntegrationNotConfigured
 from .services.settings_store import get_poll_intervals, is_setup_complete
 
@@ -83,10 +83,23 @@ async def poll_etsy() -> dict[str, Any]:
                 raise
             stats = await intake.ingest_many(session, receipts)
             await credentials.mark_ok(session, PROVIDER_ETSY)
-            record.note(
+            note = (
                 f"{stats['seen']} receipts: {stats['created']} new, "
                 f"{stats['skipped']} already known, {stats['errors']} errors"
             )
+            # Fees are not on a receipt — they land on the shop's ledger
+            # afterwards, sometimes days later — so this is a sweep that runs
+            # again rather than something intake could have done. Its failure
+            # is not the poll's failure: the orders themselves are already in.
+            try:
+                fees = await finance.sync_fees(session)
+                note += (
+                    f". Fees: {fees['fee_lines']} lines across {fees['priced']} orders"
+                )
+            except (IntegrationError, IntegrationNotConfigured) as exc:
+                log.warning("Etsy fee sweep failed: %s", exc)
+                note += f". Fees not read: {exc}"
+            record.note(note)
             await session.commit()
 
     # Newly planned plates go out on the next line, so a fresh order does not

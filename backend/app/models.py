@@ -570,6 +570,32 @@ class Order(Base):
     label_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     label_currency: Mapped[str | None] = mapped_column(Text)
 
+    # Where it is going, as Etsy sent it. Kept apart from `raw` because a
+    # despatch note is read far more often than a receipt payload is, and
+    # because this is the one part of an order somebody reads out loud.
+    ship_to: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
+
+    # What the order was worth and what it cost to sell. All money is Numeric
+    # and all of it is in `currency`; Etsy sends every figure in the shop's own
+    # currency, so one column serves the lot.
+    currency: Mapped[str | None] = mapped_column(Text)
+    # What the buyer paid, all in — Etsy's grand total.
+    revenue: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    items_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    shipping_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    tax_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    discount_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    # Fees, as positive amounts taken off the top. Etsy's ledger states them as
+    # negative — money leaving — and a column of minus signs reads worse than a
+    # column that is labelled "fees" and subtracted.
+    etsy_fees: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    marketing_fees: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    processing_fees: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    # Every fee line behind those totals, so a number nobody expected can be
+    # read rather than argued with.
+    fee_lines: Mapped[list[dict[str, Any]] | None] = mapped_column(JsonType)
+    finance_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     raw: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
@@ -580,6 +606,10 @@ class Order(Base):
             name="ck_orders_status",
         ),
         CheckConstraint("label_cost >= 0", name="ck_orders_label_cost_not_negative"),
+        CheckConstraint(
+            "etsy_fees >= 0 and marketing_fees >= 0 and processing_fees >= 0",
+            name="ck_orders_fees_not_negative",
+        ),
         Index("ix_orders_status", "status"),
     )
 

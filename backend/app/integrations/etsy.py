@@ -435,6 +435,54 @@ class EtsyClient:
         return receipts
 
 
+    async def receipt_payments(
+        self, *, shop_id: int | str, receipt_id: int | str
+    ) -> list[dict[str, Any]]:
+        """The payment records that settled one receipt.
+
+        Their ids are how a fee on the ledger is tied back to a sale: a ledger
+        line points at the payment, not at the receipt.
+        """
+        data = await self._get(f"/shops/{shop_id}/receipts/{receipt_id}/payments")
+        return [row for row in (data.get("results") or []) if isinstance(row, dict)]
+
+    async def iter_ledger_entries(
+        self,
+        *,
+        shop_id: int | str,
+        min_created: int,
+        max_created: int | None = None,
+        page_size: int = 100,
+        max_pages: int = 40,
+    ) -> list[dict[str, Any]]:
+        """The shop's payment ledger over a window — where fees actually live.
+
+        A receipt says what the buyer paid; it says nothing about what Etsy
+        charged for the sale, because at the moment the receipt exists nothing
+        has been charged yet. The ledger is the record of that, and it is a
+        single stream for the whole shop, so it is read once and shared out.
+        """
+        entries: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(max_pages):
+            params: dict[str, Any] = {
+                "limit": page_size,
+                "offset": offset,
+                "min_created": int(min_created),
+            }
+            if max_created:
+                params["max_created"] = int(max_created)
+            data = await self._get(
+                f"/shops/{shop_id}/payment-account/ledger-entries", params
+            )
+            page = [row for row in (data.get("results") or []) if isinstance(row, dict)]
+            entries.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return entries
+
+
 async def client_for(session: AsyncSession) -> EtsyClient:
     payload = await credentials.require(session, PROVIDER_ETSY)
     return EtsyClient(session, payload)

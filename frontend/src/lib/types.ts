@@ -98,6 +98,22 @@ export interface Order {
    *  Null for a label bought before PrintFlow recorded it. */
   label_cost: string | null
   label_currency: string | null
+  /** The currency every figure below is in — Etsy sends them all in the shop's. */
+  currency: string | null
+  /** What the buyer paid, all in, and how it was made up. Decimal strings. */
+  revenue: string | null
+  items_total: string | null
+  shipping_total: string | null
+  tax_total: string | null
+  discount_total: string | null
+  /** What selling it cost, as positive amounts taken off the top. Null until
+   *  the fee sweep has found them — Etsy charges after the sale, not during. */
+  etsy_fees: string | null
+  marketing_fees: string | null
+  processing_fees: string | null
+  /** Revenue less every fee and the label. Null when revenue is unknown. */
+  net: string | null
+  finance_synced_at: string | null
   shipstation_order_id: number | null
   summary: OrderSummary
   lines: OrderLine[]
@@ -105,6 +121,26 @@ export interface Order {
   service_code?: string | null
   has_label_pdf?: boolean
   bambuddy_base_url?: string | null
+  /** Where it is going, as Etsy sent it. Drawer only. */
+  ship_to?: {
+    name?: string
+    first_line?: string
+    second_line?: string
+    city?: string
+    state?: string
+    zip?: string
+    country?: string
+    formatted?: string
+    email?: string
+  } | null
+  /** Every fee line behind the totals. Drawer only. */
+  fee_lines?: {
+    kind: 'etsy' | 'marketing' | 'processing'
+    description: string | null
+    amount: string
+    ledger_entry_id?: number | string | null
+    created_at?: number | null
+  }[]
 }
 
 export interface IntegrationStatus {

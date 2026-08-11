@@ -20,7 +20,7 @@ from ..models import (
     OrderLine,
     PrintJob,
 )
-from ..services import credentials
+from ..services import credentials, finance
 from ..services.manufacturing import money
 from ..services.state import suggested_status
 
@@ -136,6 +136,11 @@ def _summary(order: Order) -> dict[str, Any]:
     }
 
 
+def _amount(value: Any) -> str | None:
+    """Money to the screen: a decimal string, rounded to cents."""
+    return None if value is None else str(money(value))
+
+
 def order_card(order: Order) -> dict[str, Any]:
     return {
         "id": order.id,
@@ -155,6 +160,19 @@ def order_card(order: Order) -> dict[str, Any]:
         # to cents on the way out like every other figure PrintFlow shows.
         "label_cost": str(money(order.label_cost)) if order.label_cost is not None else None,
         "label_currency": order.label_currency,
+        # What the order was worth and what selling it cost. All decimal
+        # strings, all in `currency`; see the finance service for why the fees
+        # arrive later than everything else.
+        "currency": order.currency,
+        **{
+            field: _amount(getattr(order, field))
+            for field in (
+                "revenue", "items_total", "shipping_total", "tax_total",
+                "discount_total", "etsy_fees", "marketing_fees", "processing_fees",
+            )
+        },
+        "net": _amount(finance.net_of(order)),
+        "finance_synced_at": order.finance_synced_at,
         "shipstation_order_id": order.shipstation_order_id,
         "summary": _summary(order),
         "lines": _line_tree(order),
@@ -198,6 +216,10 @@ async def load_order_detail(session: AsyncSession, order_id) -> dict[str, Any] |
     payload["carrier_code"] = order.carrier_code
     payload["service_code"] = order.service_code
     payload["has_label_pdf"] = order.label_pdf is not None
+    # The address and the fee lines are drawer-sized, not card-sized: one is
+    # read when packing and the other when somebody queries a number.
+    payload["ship_to"] = order.ship_to
+    payload["fee_lines"] = order.fee_lines or []
     bambuddy = await credentials.load(session, "bambuddy")
     base_url = (bambuddy.get("base_url") or "").rstrip("/") if bambuddy else ""
     payload["bambuddy_base_url"] = base_url or None

@@ -249,6 +249,61 @@ wrong on any insured order. A label ShipStation did not price shows no price:
 read as $0.00. Labels bought before this release have no cost to show, since
 the number was never kept.
 
+## Where it goes, and what it made
+
+The drawer carries two blocks that come from Etsy rather than from PrintFlow.
+
+**Ship to** is the delivery address off the receipt, with a **Copy** button. The
+address shown is Etsy's own `formatted_address` where there is one — already
+laid out for the destination country, which is the version to put on a parcel,
+because address order is not the same everywhere and reassembling the parts here
+would get some countries wrong. The parts are kept in the database alongside it,
+so "everything going to Illinois" remains a question a field can answer.
+
+**Money** is the whole picture of one order, which no single system holds:
+
+* **Revenue** — what the buyer paid, all in, with the split beneath it: items,
+  shipping, tax, discount. Shipping the buyer paid for is not the same kind of
+  money as the item price, and a shop that wants to know whether its postage is
+  covered needs the two apart.
+* **Etsy fees**, **Marketing fees** and **Processing fees**, each as a positive
+  amount taken off the top.
+* **Shipping label** — PrintFlow's own, from [what the label cost](#what-the-label-costs-and-what-it-cost).
+* **Net** — revenue less all of it. This is the figure none of Etsy,
+  QuickBooks or ShipStation can produce on its own.
+
+Every fee line behind those totals folds out underneath, straight from the
+ledger and in its own words, so a number nobody expected can be read rather than
+argued with.
+
+### Why the fees arrive late
+
+The address and the money the buyer paid are in the receipt PrintFlow already
+stores on every order, so they cost nothing and are there the instant an order
+arrives — including on orders taken long before any of this was being read,
+which fill in on the next poll.
+
+The fees are not in the receipt and cannot be: at the moment a receipt exists,
+Etsy has not charged anything yet. They land afterwards on the shop's **payment
+ledger**, sometimes days later. So they are a sweep that runs again rather than
+something intake could have done once, and an order with revenue and no fees is
+normal rather than broken — the Money block says which of *"none yet"* and
+*"never looked"* it is, and **Check Etsy for fees** asks now instead of waiting
+for the next poll.
+
+Attributing a ledger line to an order takes a step, because a fee points at
+whatever caused it and that can be the receipt, the payment that settled it, or
+a single transaction. All three ids are collected and a line matching any of
+them belongs to that order. Etsy does not label a line "marketing" either — it
+says *"Offsite Ads fee for order 1234"* — so the buckets are decided by reading
+the ledger's own words, which is why the words are listed in the source rather
+than buried in a pattern. Anything that is not recognisably a fee is left out
+entirely: a deposit is not a cost of selling.
+
+The ledger is one stream for the whole shop, so it is read **once** per sweep
+and shared out across every order in the window, rather than asked about per
+order. The window is 45 days; fees older than that settled long ago.
+
 ## Finding an order, and changing a match
 
 The board draws the five live columns, so a cancelled order is not on it and a

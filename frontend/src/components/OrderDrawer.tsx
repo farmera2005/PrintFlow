@@ -670,6 +670,9 @@ export default function OrderDrawer({
                   )}
                 </section>
 
+                <ShipTo order={order} />
+                <Money order={order} onRefreshed={load} />
+
                 <section className="flex flex-wrap gap-2">
                   <Button
                     size="sm"
@@ -773,5 +776,162 @@ export default function OrderDrawer({
         />
       ) : null}
     </>
+  )
+}
+
+/** Where the parcel is going, as Etsy sent it.
+ *
+ *  `formatted_address` is Etsy's own layout for the destination country, which
+ *  is the version to copy onto a label — address order is not the same
+ *  everywhere, and reassembling the parts here would get some countries wrong.
+ *  The parts are shown only when there is no formatted version. */
+function ShipTo({ order }: { order: Order }) {
+  const to = order.ship_to
+  if (!to) return null
+  const lines = (
+    to.formatted
+      ? to.formatted.split('\n')
+      : [
+          to.first_line,
+          to.second_line,
+          [to.city, to.state, to.zip].filter(Boolean).join(' '),
+          to.country,
+        ]
+  )
+    .filter((line): line is string => Boolean(line && line.trim()))
+    // Etsy's formatted address opens with the recipient, and the name is
+    // already the heading of this block — printed twice it reads as a mistake.
+    .filter((line) => line.trim() !== (to.name ?? '').trim())
+
+  return (
+    <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+          Ship to
+        </h3>
+        <button
+          type="button"
+          className="ml-auto text-xs text-ink-500 underline"
+          onClick={() =>
+            navigator.clipboard?.writeText(
+              [to.name, ...lines].filter(Boolean).join('\n'),
+            )
+          }
+        >
+          Copy
+        </button>
+      </div>
+      <p className="mt-2 text-sm font-medium text-ink-800">{to.name ?? '—'}</p>
+      {lines.map((line) => (
+        <p key={line} className="text-sm text-ink-600">
+          {line}
+        </p>
+      ))}
+      {to.email ? <p className="mt-1 text-xs text-ink-500">{to.email}</p> : null}
+    </section>
+  )
+}
+
+/** What the order was worth, and what selling it cost.
+ *
+ *  Three systems each hold a piece: Etsy knows what the buyer paid and what it
+ *  charged for the sale, ShipStation knows what the label cost, and only
+ *  PrintFlow sees all of them at once. The fees arrive later than the rest —
+ *  Etsy charges after the sale, not during — so an order with none yet says so
+ *  rather than showing a net that is really just the revenue. */
+function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }) {
+  if (!order.revenue && !order.etsy_fees && !order.label_cost) return null
+  const currency = order.currency ?? order.label_currency
+  const show = (amount: string | null) => (amount ? formatMoney(amount, currency) : null)
+
+  const takings: [string, string | null][] = [
+    ['Items', show(order.items_total)],
+    ['Shipping', show(order.shipping_total)],
+    ['Tax', show(order.tax_total)],
+    ['Discount', order.discount_total ? `−${show(order.discount_total)}` : null],
+  ]
+  const costs: [string, string | null][] = [
+    ['Etsy fees', show(order.etsy_fees)],
+    ['Marketing fees', show(order.marketing_fees)],
+    ['Processing fees', show(order.processing_fees)],
+    ['Shipping label', show(order.label_cost)],
+  ]
+  const anyFees = order.etsy_fees || order.marketing_fees || order.processing_fees
+
+  return (
+    <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+          Money
+        </h3>
+        <button
+          type="button"
+          className="ml-auto text-xs text-ink-500 underline"
+          onClick={() => api.post('/api/orders/finances/refresh').then(onRefreshed)}
+        >
+          Check Etsy for fees
+        </button>
+      </div>
+
+      <dl className="mt-2 space-y-1 text-sm">
+        <div className="flex justify-between font-medium text-ink-800">
+          <dt>Revenue</dt>
+          <dd>{show(order.revenue) ?? '—'}</dd>
+        </div>
+        {takings.map(([label, value]) =>
+          value ? (
+            <div key={label} className="flex justify-between pl-3 text-xs text-ink-500">
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ) : null,
+        )}
+
+        {costs.map(([label, value]) =>
+          value ? (
+            <div key={label} className="flex justify-between text-ink-600">
+              <dt>{label}</dt>
+              <dd>−{value}</dd>
+            </div>
+          ) : null,
+        )}
+
+        {order.net ? (
+          <div className="flex justify-between border-t border-ink-200 pt-1 font-semibold text-ink-900">
+            <dt>Net</dt>
+            <dd>{show(order.net)}</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {!anyFees ? (
+        <p className="mt-2 text-xs text-ink-500">
+          {order.finance_synced_at
+            ? 'Etsy has charged no fees against this order yet.'
+            : 'Fees have not been read yet — Etsy posts them to the shop ledger ' +
+              'after the sale, so they arrive on a later poll.'}
+        </p>
+      ) : null}
+
+      {order.fee_lines?.length ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-ink-500">
+            {order.fee_lines.length} fee line
+            {order.fee_lines.length === 1 ? '' : 's'} from Etsy's ledger
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {order.fee_lines.map((line, index) => (
+              <li
+                key={`${line.ledger_entry_id ?? index}`}
+                className="flex justify-between gap-2 text-xs text-ink-500"
+              >
+                <span className="min-w-0 truncate">{line.description ?? line.kind}</span>
+                <span>{formatMoney(line.amount, currency)}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </section>
   )
 }

@@ -28,7 +28,7 @@ from ..models import (
     Product,
     User,
 )
-from ..services import audit, board, intake, shipping
+from ..services import audit, board, finance, intake, shipping
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import ALLOWED_LINE_OVERRIDES, recompute_order
 
@@ -491,6 +491,25 @@ async def match_shipstation(
         "matched": order.shipstation_order_id is not None,
         "shipstation_order_id": order.shipstation_order_id,
     }
+
+
+@router.post("/orders/finances/refresh")
+async def refresh_finances(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Read Etsy's ledger now rather than waiting for the next poll.
+
+    Fees land after the sale, so a shop looking at an order that sold this
+    morning will see none. This is the answer to "have they turned up yet".
+    """
+    try:
+        stats = await finance.sync_fees(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    await session.commit()
+    return stats
 
 
 @router.get("/orders/{order_id}/label-context")

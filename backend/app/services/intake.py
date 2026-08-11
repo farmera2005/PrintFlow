@@ -23,7 +23,7 @@ from ..models import (
     Product,
     ProductVariation,
 )
-from ..services import allocation, bom_options, printing, variations
+from ..services import allocation, bom_options, finance, printing, variations
 from ..services.state import recompute_order
 
 log = logging.getLogger("printflow.intake")
@@ -267,6 +267,9 @@ async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tupl
         # lines.
         order.raw = receipt
         order.buyer_name = extract_buyer_name(receipt) or order.buyer_name
+        # The address and the money are in the payload we were just handed, so
+        # every poll backfills the orders taken before any of it was read.
+        finance.apply_receipt(order)
         await session.flush()
         # Options were not always captured, and an order taken before they were
         # sits here forever otherwise: this branch is the one every existing
@@ -285,6 +288,7 @@ async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tupl
         raw=receipt,
     )
     session.add(order)
+    finance.apply_receipt(order)
     await session.flush()
 
     for transaction in receipt.get("transactions") or []:
