@@ -16,7 +16,7 @@ from app.models import (
     BomLine,
     OrderLine,
     PrintJob,
-    PrintMapping,
+    PrintFile,
     Product,
     ProductVariation,
 )
@@ -141,36 +141,36 @@ def _mapping(**fields):
     fields.setdefault("units_per_plate", 4)
     # No printer models: this plate can go on anything.
     fields.setdefault("printer_models", [])
-    return PrintMapping(**fields)
+    return PrintFile(**fields)
 
 
 class TestPrintPlan:
     async def test_no_variation_uses_the_product_mapping(self):
-        plan = variations.print_plan(_mapping(), None)
+        plan = variations.print_plans([_mapping()], None)[0]
         assert (plan.bambuddy_archive_id, plan.plate_number, plan.units_per_plate) == (10, 1, 4)
 
     async def test_a_variation_archive_replaces_the_file(self):
-        plan = variations.print_plan(
-            _mapping(), _variation(bambuddy_archive_id=77, plate_number=2, units_per_plate=6)
-        )
+        plan = variations.print_plans(
+            [_mapping()], _variation(bambuddy_archive_id=77, plate_number=2, units_per_plate=6)
+        )[0]
         assert (plan.bambuddy_archive_id, plan.plate_number, plan.units_per_plate) == (77, 2, 6)
 
     async def test_a_variation_can_adjust_the_plate_without_a_new_file(self):
         """Same 3MF, different plate on it — a common way to model an option."""
-        plan = variations.print_plan(_mapping(), _variation(plate_number=3))
+        plan = variations.print_plans([_mapping()], _variation(plate_number=3))[0]
         assert plan.bambuddy_archive_id == 10
         assert plan.plate_number == 3
         assert plan.units_per_plate == 4
 
     async def test_a_variation_archive_stands_in_for_a_missing_mapping(self):
-        plan = variations.print_plan(None, _variation(bambuddy_archive_id=77))
+        plan = variations.print_plans([], _variation(bambuddy_archive_id=77))[0]
         assert plan.bambuddy_archive_id == 77
         # Nothing to inherit, so the safe defaults apply.
         assert (plan.plate_number, plan.units_per_plate) == (1, 1)
 
     async def test_nothing_to_print_from_is_reported_as_nothing(self):
-        assert variations.print_plan(None, _variation()) is None
-        assert variations.print_plan(None, None) is None
+        assert variations.print_plans([], _variation()) == []
+        assert variations.print_plans([], None) == []
 
 
 class TestStockItem:
@@ -265,7 +265,7 @@ async def _setup(db, *, yes_archive=77):
     db.add(product)
     await db.flush()
     db.add(
-        PrintMapping(
+        PrintFile(
             product_id=product.id,
             bambuddy_archive_id=10,
             plate_number=1,
@@ -367,7 +367,7 @@ class TestThroughIntake:
         db.add(product)
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )
@@ -406,7 +406,7 @@ class TestThroughIntake:
         db.add(product)
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )
@@ -451,7 +451,7 @@ class TestThroughIntake:
         db.add(product)
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )
@@ -600,7 +600,7 @@ class TestVariantProducts:
         db.add(master)
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=master.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )
@@ -623,7 +623,7 @@ class TestVariantProducts:
         db.add(variant)
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=variant.id, bambuddy_archive_id=99, plate_number=1, units_per_plate=1
             )
         )

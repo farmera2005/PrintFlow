@@ -201,8 +201,11 @@ class Product(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    print_mapping: Mapped[PrintMapping | None] = relationship(
-        back_populates="product", cascade="all, delete-orphan", uselist=False, lazy="selectin"
+    print_files: Mapped[list[PrintFile]] = relationship(
+        back_populates="product",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="PrintFile.created_at",
     )
     option_rules: Mapped[list[BomOptionRule]] = relationship(
         back_populates="bundle",
@@ -478,14 +481,23 @@ class BomOptionRule(Base):
     )
 
 
-class PrintMapping(Base):
-    """SKU → archived 3MF + plate. One mapping per printed SKU."""
+class PrintFile(Base):
+    """One file a product can be printed from, and the machines it is for.
+
+    A product has as many of these as it has ways of being made. A farm whose
+    library is sorted by printer model has one file per model — the same part,
+    sliced differently — and which one gets used is a question about which
+    machine is free, answered when the plate is actually sent rather than
+    guessed at when it is planned.
+
+    The table is still `print_mappings`, from when a product had exactly one.
+    """
 
     __tablename__ = "print_mappings"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     product_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("products.id", ondelete="CASCADE"), unique=True, nullable=False
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
     )
     # Two ways to say the same thing, because instances differ on which they
     # accept: the archive's id, and its path in the file manager. A file picked
@@ -523,7 +535,7 @@ class PrintMapping(Base):
         ),
     )
 
-    product: Mapped[Product] = relationship(back_populates="print_mapping")
+    product: Mapped[Product] = relationship(back_populates="print_files")
 
 
 class Order(Base):
@@ -673,6 +685,14 @@ class PrintJob(Base):
     printer_models: Mapped[list[str]] = mapped_column(
         JsonType, nullable=False, default=list
     )
+    # Every file this plate could be printed from, one per way the product can
+    # be made. Which one is used is a question about which machine is free, and
+    # that is not knowable when the plate is planned — so the choice is carried
+    # here and made at dispatch, where the answer is. The fields above record
+    # what was chosen once it has been.
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
     units_expected: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default=JOB_PENDING)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -690,6 +710,26 @@ class PrintJob(Base):
     )
 
     order_line: Mapped[OrderLine] = relationship(back_populates="print_jobs")
+
+    @property
+    def file_label(self) -> str | None:
+        """What to call the file this plate is using, for a person reading it.
+
+        Two plates of the same product are no longer the same plate — one may be
+        the H2D slicing and the next the P1S — so the product's name no longer
+        says what is printing. The candidate the plate settled on carries the
+        name it was picked under; failing that, the path, failing that the id.
+        """
+        for candidate in self.candidates or []:
+            if (
+                candidate.get("archive_id") == self.bambuddy_archive_id
+                and candidate.get("file_path") == self.bambuddy_file_path
+                and candidate.get("name")
+            ):
+                return str(candidate["name"])
+        if self.bambuddy_file_path:
+            return self.bambuddy_file_path.rsplit("/", 1)[-1]
+        return f"archive {self.bambuddy_archive_id}" if self.bambuddy_archive_id else None
 
 
 class MadeSheet(Base):

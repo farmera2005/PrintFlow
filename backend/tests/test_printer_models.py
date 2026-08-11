@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import select
 
 from app.integrations.bambuddy import BambuddyClient
-from app.models import PrintJob, PrintMapping, ProductVariation
+from app.models import PrintJob, PrintFile, ProductVariation
 from app.services import intake, printing, variations
 
 from test_intake_pipeline import FakeBambuddy, FakeQbo, seed_catalog
@@ -85,31 +85,31 @@ class TestChoosePrinter:
 
 class TestPlanResolvesModels:
     def test_the_product_says_which_machines_can_make_it(self):
-        mapping = PrintMapping(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
+        mapping = PrintFile(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
                                printer_models=["X1C", "P1S"])
-        plan = variations.print_plan(mapping, None)
+        plan = variations.print_plans([mapping], None)[0]
         assert plan.printer_models == ("X1C", "P1S")
 
     def test_a_variation_narrows_it(self):
-        mapping = PrintMapping(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
+        mapping = PrintFile(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
                                printer_models=["X1C", "P1S"])
         # A taller version of the same part fits only the bigger machine.
         variation = ProductVariation(label="Tall", options=[], active=True,
                                      printer_models=["X1C"])
-        assert variations.print_plan(mapping, variation).printer_models == ("X1C",)
+        assert variations.print_plans([mapping], variation)[0].printer_models == ("X1C",)
 
     def test_a_variation_that_says_nothing_keeps_the_product_s_answer(self):
-        mapping = PrintMapping(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
+        mapping = PrintFile(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
                                printer_models=["X1C"])
         variation = ProductVariation(label="Red", options=[], active=True, printer_models=[])
-        assert variations.print_plan(mapping, variation).printer_models == ("X1C",)
+        assert variations.print_plans([mapping], variation)[0].printer_models == ("X1C",)
 
     def test_a_variation_with_its_own_file_brings_its_own_machines(self):
-        mapping = PrintMapping(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
+        mapping = PrintFile(bambuddy_archive_id=1, plate_number=1, units_per_plate=1,
                                printer_models=["X1C"])
         variation = ProductVariation(label="Tall", options=[], active=True,
                                      bambuddy_archive_id=77, printer_models=["A1 mini"])
-        plan = variations.print_plan(mapping, variation)
+        plan = variations.print_plans([mapping], variation)[0]
         assert (plan.bambuddy_archive_id, plan.printer_models) == (77, ("A1 mini",))
 
 
@@ -171,7 +171,7 @@ class TestDispatchByModel:
         catalog = await seed_catalog(db)
         mapping = (
             await db.execute(
-                select(PrintMapping).where(PrintMapping.product_id == catalog["part_y"].id)
+                select(PrintFile).where(PrintFile.product_id == catalog["part_y"].id)
             )
         ).scalar_one()
         mapping.printer_models = ["X1C"]
@@ -192,7 +192,7 @@ class TestDispatchByModel:
         catalog = await seed_catalog(db)
         mapping = (
             await db.execute(
-                select(PrintMapping).where(PrintMapping.product_id == catalog["part_y"].id)
+                select(PrintFile).where(PrintFile.product_id == catalog["part_y"].id)
             )
         ).scalar_one()
         mapping.printer_models = ["H2D"]
@@ -231,7 +231,7 @@ class TestDispatchByModel:
         catalog = await seed_catalog(db)
         mapping = (
             await db.execute(
-                select(PrintMapping).where(PrintMapping.product_id == catalog["part_y"].id)
+                select(PrintFile).where(PrintFile.product_id == catalog["part_y"].id)
             )
         ).scalar_one()
         mapping.printer_models = ["X1C"]

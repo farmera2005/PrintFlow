@@ -29,6 +29,11 @@ export interface PrintJob {
   bambuddy_archive_id: number
   plate_number: number | null
   printer_id: number | null
+  /** The file this plate is using, named for a person. A product can hold
+   *  several, so its name no longer says which one is printing. */
+  file_label: string | null
+  /** The models that could take it. Empty means any of them. */
+  printer_models: string[]
   units_expected: number
   queued_at: string | null
   completed_at: string | null
@@ -122,7 +127,11 @@ export interface BomEntry {
   quantity: number
 }
 
-export interface PrintMapping {
+/** One file a product can be printed from, and the machines it is for.
+ *
+ *  A product has one per way it can be made — the same part sliced for each
+ *  machine that can take it. Which one is used is decided when a plate is sent. */
+export interface PrintFile {
   id: string
   /** Either of these identifies the file; a file-manager pick may have no id. */
   bambuddy_archive_id: number | null
@@ -192,7 +201,7 @@ export interface Product {
   active: boolean
   created_at: string
   updated_at: string
-  print_mapping: PrintMapping | null
+  print_files: PrintFile[]
   bom: BomEntry[]
   option_rules: OptionRule[]
   etsy_links: EtsyLink[]

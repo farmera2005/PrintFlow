@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.models import BomLine, OrderLine, PrintJob, PrintMapping, Product
+from app.models import BomLine, OrderLine, PrintJob, PrintFile, Product
 from app.services import intake
 
 pytestmark = pytest.mark.asyncio
@@ -133,7 +133,7 @@ class TestUnmatching:
         product = await _product(db, "BIN")
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )
@@ -154,7 +154,7 @@ class TestUnmatching:
         product = await _product(db, "BIN")
         await db.flush()
         db.add(
-            PrintMapping(
+            PrintFile(
                 product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
             )
         )

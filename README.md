@@ -228,6 +228,15 @@ Two ways back from a wrong match:
 
 A printed product needs two answers: which file, and what can print it.
 
+**A product can hold several files, and usually should.** A shop whose library
+is sorted by machine has the same part sliced once per printer model, and those
+files are alternatives rather than a sequence — the part gets made once, from
+whichever of them fits the machine that is free. So a product lists its files,
+each ticking the models *that* file was sliced for, and **Add another file**
+adds the next one. Which file a plate uses is not decided when the plate is
+planned; it is decided when the plate is sent. See
+[Several files, one part](#several-files-one-part).
+
 **The file** comes off Bambuddy. **Browse Bambuddy files** opens on the **file
 manager**, showing Bambuddy's own folder structure with the folders closed — so
 what you see first is the shape of the library, top level and item counts, on
@@ -347,6 +356,11 @@ document, adopts what it now says, and remembers it. An instance whose library
 is at `/api/v1/library` has almost certainly moved its printers and its queue as
 well, and none of that should be an operator's problem to notice.
 
+That covers **sending plates**, not only browsing for them. Reading the farm and
+posting to the queue heal on a 404 exactly as the file picker does, because a
+build where you can pick a file and not print it is the worse half of the same
+fault. A 404 created nothing, so the retry cannot queue a plate twice.
+
 Not every build has one. If the instance has no *per-printer* file endpoint,
 picking a printer reads the shared library instead and says so — the machine is
 still a real answer to where the plate goes, even when it is not where the file
@@ -380,25 +394,70 @@ A variation can name its own models, which is how a taller version of the same
 part ends up restricted to the bigger machine while the standard one still runs
 anywhere. Left blank, it uses the product's.
 
+### Several files, one part
+
+Ticking models on a *single* file assumes one file will feed every machine that
+can take it, and on a farm of mixed printers that is often false: a plate sliced
+for a P1S is not the plate an H2D should run. The honest shape is one file per
+machine type, which is exactly how such a library is already organised — a
+folder per model, the same part inside each.
+
+So a product's files are a list. **Add another file** appends one, each with its
+own Bambuddy file, plate number, units per plate, print options and ticked
+models. Together they answer all three questions at once: what the product can
+be printed from, every machine the product can be made on — the union of what
+its files tick — and which file belongs to which of those machines.
+
+**The choice is made at dispatch, not at planning.** When an order arrives,
+every file is written onto the plate as a candidate. The plate then waits, and
+when it is actually sent PrintFlow picks among the candidates by what is free
+*then*: a file naming a model that has a machine beats one that does not, a
+file naming machines beats a file that names none, and among equals the plate
+goes to the least loaded of them, so a run of plates spreads across the farm
+instead of stacking behind whichever file happens to be first in the list.
+Deciding earlier would mean deciding against a farm that has since changed.
+
+A plate that has not gone out yet still names a file — the first candidate — so
+the print queue has something to show rather than a blank row. Adding, editing
+or removing a file re-plans any plate that has not reached Bambuddy, so a fourth
+machine getting its own slicing is picked up by the orders already waiting.
+Plates already on a printer are left alone.
+
+Two consequences worth knowing:
+
+* **Plate maths uses the least any file promises.** If the H2D slicing fits four
+  and the P1S slicing fits two, four units is planned as two plates, because the
+  machine is not chosen yet and planning for four would ship the order short.
+* **No machine for any of them** and the plate stays queued, its note listing
+  every model all the files were looking for — not just the first one's.
+
+A file that names neither an archive nor a path is refused rather than saved
+empty, since it is not a way of making anything.
+
 ### Picking a printer, then a file on it
 
 Choosing a printer in the picker browses *that machine's* file manager, and the
 models disappear — there is nothing left for them to decide. A file on one
 printer's storage does not exist on any other, so the machine is settled by the
 same act that settled the file, and dispatch sends the plate there without
-consulting the model rules at all. Even a mapping whose models say something
-else goes to the machine the file is on, because that is the only place it can
-be printed.
+consulting the model rules at all. Even a file whose models say something else
+goes to the machine the file is on, because that is the only place it can be
+printed.
 
-Point the same mapping back at the library or the shared file manager and the
+This is per file, not per product. A product can perfectly well hold one file
+pinned to the machine that keeps it and two more from the shared library, and
+the plate goes wherever the file it ends up using lives.
+
+Point the same file back at the library or the shared file manager and the
 models come back with it.
 
 Upgrading replaces the old single **preferred printer ID** with the models
 above. There is no way to translate one into the other — which model a printer
-id is belongs to Bambuddy, not to PrintFlow's database — so existing mappings
-come through with nothing ticked, which is the behaviour they already had. A
-mapping now needs an archive id *or* a file-manager path rather than an id
-outright, since a file manager entry may have no id at all.
+id is belongs to Bambuddy, not to PrintFlow's database — so existing files come
+through with nothing ticked, which is the behaviour they already had. A file now
+needs an archive id *or* a file-manager path rather than an id outright, since a
+file manager entry may have no id at all. A product that had one print mapping
+comes through as a product with one file in its list, unchanged.
 
 ## Bills of materials, from QuickBooks
 
@@ -416,7 +475,7 @@ a list of what is already there is the wrong list to be offered.
 Picking an item finds the product that already points at it, or makes a stocked
 one for it. Components stay products underneath because that is what the rest of
 the pipeline works in: allocation reads a product's QuickBooks item, printing
-reads its mapping, a made-items sheet rolls up its BOM. What it saves is the
+reads its print files, a made-items sheet rolls up its BOM. What it saves is the
 step in the middle — retyping a material as a product and then linking it back
 to the item you picked it from, which exists only to be got wrong.
 
@@ -816,7 +875,8 @@ an audit row**.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
 printer models, BOM editor), **Print Queue** (every plate across all orders,
-re-queue/cancel),
+re-queue/cancel — each row naming the file it is using and the machine it went
+to, since several plates of one product may be several different files),
 **Sync Log** (background runs + audit trail), **Settings**.
 
 ## How the decisioning works
@@ -884,8 +944,8 @@ Queue payload field names are stored alongside, and still edited by hand:
 
 Responses are parsed defensively (several common field spellings and envelope
 shapes are accepted), so a renamed field degrades to "unknown" rather than
-breaking a poll. A print mapping's `print_options` JSON is merged into the
-queue request as-is.
+breaking a poll. The `print_options` JSON of whichever print file the plate
+ended up using is merged into the queue request as-is.
 
 ## Development
 

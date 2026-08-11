@@ -24,7 +24,7 @@ from ..models import (
     MadeSheetLine,
     Order,
     OrderLine,
-    PrintMapping,
+    PrintFile,
     Product,
     ProductVariation,
     User,
@@ -38,7 +38,6 @@ router = APIRouter(prefix="/api/products", tags=["products"])
 
 
 def _serialize(product: Product) -> dict[str, Any]:
-    mapping = product.print_mapping
     return {
         "id": product.id,
         "sku": product.sku,
@@ -50,21 +49,20 @@ def _serialize(product: Product) -> dict[str, Any]:
         "active": product.active,
         "created_at": product.created_at,
         "updated_at": product.updated_at,
-        "print_mapping": (
+        "print_files": [
             {
-                "id": mapping.id,
-                "bambuddy_archive_id": mapping.bambuddy_archive_id,
-                "bambuddy_archive_name": mapping.bambuddy_archive_name,
-                "bambuddy_file_path": mapping.bambuddy_file_path,
-                "bambuddy_printer_id": mapping.bambuddy_printer_id,
-                "plate_number": mapping.plate_number,
-                "units_per_plate": mapping.units_per_plate,
-                "print_options": mapping.print_options,
-                "printer_models": mapping.printer_models or [],
+                "id": row.id,
+                "bambuddy_archive_id": row.bambuddy_archive_id,
+                "bambuddy_archive_name": row.bambuddy_archive_name,
+                "bambuddy_file_path": row.bambuddy_file_path,
+                "bambuddy_printer_id": row.bambuddy_printer_id,
+                "plate_number": row.plate_number,
+                "units_per_plate": row.units_per_plate,
+                "print_options": row.print_options,
+                "printer_models": row.printer_models or [],
             }
-            if mapping
-            else None
-        ),
+            for row in product.print_files
+        ],
         "bom": [
             {
                 "id": line.id,
@@ -141,7 +139,7 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
             select(Product)
             .where(Product.id == product_id)
             .options(
-                selectinload(Product.print_mapping),
+                selectinload(Product.print_files),
                 selectinload(Product.bom_lines).selectinload(BomLine.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
@@ -168,7 +166,7 @@ async def list_products(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     stmt = select(Product).options(
-        selectinload(Product.print_mapping),
+        selectinload(Product.print_files),
         selectinload(Product.bom_lines).selectinload(BomLine.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
@@ -286,10 +284,10 @@ async def update_product(
                     "This product is a component of another bundle. BOMs are single-level, "
                     "so it cannot become a bundle itself.",
                 )
-        if body.fulfillment != "printed" and product.print_mapping is not None:
+        if body.fulfillment != "printed" and product.print_files:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "Remove the Bambuddy print mapping before changing the fulfillment type.",
+                "Remove the Bambuddy print files before changing the fulfillment type.",
             )
 
     # Clearing the code regenerates one rather than leaving the product with
@@ -686,11 +684,11 @@ async def delete_bom_line(
 
 
 # --------------------------------------------------------------------------
-# Print mapping (attached via the Bambuddy archive browser, §4.3)
+# Print files (attached from the Bambuddy file picker)
 # --------------------------------------------------------------------------
 
 
-class PrintMappingRequest(BaseModel):
+class PrintFileRequest(BaseModel):
     bambuddy_archive_id: int | None = None
     bambuddy_archive_name: str | None = None
     bambuddy_file_path: str | None = None
@@ -701,55 +699,69 @@ class PrintMappingRequest(BaseModel):
     printer_models: list[str] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
-    def _names_a_file(self) -> "PrintMappingRequest":
+    def _names_a_file(self) -> "PrintFileRequest":
         if self.bambuddy_archive_id is None and not (self.bambuddy_file_path or "").strip():
             raise ValueError(
-                "A print mapping needs a file: either a Bambuddy archive id or a "
+                "A print file needs a file: either a Bambuddy archive id or a "
                 "path from the file manager."
             )
         return self
 
 
-@router.put("/{product_id}/print-mapping")
-async def upsert_print_mapping(
-    product_id: uuid.UUID,
-    body: PrintMappingRequest,
-    user: User = Depends(require_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
+def _apply_file(row: PrintFile, body: PrintFileRequest) -> None:
+    row.bambuddy_archive_id = body.bambuddy_archive_id
+    row.bambuddy_archive_name = body.bambuddy_archive_name
+    row.bambuddy_file_path = (body.bambuddy_file_path or "").strip() or None
+    row.bambuddy_printer_id = body.bambuddy_printer_id
+    row.plate_number = body.plate_number
+    row.units_per_plate = body.units_per_plate
+    row.print_options = body.print_options
+    # A file that lives on one machine is printed on that machine, so the models
+    # have nothing left to decide and keeping them would only read as a second,
+    # contradictory answer to the same question.
+    row.printer_models = (
+        [] if body.bambuddy_printer_id is not None else _clean_models(body.printer_models)
+    )
+
+
+async def _printed_product(session: AsyncSession, product_id: uuid.UUID) -> Product:
     product = await _get(session, product_id)
     if product.fulfillment != "printed":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Only products with fulfillment 'printed' can have a Bambuddy mapping.",
+            "Only products with fulfillment 'printed' can have Bambuddy files.",
         )
-    mapping = product.print_mapping or PrintMapping(product_id=product.id)
-    mapping.bambuddy_archive_id = body.bambuddy_archive_id
-    mapping.bambuddy_archive_name = body.bambuddy_archive_name
-    mapping.bambuddy_file_path = (body.bambuddy_file_path or "").strip() or None
-    mapping.bambuddy_printer_id = body.bambuddy_printer_id
-    mapping.plate_number = body.plate_number
-    mapping.units_per_plate = body.units_per_plate
-    mapping.print_options = body.print_options
-    # A file that lives on one machine is printed on that machine, so the models
-    # have nothing left to decide and keeping them would only read as a second,
-    # contradictory answer to the same question.
-    mapping.printer_models = (
-        [] if body.bambuddy_printer_id is not None else _clean_models(body.printer_models)
-    )
-    session.add(mapping)
+    return product
+
+
+@router.post("/{product_id}/print-files")
+async def add_print_file(
+    product_id: uuid.UUID,
+    body: PrintFileRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Attach another way of printing this product.
+
+    A product has one of these per way it can be made — the same part sliced for
+    each machine that can take it — and which one gets used is decided when a
+    plate is actually sent.
+    """
+    product = await _printed_product(session, product_id)
+    row = PrintFile(product_id=product.id)
+    _apply_file(row, body)
+    session.add(row)
     await session.flush()
     await audit.record(
         session,
         entity_type="product",
         entity_id=product.id,
-        action="print_mapping_set",
+        action="print_file_added",
         detail={
             "archive_id": body.bambuddy_archive_id,
-            "file_path": mapping.bambuddy_file_path,
+            "file_path": row.bambuddy_file_path,
             "printer_id": body.bambuddy_printer_id,
-            "plate_number": body.plate_number,
-            "units_per_plate": body.units_per_plate,
+            "printer_models": row.printer_models,
         },
         actor=user.username,
     )
@@ -757,15 +769,47 @@ async def upsert_print_mapping(
     return _serialize(await _get(session, product_id))
 
 
-@router.delete("/{product_id}/print-mapping")
-async def delete_print_mapping(
+@router.put("/{product_id}/print-files/{file_id}")
+async def update_print_file(
     product_id: uuid.UUID,
+    file_id: uuid.UUID,
+    body: PrintFileRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    await _printed_product(session, product_id)
+    row = await session.get(PrintFile, file_id)
+    if row is None or row.product_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Print file not found")
+    _apply_file(row, body)
+    await session.flush()
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product_id,
+        action="print_file_set",
+        detail={
+            "archive_id": body.bambuddy_archive_id,
+            "file_path": row.bambuddy_file_path,
+            "printer_id": body.bambuddy_printer_id,
+            "printer_models": row.printer_models,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+@router.delete("/{product_id}/print-files/{file_id}")
+async def delete_print_file(
+    product_id: uuid.UUID,
+    file_id: uuid.UUID,
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    product = await _get(session, product_id)
-    if product.print_mapping is not None:
-        await session.delete(product.print_mapping)
+    row = await session.get(PrintFile, file_id)
+    if row is not None and row.product_id == product_id:
+        await session.delete(row)
         await session.commit()
     return _serialize(await _get(session, product_id))
 

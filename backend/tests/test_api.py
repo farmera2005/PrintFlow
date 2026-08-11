@@ -219,38 +219,103 @@ class TestCatalogue:
         )
         assert response.status_code == 400
 
-    async def test_print_mapping_requires_printed_fulfillment(self, signed_in):
+    async def test_print_files_require_printed_fulfillment(self, signed_in):
         stocked = await make_product(signed_in, sku="STOCKED", fulfillment="stocked")
-        response = await signed_in.put(
-            f"/api/products/{stocked['id']}/print-mapping",
+        response = await signed_in.post(
+            f"/api/products/{stocked['id']}/print-files",
             json={"bambuddy_archive_id": 12, "units_per_plate": 2},
         )
         assert response.status_code == 400
 
-    async def test_print_mapping_round_trip(self, signed_in):
+    async def test_a_print_file_round_trips(self, signed_in):
         product = await make_product(signed_in, sku="PRINTED")
         saved = (
-            await signed_in.put(
-                f"/api/products/{product['id']}/print-mapping",
+            await signed_in.post(
+                f"/api/products/{product['id']}/print-files",
                 json={
                     "bambuddy_archive_id": 77,
                     "bambuddy_archive_name": "dragon.3mf",
                     "plate_number": 3,
                     "units_per_plate": 6,
                     "print_options": {"filament": "PETG"},
-                    "preferred_printer_id": 2,
+                    "printer_models": ["H2D"],
                 },
             )
         ).json()
-        mapping = saved["print_mapping"]
-        assert mapping["bambuddy_archive_id"] == 77
-        assert mapping["units_per_plate"] == 6
-        assert mapping["print_options"] == {"filament": "PETG"}
+        [file] = saved["print_files"]
+        assert file["bambuddy_archive_id"] == 77
+        assert file["units_per_plate"] == 6
+        assert file["print_options"] == {"filament": "PETG"}
+        assert file["printer_models"] == ["H2D"]
 
         cleared = (
-            await signed_in.delete(f"/api/products/{product['id']}/print-mapping")
+            await signed_in.delete(
+                f"/api/products/{product['id']}/print-files/{file['id']}"
+            )
         ).json()
-        assert cleared["print_mapping"] is None
+        assert cleared["print_files"] == []
+
+    async def test_a_product_can_have_a_file_per_machine(self, signed_in):
+        """The reason this is a list: one part, sliced once per printer."""
+        product = await make_product(signed_in, sku="GRAIN-BIN")
+        for archive, model in ((1, "H2C"), (2, "H2D"), (3, "P1S")):
+            saved = (
+                await signed_in.post(
+                    f"/api/products/{product['id']}/print-files",
+                    json={
+                        "bambuddy_archive_id": archive,
+                        "bambuddy_archive_name": f"bin-{model}.3mf",
+                        "printer_models": [model],
+                    },
+                )
+            ).json()
+        assert [f["printer_models"] for f in saved["print_files"]] == [
+            ["H2C"], ["H2D"], ["P1S"]
+        ]
+
+        # Editing one leaves the others alone.
+        second = saved["print_files"][1]
+        edited = (
+            await signed_in.put(
+                f"/api/products/{product['id']}/print-files/{second['id']}",
+                json={
+                    "bambuddy_archive_id": 2,
+                    "bambuddy_archive_name": "bin-H2D.3mf",
+                    "units_per_plate": 4,
+                    "printer_models": ["H2D", "X2D"],
+                },
+            )
+        ).json()
+        assert [f["printer_models"] for f in edited["print_files"]] == [
+            ["H2C"], ["H2D", "X2D"], ["P1S"]
+        ]
+        assert [f["units_per_plate"] for f in edited["print_files"]] == [1, 4, 1]
+
+    async def test_a_file_pinned_to_a_printer_drops_its_models(self, signed_in):
+        # The machine is settled; models would only be a second, contradictory
+        # answer to the same question.
+        product = await make_product(signed_in, sku="PINNED")
+        saved = (
+            await signed_in.post(
+                f"/api/products/{product['id']}/print-files",
+                json={
+                    "bambuddy_file_path": "/cache/jig.3mf",
+                    "bambuddy_printer_id": 3,
+                    "printer_models": ["H2D"],
+                },
+            )
+        ).json()
+        [file] = saved["print_files"]
+        assert file["bambuddy_printer_id"] == 3
+        assert file["printer_models"] == []
+
+    async def test_a_file_that_names_nothing_is_refused(self, signed_in):
+        product = await make_product(signed_in, sku="NOFILE")
+        response = await signed_in.post(
+            f"/api/products/{product['id']}/print-files",
+            json={"units_per_plate": 2},
+        )
+        assert response.status_code == 422
 
     async def test_product_in_use_cannot_be_deleted(self, signed_in, db):
         product = await make_product(signed_in, sku="USED")

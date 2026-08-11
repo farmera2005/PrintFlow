@@ -12,6 +12,7 @@ import type {
   CatalogRow,
   Fulfillment,
   ObservedOption,
+  PrintFile,
   Product,
   ProductVariation,
   QboItem,
@@ -261,12 +262,14 @@ export default function Products() {
                 {product.fulfillment === 'printed' ? (
                   <Badge
                     className={
-                      product.print_mapping
+                      product.print_files.length
                         ? 'bg-emerald-100 text-emerald-800 ring-emerald-300'
                         : 'bg-red-100 text-red-800 ring-red-300'
                     }
                   >
-                    {product.print_mapping ? 'mapped' : 'no print mapping'}
+                    {product.print_files.length
+                      ? `${product.print_files.length} file${product.print_files.length === 1 ? '' : 's'}`
+                      : 'no print file'}
                   </Badge>
                 ) : null}
                 {product.qbo_item_id ? <Badge>QBO linked</Badge> : null}
@@ -472,10 +475,10 @@ function ProductEditor({
         ) : null}
 
         {product && fulfillment === 'printed' ? (
-          <PrintMappingEditor
+          <PrintFilesEditor
             product={product}
             onSaved={onSaved}
-            onOpenPicker={() => setArchivePickerOpen(true)}
+            onAddFile={() => setArchivePickerOpen(true)}
           />
         ) : null}
 
@@ -489,7 +492,7 @@ function ProductEditor({
 
         {!product ? (
           <Alert tone="info">
-            Save the product first — the BOM editor and Bambuddy mapping appear afterwards.
+            Save the product first — the BOM editor and Bambuddy files appear afterwards.
           </Alert>
         ) : null}
       </div>
@@ -506,23 +509,25 @@ function ProductEditor({
 
       {archivePickerOpen && product ? (
         <PrintFilePicker
-          choice={{
-            printer_id: product.print_mapping?.bambuddy_printer_id ?? null,
-            printer_models: product.print_mapping?.printer_models ?? [],
-          }}
+          // A new file starts from nothing rather than from the last one: it is
+          // there because this product prints somewhere else too.
+          choice={{ printer_id: null, printer_models: [] }}
           onClose={() => setArchivePickerOpen(false)}
           onPick={async (picked) => {
             setArchivePickerOpen(false)
-            const saved = await api.put<Product>(`/api/products/${product.id}/print-mapping`, {
-              bambuddy_archive_id: picked.archive_id,
-              bambuddy_archive_name: picked.name,
-              bambuddy_file_path: picked.file_path,
-              bambuddy_printer_id: picked.printer_id,
-              plate_number: product.print_mapping?.plate_number ?? 1,
-              units_per_plate: product.print_mapping?.units_per_plate ?? 1,
-              print_options: product.print_mapping?.print_options ?? {},
-              printer_models: picked.printer_models,
-            })
+            const saved = await api.post<Product>(
+              `/api/products/${product.id}/print-files`,
+              {
+                bambuddy_archive_id: picked.archive_id,
+                bambuddy_archive_name: picked.name,
+                bambuddy_file_path: picked.file_path,
+                bambuddy_printer_id: picked.printer_id,
+                plate_number: 1,
+                units_per_plate: 1,
+                print_options: {},
+                printer_models: picked.printer_models,
+              },
+            )
             await onSaved(saved)
           }}
         />
@@ -701,90 +706,157 @@ function BomEditor({
   )
 }
 
-function PrintMappingEditor({
+/** Every way this product can be printed, and which machines each one is for.
+ *
+ * A farm whose library is sorted by printer model has the same part sliced once
+ * per machine. They are alternatives, not a sequence: a plate uses whichever
+ * one names a printer that is free, decided when it is actually sent. So this
+ * is a list, and each row answers the same two questions — which file, and
+ * which machines will take it.
+ */
+function PrintFilesEditor({
   product,
   onSaved,
-  onOpenPicker,
+  onAddFile,
 }: {
   product: Product
   onSaved: (product: Product) => void | Promise<void>
-  onOpenPicker: () => void
+  onAddFile: () => void
 }) {
-  const mapping = product.print_mapping
-  const [plate, setPlate] = useState(mapping?.plate_number ?? 1)
-  const [units, setUnits] = useState(mapping?.units_per_plate ?? 1)
-  const [options, setOptions] = useState(
-    JSON.stringify(mapping?.print_options ?? {}, null, 0),
+  const files = product.print_files
+
+  // What the files add up to. Each row says where it alone can go; between them
+  // they say what the product can be made on, which is the thing an operator
+  // actually wants to know and is nowhere on a single row.
+  const machines = (() => {
+    if (!files.length) return null
+    if (files.some((file) => file.bambuddy_printer_id === null && !file.printer_models.length))
+      return 'any printer'
+    const named = new Set<string>()
+    for (const file of files) {
+      if (file.bambuddy_printer_id !== null) named.add(`printer ${file.bambuddy_printer_id}`)
+      for (const model of file.printer_models) named.add(model)
+    }
+    return [...named].join(', ')
+  })()
+
+  return (
+    <section className="rounded-lg bg-ink-50 p-3">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-48 flex-1">
+          <h3 className="text-sm font-semibold text-ink-800">Bambuddy print files</h3>
+          <p className="text-xs text-ink-500">
+            One per way this product can be made. A plate goes to whichever
+            machine is free and has a file for it.
+          </p>
+          {machines ? (
+            <p className="mt-1 text-xs text-ink-600">
+              Can be printed on: <span className="font-medium">{machines}</span>
+            </p>
+          ) : null}
+        </div>
+        <Button size="sm" variant={files.length ? undefined : 'primary'} onClick={onAddFile}>
+          {files.length ? 'Add another file' : 'Browse Bambuddy files'}
+        </Button>
+      </div>
+
+      {!files.length ? (
+        <p className="mt-2 text-sm text-red-800">
+          No file attached — orders needing this product cannot be queued.
+        </p>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {files.map((file) => (
+            <li key={file.id} className="rounded-md border border-ink-200 bg-white p-2">
+              <PrintFileRow product={product} file={file} onSaved={onSaved} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
-  const [printerModels, setPrinterModels] = useState<string[]>(mapping?.printer_models ?? [])
+}
+
+function PrintFileRow({
+  product,
+  file,
+  onSaved,
+}: {
+  product: Product
+  file: PrintFile
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const [plate, setPlate] = useState(file.plate_number)
+  const [units, setUnits] = useState(file.units_per_plate)
+  const [options, setOptions] = useState(JSON.stringify(file.print_options ?? {}, null, 0))
+  const [printerModels, setPrinterModels] = useState<string[]>(file.printer_models)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
 
   useEffect(() => {
-    setPlate(mapping?.plate_number ?? 1)
-    setUnits(mapping?.units_per_plate ?? 1)
-    setOptions(JSON.stringify(mapping?.print_options ?? {}, null, 0))
-    setPrinterModels(mapping?.printer_models ?? [])
-  }, [mapping])
+    setPlate(file.plate_number)
+    setUnits(file.units_per_plate)
+    setOptions(JSON.stringify(file.print_options ?? {}, null, 0))
+    setPrinterModels(file.printer_models)
+  }, [file])
 
   const save = async () => {
     setError(null)
     try {
-      const saved = await api.put<Product>(`/api/products/${product.id}/print-mapping`, {
-        bambuddy_archive_id: mapping?.bambuddy_archive_id,
-        bambuddy_archive_name: mapping?.bambuddy_archive_name,
-        bambuddy_file_path: mapping?.bambuddy_file_path,
-        bambuddy_printer_id: mapping?.bambuddy_printer_id,
-        plate_number: plate,
-        units_per_plate: units,
-        print_options: options.trim() ? JSON.parse(options) : {},
-        printer_models: printerModels,
-      })
-      await onSaved(saved)
+      await onSaved(
+        await api.put<Product>(`/api/products/${product.id}/print-files/${file.id}`, {
+          bambuddy_archive_id: file.bambuddy_archive_id,
+          bambuddy_archive_name: file.bambuddy_archive_name,
+          bambuddy_file_path: file.bambuddy_file_path,
+          bambuddy_printer_id: file.bambuddy_printer_id,
+          plate_number: plate,
+          units_per_plate: units,
+          print_options: options.trim() ? JSON.parse(options) : {},
+          printer_models: printerModels,
+        }),
+      )
+      setOpen(false)
     } catch (err) {
       setError(errorMessage(err))
     }
   }
 
-  const clear = async () => {
-    const saved = await api.del<Product>(`/api/products/${product.id}/print-mapping`)
-    await onSaved(saved)
-  }
+  const remove = async () =>
+    onSaved(
+      await api.del<Product>(`/api/products/${product.id}/print-files/${file.id}`),
+    )
+
+  const goesTo =
+    file.bambuddy_printer_id !== null
+      ? `printer ${file.bambuddy_printer_id}`
+      : file.printer_models.length
+        ? file.printer_models.join(', ')
+        : 'any printer'
 
   return (
-    <section className="rounded-lg bg-ink-50 p-3">
-      <h3 className="text-sm font-semibold text-ink-800">Bambuddy print mapping</h3>
-      {!mapping ? (
-        <div className="mt-2 space-y-2">
-          <p className="text-sm text-red-800">
-            No file attached — orders needing this product cannot be queued.
-          </p>
-          <Button variant="primary" size="sm" onClick={onOpenPicker}>
-            Browse Bambuddy files
-          </Button>
-        </div>
-      ) : (
-        <div className="mt-2 space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-ink-700">
-              {mapping.bambuddy_archive_name ??
-                mapping.bambuddy_file_path ??
-                `Archive ${mapping.bambuddy_archive_id}`}
-            </span>
-            {mapping.bambuddy_archive_id !== null ? (
-              <Badge>id {mapping.bambuddy_archive_id}</Badge>
-            ) : null}
-            <Button size="sm" onClick={onOpenPicker}>
-              Change file
-            </Button>
-            <Button size="sm" variant="ghost" onClick={clear}>
-              Remove mapping
-            </Button>
-          </div>
-          {mapping.bambuddy_file_path ? (
-            <p className="-mt-1 truncate font-mono text-[11px] text-ink-400">
-              {mapping.bambuddy_file_path}
-            </p>
-          ) : null}
+    <>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="min-w-0 flex-1 truncate text-ink-800">
+          {file.bambuddy_archive_name ??
+            file.bambuddy_file_path ??
+            `Archive ${file.bambuddy_archive_id}`}
+        </span>
+        <Badge>{goesTo}</Badge>
+        <Button size="sm" variant="ghost" onClick={() => setOpen(!open)}>
+          {open ? 'Done' : 'Edit'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={remove}>
+          Remove
+        </Button>
+      </div>
+      {file.bambuddy_file_path ? (
+        <p className="truncate font-mono text-[11px] text-ink-400">
+          {file.bambuddy_file_path}
+        </p>
+      ) : null}
+
+      {open ? (
+        <div className="mt-2 space-y-3 border-t border-ink-200 pt-2">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Plate number">
               <input
@@ -805,10 +877,10 @@ function PrintMappingEditor({
               />
             </Field>
           </div>
-          {mapping.bambuddy_printer_id !== null ? (
+          {file.bambuddy_printer_id !== null ? (
             <p className="text-xs text-ink-500">
-              This file lives on printer {mapping.bambuddy_printer_id}, so that is
-              where the plate goes. Change the file to print it elsewhere.
+              This file lives on printer {file.bambuddy_printer_id}, so that is where
+              the plate goes. Attach it again from elsewhere to print it elsewhere.
             </p>
           ) : (
             <PrinterModelPicker value={printerModels} onChange={setPrinterModels} />
@@ -822,11 +894,11 @@ function PrintMappingEditor({
           </Field>
           {error ? <Alert tone="error">{error}</Alert> : null}
           <Button size="sm" variant="primary" onClick={save}>
-            Save mapping
+            Save this file
           </Button>
         </div>
-      )}
-    </section>
+      ) : null}
+    </>
   )
 }
 

@@ -7,6 +7,16 @@ import { Alert, Badge, Button, Card, EmptyState, Spinner, cx } from '../componen
 const FILTERS = ['open', 'all', 'failed', 'done'] as const
 type Filter = (typeof FILTERS)[number]
 
+/** Where this plate is going, or — before it has been sent — what could take it.
+ *
+ *  The machine is chosen when the plate is dispatched, so a plate still waiting
+ *  has an answer of a different kind: not one printer but the set of them. */
+function whereItGoes(job: QueueJob): string {
+  if (job.printer_id !== null) return `printer ${job.printer_id}`
+  if (job.printer_models.length) return `on ${job.printer_models.join(', ')}`
+  return 'any printer'
+}
+
 export default function PrintQueue() {
   const [jobs, setJobs] = useState<QueueJob[] | null>(null)
   const [filter, setFilter] = useState<Filter>('open')
@@ -121,6 +131,14 @@ export default function PrintQueue() {
                 <span className="min-w-0 flex-1 truncate text-sm text-ink-500">
                   {job.product_name}
                 </span>
+                {/* Two plates of one product can be two different files on two
+                    different machines, so the row has to say which. */}
+                {job.file_label ? (
+                  <span className="max-w-56 truncate text-xs text-ink-500" title={job.file_label}>
+                    {job.file_label}
+                  </span>
+                ) : null}
+                <span className="text-xs text-ink-500">{whereItGoes(job)}</span>
                 <span className="text-xs text-ink-500">
                   plate {job.plate_number ?? '—'} · {job.units_expected} units
                 </span>

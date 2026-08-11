@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from ..models import OrderLine, PrintMapping, Product, ProductVariation
+from ..models import OrderLine, PrintFile, Product, ProductVariation
 
 
 def normalize(value: Any) -> str:
@@ -91,6 +91,8 @@ class PrintPlan:
     # also a file-manager entry — and Bambuddy takes whichever it understands.
     bambuddy_archive_id: int | None
     bambuddy_file_path: str | None
+    # What to call it on a card or in an error. Not an identifier.
+    name: str | None
     plate_number: int
     units_per_plate: int
     # Which printer models can take it. Empty means any of them.
@@ -98,54 +100,86 @@ class PrintPlan:
     # The one machine it has to go to, when the file lives on that machine
     # rather than in the farm's shared library. None leaves the choice open.
     printer_id: int | None
+    print_options: dict[str, Any]
+
+    def as_candidate(self) -> dict[str, Any]:
+        """The form a print job stores, so dispatch can choose between them."""
+        return {
+            "archive_id": self.bambuddy_archive_id,
+            "file_path": self.bambuddy_file_path,
+            "name": self.name,
+            "plate_number": self.plate_number,
+            "units_per_plate": self.units_per_plate,
+            "printer_models": list(self.printer_models),
+            "printer_id": self.printer_id,
+            "print_options": self.print_options,
+        }
 
 
-def _names_a_file(row: PrintMapping | ProductVariation) -> bool:
+def _names_a_file(row: PrintFile | ProductVariation) -> bool:
     return row.bambuddy_archive_id is not None or bool(row.bambuddy_file_path)
 
 
-def print_plan(
-    mapping: PrintMapping | None, variation: ProductVariation | None
-) -> PrintPlan | None:
-    """The product's mapping, with anything the variation overrides applied.
-
-    A variation that names its own file replaces the file outright — and takes
-    its printer with it, because a file picked off one machine's file manager
-    cannot be printed anywhere else. Without a file of its own it can still
-    adjust the plate, the yield or which models can take it.
-
-    Returns None when there is nothing to print from at all.
-    """
-    if variation is not None and _names_a_file(variation):
-        return PrintPlan(
-            bambuddy_archive_id=variation.bambuddy_archive_id,
-            bambuddy_file_path=variation.bambuddy_file_path,
-            plate_number=variation.plate_number or 1,
-            units_per_plate=variation.units_per_plate or 1,
-            printer_models=tuple(variation.printer_models or ()),
-            printer_id=variation.bambuddy_printer_id,
-        )
-    if mapping is None:
-        return None
+def _as_plan(row: PrintFile, variation: ProductVariation | None) -> PrintPlan:
+    """One of a product's files, with anything the variation adjusts applied."""
     return PrintPlan(
-        bambuddy_archive_id=mapping.bambuddy_archive_id,
-        bambuddy_file_path=mapping.bambuddy_file_path,
+        bambuddy_archive_id=row.bambuddy_archive_id,
+        bambuddy_file_path=row.bambuddy_file_path,
+        name=row.bambuddy_archive_name,
         plate_number=(
             variation.plate_number
             if variation is not None and variation.plate_number
-            else mapping.plate_number
+            else row.plate_number
         ),
         units_per_plate=(
             variation.units_per_plate
             if variation is not None and variation.units_per_plate
-            else mapping.units_per_plate
+            else row.units_per_plate
         ),
         printer_models=tuple(
             variation.printer_models
             if variation is not None and variation.printer_models
-            else (mapping.printer_models or ())
+            else (row.printer_models or ())
         ),
-        printer_id=mapping.bambuddy_printer_id,
+        printer_id=row.bambuddy_printer_id,
+        print_options=dict(row.print_options or {}),
+    )
+
+
+def print_plans(
+    files: list[PrintFile], variation: ProductVariation | None
+) -> list[PrintPlan]:
+    """Every way this line could be printed, best first.
+
+    A product has one file per way it can be made — the same part sliced for
+    each machine that can take it — and they are alternatives, not a sequence.
+    Which one is used is a question about which printer is free, and that is not
+    knowable here; all of them come back, and the choice is made at dispatch.
+
+    A variation that names its own file replaces the lot, because it is a
+    different part rather than a different slicing of the same one, and takes
+    its printer with it. Without a file of its own it adjusts each of the
+    product\'s in turn.
+
+    Ordered so that a file naming the machines it is for comes before one that
+    says "anything": the specific answer is the one somebody meant.
+    """
+    if variation is not None and _names_a_file(variation):
+        return [
+            PrintPlan(
+                bambuddy_archive_id=variation.bambuddy_archive_id,
+                bambuddy_file_path=variation.bambuddy_file_path,
+                name=variation.bambuddy_archive_name,
+                plate_number=variation.plate_number or 1,
+                units_per_plate=variation.units_per_plate or 1,
+                printer_models=tuple(variation.printer_models or ()),
+                printer_id=variation.bambuddy_printer_id,
+                print_options={},
+            )
+        ]
+    plans = [_as_plan(row, variation) for row in files if _names_a_file(row)]
+    return sorted(
+        plans, key=lambda plan: 0 if (plan.printer_models or plan.printer_id) else 1
     )
 
 

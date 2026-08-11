@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +25,7 @@ from ..models import (
     Order,
     OrderLine,
     PrintJob,
-    PrintMapping,
-    Product,
+    PrintFile,
     ProductVariation,
 )
 from ..services import credentials, variations
@@ -53,18 +53,20 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
     if not targets:
         return []
 
-    mappings = {
-        mapping.product_id: mapping
-        for mapping in (
+    files: dict[Any, list[PrintFile]] = {}
+    for row in (
+        (
             await session.execute(
-                select(PrintMapping).where(
-                    PrintMapping.product_id.in_([line.product_id for line in targets])
-                )
+                select(PrintFile).where(
+                    PrintFile.product_id.in_([line.product_id for line in targets])
+                ).order_by(PrintFile.created_at, PrintFile.id)
             )
         )
         .scalars()
         .all()
-    }
+    ):
+        files.setdefault(row.product_id, []).append(row)
+
     # A variation can print a different file entirely — "with fan" and "without
     # fan" are not the same plate — so it gets the last word on what is queued.
     variation_rows = {
@@ -85,12 +87,18 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
     created: list[PrintJob] = []
     for line in targets:
         variation = variation_rows.get(line.variation_id)
-        plan = variations.print_plan(mappings.get(line.product_id), variation)
-        if plan is None:
+        plans = variations.print_plans(files.get(line.product_id, []), variation)
+        if not plans:
             line.stock_note = (
                 (line.stock_note + " ") if line.stock_note else ""
-            ) + "No Bambuddy print mapping for this product — cannot queue prints."
+            ) + "No Bambuddy print file for this product — cannot queue prints."
             continue
+
+        candidates = [plan.as_candidate() for plan in plans]
+        # Every plate has to cover the line whichever file ends up printing it,
+        # so the yield is the least any of them promises. Over-printing wastes
+        # filament; under-printing sends an order out short.
+        units = min(plan.units_per_plate for plan in plans)
 
         existing = list(
             (
@@ -106,18 +114,14 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
         )
 
         # A variation set up after the order arrived changes what should be
-        # printed. A job that has not reached Bambuddy is still only an
-        # intention, so correct it; anything queued or printing is a fact on a
-        # machine and hiding it would not unprint it.
+        # printed, and so does adding or removing one of the product's files. A
+        # job that has not reached Bambuddy is still only an intention, so
+        # correct it; anything queued or printing is a fact on a machine and
+        # hiding it would not unprint it.
         stale = [
             job
             for job in existing
-            if job.status == JOB_PENDING
-            and (
-                job.bambuddy_archive_id != plan.bambuddy_archive_id
-                or job.bambuddy_file_path != plan.bambuddy_file_path
-                or job.plate_number != plan.plate_number
-            )
+            if job.status == JOB_PENDING and (job.candidates or []) != candidates
         ]
         for job in stale:
             await session.delete(job)
@@ -125,16 +129,20 @@ async def plan_jobs(session: AsyncSession, lines: list[OrderLine]) -> list[Print
             existing = [job for job in existing if job not in stale]
             await session.flush()
 
-        required = plates_needed(line.qty_to_print, plan.units_per_plate)
+        required = plates_needed(line.qty_to_print, units)
         for _ in range(max(0, required - len(existing))):
             job = PrintJob(
                 order_line_id=line.id,
-                bambuddy_archive_id=plan.bambuddy_archive_id,
-                bambuddy_file_path=plan.bambuddy_file_path,
-                plate_number=plan.plate_number,
-                printer_id=plan.printer_id,
-                printer_models=list(plan.printer_models),
-                units_expected=plan.units_per_plate,
+                candidates=candidates,
+                # Seeded from the file this would use if it went out now, so a
+                # plate on the queue screen names something before it is sent.
+                # Dispatch overwrites these if it picks a different one.
+                bambuddy_archive_id=plans[0].bambuddy_archive_id,
+                bambuddy_file_path=plans[0].bambuddy_file_path,
+                plate_number=plans[0].plate_number,
+                printer_models=list(plans[0].printer_models),
+                printer_id=plans[0].printer_id,
+                units_expected=units,
                 status=JOB_PENDING,
             )
             session.add(job)
@@ -192,6 +200,54 @@ def choose_printer(
 BUSY_STATUSES = {"printing", "running", "busy", "working", "paused"}
 
 
+def choose_candidate(
+    candidates: list[dict],
+    printers: list[dict],
+    placed: dict[int, int] | None = None,
+) -> tuple[dict, int | None] | None:
+    """Which of a plate's files to print, and where — or None if nowhere.
+
+    A product sliced for four machines has four files, and they are alternatives
+    rather than a sequence: the right one is whichever names a printer that is
+    free right now. So every candidate is costed and the cheapest wins, where
+    cheap means "on a machine this pass has not already loaded up".
+
+    A file that names its machines is preferred over one that says "anything",
+    because naming them is somebody's decision and "anything" is the absence of
+    one. Nothing available anywhere is None, and the plate waits.
+    """
+    best: tuple[tuple[int, int, int], dict, int | None] | None = None
+    for index, candidate in enumerate(candidates):
+        models = [str(m) for m in (candidate.get("printer_models") or [])]
+        pinned = candidate.get("printer_id")
+        if pinned is not None:
+            # The file lives on that machine; there is nothing to choose.
+            printer_id: int | None = int(pinned)
+        elif models:
+            printer_id = choose_printer(models, printers, placed)
+            if printer_id is None:
+                continue
+        else:
+            # No machine named: Bambuddy places it.
+            printer_id = None
+        targeted = 0 if (models or pinned is not None) else 1
+        load = (placed or {}).get(printer_id, 0) if printer_id is not None else 0
+        rank = (targeted, load, index)
+        if best is None or rank < best[0]:
+            best = (rank, candidate, printer_id)
+    return None if best is None else (best[1], best[2])
+
+
+def wanted_printers(candidates: list[dict]) -> str:
+    """What a plate was looking for, for an error somebody has to read."""
+    models: list[str] = []
+    for candidate in candidates:
+        for model in candidate.get("printer_models") or []:
+            if str(model) not in models:
+                models.append(str(model))
+    return ", ".join(models) or "any printer"
+
+
 async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[str, int]:
     """Push pending jobs onto the Bambuddy queue."""
     # Never print for a cancelled line. Cancelling did not delete the plates it
@@ -227,7 +283,6 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
     except IntegrationNotConfigured:
         return stats
 
-    mappings = await _mappings_for_jobs(session, pending)
     touched_orders: set = set()
 
     # Only read the farm if some job actually asks for a model. A shop that says
@@ -235,43 +290,59 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
     # dispatch.
     printers: list[dict] | None = None
     placed: dict[int, int] = {}
-    if any(job.printer_models and job.printer_id is None for job in pending):
+    if any(
+        any(c.get("printer_models") and c.get("printer_id") is None for c in job.candidates or [])
+        for job in pending
+    ):
         try:
-            printers = await client.list_printers()
+            printers = await bambuddy_api.with_healing(
+                session, client, ("printers",), client.list_printers
+            )
         except IntegrationError as exc:
             log.warning("Could not read printers to place jobs by model: %s", exc)
             printers = []
 
     for job in pending:
-        mapping = mappings.get(job.id)
+        chosen = choose_candidate(job.candidates or [], printers or [], placed)
+        if chosen is None:
+            # Sending it anyway would put the plate on a machine that cannot
+            # make it. Leave it pending and say what it was looking for; the
+            # next poll tries again, and the operator can see why.
+            job.error = (
+                "No printer of "
+                + wanted_printers(job.candidates or [])
+                + " is available — leaving this plate queued here."
+            )
+            stats["failed"] += 1
+            continue
+        candidate, printer_id = chosen
 
-        # A job that already names a machine keeps it: the file was picked out
-        # of that machine's file manager and does not exist anywhere else, so
-        # there is no choice left to make.
-        printer_id = job.printer_id
-        if job.printer_models and printer_id is None:
-            printer_id = choose_printer(job.printer_models, printers or [], placed)
-            if printer_id is None:
-                # Sending it anyway would put the plate on a machine that cannot
-                # make it. Leave it pending and say what it was looking for; the
-                # next poll tries again, and the operator can see why.
-                job.error = (
-                    "No printer of "
-                    + ", ".join(job.printer_models)
-                    + " is available — leaving this plate queued here."
-                )
-                stats["failed"] += 1
-                continue
-            job.printer_id = printer_id
+        # What was chosen is recorded on the job, so the queue screen shows the
+        # file that is actually printing rather than the list it came from.
+        job.bambuddy_archive_id = candidate.get("archive_id")
+        job.bambuddy_file_path = candidate.get("file_path")
+        job.plate_number = candidate.get("plate_number") or 1
+        job.printer_models = [str(m) for m in (candidate.get("printer_models") or [])]
+        job.printer_id = printer_id
+        if printer_id is not None:
             placed[printer_id] = placed.get(printer_id, 0) + 1
 
         try:
-            item = await client.enqueue(
-                archive_id=job.bambuddy_archive_id,
-                file_path=job.bambuddy_file_path,
-                plate_number=job.plate_number,
-                printer_id=printer_id,
-                print_options=(mapping.print_options if mapping else None) or {},
+            # A 404 here is the same fault the file picker already heals: a
+            # queue path nobody chose, because the instance keeps it somewhere
+            # this connection never discovered. Nothing was created by a 404, so
+            # re-reading the document and sending once more cannot double-queue.
+            item = await bambuddy_api.with_healing(
+                session,
+                client,
+                ("queue",),
+                lambda: client.enqueue(
+                    archive_id=job.bambuddy_archive_id,
+                    file_path=job.bambuddy_file_path,
+                    plate_number=job.plate_number,
+                    printer_id=printer_id,
+                    print_options=candidate.get("print_options") or {},
+                ),
             )
         except IntegrationError as exc:
             job.error = str(exc)[:2000]
@@ -311,7 +382,9 @@ async def reconcile(session: AsyncSession) -> dict[str, int]:
         return stats
 
     client = await bambuddy_api.client_for(session)
-    queue = await client.list_queue()
+    queue = await bambuddy_api.with_healing(
+        session, client, ("queue",), client.list_queue
+    )
     by_id = {
         int(item["id"]): item
         for item in queue
@@ -391,25 +464,6 @@ async def cancel_job(session: AsyncSession, job: PrintJob) -> PrintJob:
     return job
 
 
-async def _mappings_for_jobs(
-    session: AsyncSession, jobs: list[PrintJob]
-) -> dict[object, PrintMapping]:
-    """Map job.id → the PrintMapping that produced it (for print_options)."""
-    line_ids = {job.order_line_id for job in jobs}
-    if not line_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(OrderLine.id, PrintMapping)
-            .join(Product, Product.id == OrderLine.product_id)
-            .join(PrintMapping, PrintMapping.product_id == Product.id)
-            .where(OrderLine.id.in_(line_ids))
-        )
-    ).all()
-    by_line = {line_id: mapping for line_id, mapping in rows}
-    return {job.id: by_line[job.order_line_id] for job in jobs if job.order_line_id in by_line}
-
-
 async def _order_id_for_job(session: AsyncSession, job: PrintJob):
     line = await session.get(OrderLine, job.order_line_id)
     return line.order_id if line else None
@@ -446,6 +500,8 @@ async def open_jobs_overview(session: AsyncSession) -> list[dict]:
                 "bambuddy_file_path": job.bambuddy_file_path,
                 "plate_number": job.plate_number,
                 "printer_id": job.printer_id,
+                "file_label": job.file_label,
+                "printer_models": list(job.printer_models or []),
                 "units_expected": job.units_expected,
                 "queued_at": job.queued_at,
                 "completed_at": job.completed_at,

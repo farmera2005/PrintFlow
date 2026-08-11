@@ -99,6 +99,10 @@ def _job(job: PrintJob) -> dict[str, Any]:
         "bambuddy_file_path": job.bambuddy_file_path,
         "plate_number": job.plate_number,
         "printer_id": job.printer_id,
+        # Which of the product's files this plate is using, and what will take
+        # it. With several files per product the product no longer says.
+        "file_label": job.file_label,
+        "printer_models": list(job.printer_models or []),
         "units_expected": job.units_expected,
         "queued_at": job.queued_at,
         "completed_at": job.completed_at,

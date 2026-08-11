@@ -26,7 +26,7 @@ from app.integrations.bambuddy import (
     parse_file_entry,
     split_folder_detail,
 )
-from app.models import PrintJob, PrintMapping, ProductVariation
+from app.models import PrintJob, PrintFile, ProductVariation
 from app.services import printing, variations
 
 from test_intake_pipeline import FakeBambuddy, FakeQbo, seed_catalog
@@ -1094,16 +1094,16 @@ class TestQueueBody:
 
 class TestPlanCarriesTheFile:
     def test_a_file_manager_mapping_needs_no_archive_id(self):
-        mapping = PrintMapping(
+        mapping = PrintFile(
             bambuddy_archive_id=None, bambuddy_file_path="/Production/a.3mf",
             bambuddy_printer_id=3, plate_number=1, units_per_plate=1, printer_models=[],
         )
-        plan = variations.print_plan(mapping, None)
+        plan = variations.print_plans([mapping], None)[0]
         assert plan.bambuddy_file_path == "/Production/a.3mf"
         assert plan.printer_id == 3
 
     def test_a_variation_off_another_machine_takes_that_machine_with_it(self):
-        mapping = PrintMapping(
+        mapping = PrintFile(
             bambuddy_archive_id=1, bambuddy_file_path=None, bambuddy_printer_id=None,
             plate_number=1, units_per_plate=1, printer_models=["X1 Carbon"],
         )
@@ -1112,14 +1112,14 @@ class TestPlanCarriesTheFile:
             bambuddy_archive_id=None, bambuddy_file_path="/p1s/tall.3mf",
             bambuddy_printer_id=3, printer_models=[],
         )
-        plan = variations.print_plan(mapping, variation)
+        plan = variations.print_plans([mapping], variation)[0]
         assert (plan.bambuddy_archive_id, plan.bambuddy_file_path) == (None, "/p1s/tall.3mf")
         assert plan.printer_id == 3
         # The product's models describe the product's file, not this one.
         assert plan.printer_models == ()
 
     def test_nothing_named_at_all_is_still_nothing(self):
-        mapping = PrintMapping(
+        mapping = PrintFile(
             bambuddy_archive_id=1, bambuddy_file_path=None, bambuddy_printer_id=None,
             plate_number=1, units_per_plate=1, printer_models=[],
         )
@@ -1128,8 +1128,8 @@ class TestPlanCarriesTheFile:
             bambuddy_archive_id=None, bambuddy_file_path=None, printer_models=[],
         )
         # An override that names no file falls through to the product's.
-        assert variations.print_plan(mapping, empty).bambuddy_archive_id == 1
-        assert variations.print_plan(None, empty) is None
+        assert variations.print_plans([mapping], empty)[0].bambuddy_archive_id == 1
+        assert variations.print_plans([], empty) == []
 
 
 class FarmBambuddy(FakeBambuddy):
@@ -1170,7 +1170,7 @@ class TestDispatchAFileFromOnePrinter:
         catalog = await seed_catalog(db)
         mapping = (
             await db.execute(
-                select(PrintMapping).where(PrintMapping.product_id == catalog["part_y"].id)
+                select(PrintFile).where(PrintFile.product_id == catalog["part_y"].id)
             )
         ).scalar_one()
         mapping.bambuddy_archive_id = None
@@ -1204,7 +1204,7 @@ class TestDispatchAFileFromOnePrinter:
         catalog = await seed_catalog(db)
         mapping = (
             await db.execute(
-                select(PrintMapping).where(PrintMapping.product_id == catalog["part_y"].id)
+                select(PrintFile).where(PrintFile.product_id == catalog["part_y"].id)
             )
         ).scalar_one()
         mapping.bambuddy_file_path = "/only-here.3mf"

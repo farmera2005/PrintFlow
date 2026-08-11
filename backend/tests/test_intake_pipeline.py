@@ -10,7 +10,7 @@ from app.models import (
     BomLine,
     OrderLine,
     PrintJob,
-    PrintMapping,
+    PrintFile,
     Product,
 )
 from app.services import intake, printing, state
@@ -126,14 +126,14 @@ async def seed_catalog(db) -> dict[str, Product]:
             BomLine(bundle_id=bundle.id, component_id=part_x.id, quantity=2),
             BomLine(bundle_id=bundle.id, component_id=part_y.id, quantity=1),
             # PART-X yields four units per plate; PART-Y one.
-            PrintMapping(
+            PrintFile(
                 product_id=part_x.id,
                 bambuddy_archive_id=501,
                 plate_number=2,
                 units_per_plate=4,
                 print_options={"filament": "PLA-black"},
             ),
-            PrintMapping(
+            PrintFile(
                 product_id=part_y.id, bambuddy_archive_id=502, units_per_plate=1
             ),
         ]

@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.models import BomLine, OrderLine, PrintJob, PrintMapping, Product
+from app.models import BomLine, OrderLine, PrintJob, PrintFile, Product
 from app.services import allocation, intake, printing
 from app.services.state import recompute_order
 
@@ -63,7 +63,7 @@ async def _printed_product(db, sku="BIN"):
     db.add(product)
     await db.flush()
     db.add(
-        PrintMapping(
+        PrintFile(
             product_id=product.id, bambuddy_archive_id=10, plate_number=1, units_per_plate=1
         )
     )
