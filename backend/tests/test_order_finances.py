@@ -153,6 +153,42 @@ class TestOnTheOrder:
         assert order.revenue == Decimal("42.85")
         assert order.ship_to["name"] == "Dana Buyer"
 
+    async def test_an_order_that_already_shipped_is_filled_in_too(self, db):
+        """The one intake could never reach.
+
+        Intake only sees receipts the poll fetches, and the poll asks Etsy for
+        the ones that have *not* shipped. An established shop's history is
+        mostly shipped orders, so relying on a re-fetch would leave the address
+        and the totals blank on almost everything. The payload is already in
+        the database; reading it is a database job.
+        """
+        order, _ = await intake.ingest_receipt(db, {"receipt_id": 5150, "transactions": []})
+        order.status = "shipped"
+        # As it would be for an order taken before any of this existed.
+        order.raw = RECEIPT
+        order.revenue = None
+        order.ship_to = None
+        await db.commit()
+
+        stats = await finance.backfill(db)
+        await db.commit()
+
+        assert stats == {"looked_at": 1, "filled": 1}
+        assert order.revenue == Decimal("42.85")
+        assert order.ship_to["city"] == "Springfield"
+
+    async def test_the_backfill_leaves_alone_what_is_already_read(self, db):
+        # It runs on every poll, so it must not be a full table rewrite.
+        await intake.ingest_receipt(db, RECEIPT)
+        await db.commit()
+        assert await finance.backfill(db) == {"looked_at": 0, "filled": 0}
+
+    async def test_an_order_with_no_receipt_is_not_a_failure(self, db):
+        order = Order(etsy_receipt_id=99, order_number="99")
+        db.add(order)
+        await db.commit()
+        assert await finance.backfill(db) == {"looked_at": 0, "filled": 0}
+
     async def test_net_is_revenue_less_every_cost(self, db):
         order = Order(
             etsy_receipt_id=1, order_number="1",

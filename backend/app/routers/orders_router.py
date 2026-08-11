@@ -502,11 +502,16 @@ async def refresh_finances(
     Fees land after the sale, so a shop looking at an order that sold this
     morning will see none. This is the answer to "have they turned up yet".
     """
+    # The address and totals first: they are in payloads already stored, so
+    # they work even with Etsy disconnected.
+    stats = await finance.backfill(session)
     try:
-        stats = await finance.sync_fees(session)
+        stats |= await finance.sync_fees(session)
     except IntegrationNotConfigured as exc:
+        await session.commit()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except IntegrationError as exc:
+        await session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     await session.commit()
     return stats

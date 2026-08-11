@@ -787,7 +787,24 @@ export default function OrderDrawer({
  *  The parts are shown only when there is no formatted version. */
 function ShipTo({ order }: { order: Order }) {
   const to = order.ship_to
-  if (!to) return null
+  // An empty block that explains itself, rather than one that is simply not
+  // there: "PrintFlow has not read it" and "Etsy did not send one" are
+  // different, and only one of them is worth anybody's time.
+  if (!to) {
+    return (
+      <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+          Ship to
+        </h3>
+        <p className="mt-2 text-sm text-ink-500">
+          Etsy's receipt for this order carries no address. Older receipts
+          predate PrintFlow reading it — the next poll fills them in; if this
+          one stays empty, <em>View raw Etsy payload</em> below shows what
+          arrived.
+        </p>
+      </section>
+    )
+  }
   const lines = (
     to.formatted
       ? to.formatted.split('\n')
@@ -840,7 +857,6 @@ function ShipTo({ order }: { order: Order }) {
  *  Etsy charges after the sale, not during — so an order with none yet says so
  *  rather than showing a net that is really just the revenue. */
 function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }) {
-  if (!order.revenue && !order.etsy_fees && !order.label_cost) return null
   const currency = order.currency ?? order.label_currency
   const show = (amount: string | null) => (amount ? formatMoney(amount, currency) : null)
 
@@ -873,11 +889,21 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
         </button>
       </div>
 
+      {!order.revenue ? (
+        <p className="mt-2 text-sm text-ink-500">
+          Etsy's receipt for this order carries no totals. The next poll reads
+          them out of the payload already stored, so this fills itself in;
+          <em> View raw Etsy payload</em> below shows what actually arrived.
+        </p>
+      ) : null}
+
       <dl className="mt-2 space-y-1 text-sm">
-        <div className="flex justify-between font-medium text-ink-800">
-          <dt>Revenue</dt>
-          <dd>{show(order.revenue) ?? '—'}</dd>
-        </div>
+        {order.revenue ? (
+          <div className="flex justify-between font-medium text-ink-800">
+            <dt>Revenue</dt>
+            <dd>{show(order.revenue)}</dd>
+          </div>
+        ) : null}
         {takings.map(([label, value]) =>
           value ? (
             <div key={label} className="flex justify-between pl-3 text-xs text-ink-500">

@@ -214,7 +214,9 @@ def apply_receipt(order: Order) -> bool:
         order.ship_to, order.currency, order.revenue, order.items_total,
         order.shipping_total, order.tax_total, order.discount_total,
     )
-    order.ship_to = address_from(receipt) or order.ship_to
+    address = address_from(receipt)
+    if address:
+        order.ship_to = address
     for field, value in totals_from(receipt).items():
         if value is not None:
             setattr(order, field, value)
@@ -222,6 +224,37 @@ def apply_receipt(order: Order) -> bool:
         order.ship_to, order.currency, order.revenue, order.items_total,
         order.shipping_total, order.tax_total, order.discount_total,
     )
+
+
+async def backfill(session: AsyncSession, *, limit: int = 2000) -> dict[str, int]:
+    """Read the address and the money out of every receipt already stored.
+
+    This is a database job, not an Etsy one: the payloads are already here. It
+    exists because the obvious place to do the work — intake, as receipts come
+    in — only ever sees receipts the poll fetches, and the poll asks for
+    *unshipped* ones. Every order that had already shipped would therefore have
+    waited for a re-fetch that never comes, which for an established shop is
+    most of its history.
+    """
+    orders = (
+        (
+            await session.execute(
+                select(Order)
+                # Revenue is the marker rather than the address, because it is
+                # a Numeric column: unambiguously NULL or not, whatever an
+                # older release may have written into the JSON ones.
+                .where(Order.raw.is_not(None), Order.revenue.is_(None))
+                .order_by(Order.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    filled = sum(1 for order in orders if apply_receipt(order))
+    if filled:
+        await session.flush()
+    return {"looked_at": len(orders), "filled": filled}
 
 
 def net_of(order: Order) -> Decimal | None:

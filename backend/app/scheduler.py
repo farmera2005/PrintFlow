@@ -87,6 +87,12 @@ async def poll_etsy() -> dict[str, Any]:
                 f"{stats['seen']} receipts: {stats['created']} new, "
                 f"{stats['skipped']} already known, {stats['errors']} errors"
             )
+            # Reading the stored payloads needs no Etsy at all, and catches
+            # every order that had already shipped by the time this existed —
+            # the poll only ever re-fetches receipts that have not shipped.
+            back = await finance.backfill(session)
+            if back["filled"]:
+                note += f". Filled in {back['filled']} orders' address and totals"
             # Fees are not on a receipt — they land on the shop's ledger
             # afterwards, sometimes days later — so this is a sweep that runs
             # again rather than something intake could have done. Its failure

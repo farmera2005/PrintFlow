@@ -27,7 +27,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # JSONB on Postgres; plain JSON elsewhere so the unit-test suite can use SQLite.
-JsonType = JSON().with_variant(JSONB(), "postgresql")
+#
+# `none_as_null` because the alternative is a trap: without it, assigning None
+# to one of these columns stores the JSON value `null` rather than SQL NULL, so
+# the column reads back as None but `IS NULL` does not find it. Every JSON
+# column here means "absent" by None, never "the JSON literal null".
+JsonType = JSON(none_as_null=True).with_variant(
+    JSONB(none_as_null=True), "postgresql"
+)
 
 
 class Base(DeclarativeBase):
