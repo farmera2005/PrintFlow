@@ -229,18 +229,16 @@ Two ways back from a wrong match:
 A printed product needs two answers: which file, and what can print it.
 
 **The file** comes off Bambuddy. **Browse Bambuddy files** opens on the **file
-manager**, showing Bambuddy's own folder structure — the whole tree, already
-expanded, on screen the moment it opens. Nothing has to be typed and no folder
-has to be clicked through to see what the farm has. A shop that has sorted its
-files into folders has already said what is what; a picker that hides that
-behind a search box is a picker for people who already know the answer.
+manager**, showing Bambuddy's own folder structure with the folders closed — so
+what you see first is the shape of the library, top level and item counts, on
+one screen. A shop that has sorted its files into folders reaches for the folder
+it wants, not for every file it owns.
 
-Folders collapse and expand individually, and **Collapse all** / **Expand all**
-does the lot. The search box is still there — it cuts across every folder at
-once and shows full paths, which is the one time folders get in the way — but
-it is an optional shortcut, not the way in. Past a few hundred entries
-"everything open" would be a wall of rows rather than a view, so the top level
-stands in and Expand all is one click.
+Folders open individually, and **Expand all** / **Collapse all** does the lot.
+The search box is still there — it cuts across every folder at once and shows
+full paths, which is the one time folders get in the way — but it is an optional
+shortcut, not the way in: a picker that makes you type before it shows you
+anything is a picker for people who already know the answer.
 
 Two other places to look, from the same control at the top:
 

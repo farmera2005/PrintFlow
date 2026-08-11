@@ -1049,10 +1049,6 @@ function openRows(
   return rows
 }
 
-/** Opening every folder at once is only reasonable while the tree is this big.
- *  Past it the top two levels are opened instead, and the rest is a click away. */
-const OPEN_EVERYTHING_UNDER = 400
-
 function humanSize(bytes: number | null): string | null {
   if (bytes === null || bytes === undefined || bytes < 0) return null
   const units = ['B', 'KB', 'MB', 'GB']
@@ -1074,15 +1070,13 @@ function humanSize(bytes: number | null): string | null {
  * or the shared file manager and any capable machine will do, so the printer
  * models come back as the thing to narrow instead.
  *
- * The file manager is where this opens, and it opens *expanded*: the whole
- * structure Bambuddy has, folders and all, on screen at once. A picker that
- * makes you type before it shows you anything is a picker for people who
- * already know the answer, and the shop that has sorted its files into folders
- * has already done the work of saying what is what. Searching is still there
- * and still cuts across the whole tree, but nothing depends on it.
- *
- * Past a few hundred entries "everything open" is a wall rather than a view, so
- * the top level stands in and Expand all is one click.
+ * The file manager is where this opens, showing the whole structure Bambuddy
+ * has — folders closed, so what you see first is the shape of the library
+ * rather than every file in it. A shop that has sorted its files into folders
+ * reaches for the folder it wants; Expand all is there for the times it does
+ * not. A picker that makes you type before it shows you anything is a picker
+ * for people who already know the answer, so searching is still there and still
+ * cuts across the whole tree, but nothing depends on it.
  */
 function PrintFilePicker({
   choice,
@@ -1148,19 +1142,11 @@ function PrintFilePicker({
             .then((data) => {
               if (!live) return
               setTree(data)
-              // The whole structure, open, is the point — nobody should have to
-              // click through folders to find out what the farm has. Past a size
-              // where that is a wall of rows, the top two levels stand in and
-              // Expand all is one click away.
-              const folders = data.files.filter((file) => file.kind === 'folder')
-              setOpenFolders(
-                new Set(
-                  (data.files.length <= OPEN_EVERYTHING_UNDER
-                    ? folders
-                    : folders.filter((file) => file.depth < 1)
-                  ).map((file) => file.path),
-                ),
-              )
+              // Closed. The top level is the shape of the library, and a shop
+              // that has sorted its files into folders reaches for the folder
+              // it wants — not for a wall of every file it owns. Expand all is
+              // one click for the times you do want the lot.
+              setOpenFolders(new Set())
             })
     request
       .catch((err) => {
@@ -1446,9 +1432,6 @@ function PrintFilePicker({
                 {tree.folders} folder{tree.folders === 1 ? '' : 's'}.
                 {hidden
                   ? ` ${hidden} other file${hidden === 1 ? ' is' : 's are'} not something a printer takes.`
-                  : ''}
-                {nodes.length > OPEN_EVERYTHING_UNDER
-                  ? ' Too many to open at once — Expand all if you want them.'
                   : ''}
               </p>
               {/* Always here, not only when the tree is visibly empty: a tree
