@@ -22,6 +22,7 @@ from app.integrations.bambuddy import (
     BambuddyClient,
     discover_paths,
     file_rows,
+    flatten_library_folders,
     parse_file_entry,
     split_folder_detail,
 )
@@ -426,6 +427,106 @@ class TestLibraryTreeOverTheApi:
         # The same rows every time: taken once, then stopped.
         assert len(rows) == len(LIB_FILES)
         assert len(client.calls) == 2
+
+
+# Bambuddy's folder list, as a real instance answers it: a bare list of the top
+# level, each row carrying its whole subtree inline under `children`, and a
+# file_count saying what it holds. Trimmed from a live reply.
+REAL_FOLDERS = [
+    {"id": 1, "name": "Custom Projects", "parent_id": None, "file_count": 2,
+     "is_external": False, "children": []},
+    {"id": 2, "name": "Dump Pits", "parent_id": None, "file_count": 0,
+     "is_external": False, "children": [
+         {"id": 4, "name": "H2C", "parent_id": 2, "file_count": 1, "children": []},
+         {"id": 5, "name": "P1S", "parent_id": 2, "file_count": 0, "children": [
+             {"id": 66, "name": "Draft", "parent_id": 5, "file_count": 1,
+              "children": []},
+         ]},
+     ]},
+]
+REAL_FILES = {
+    1: [{"id": 11, "folder_id": 1, "filename": "Door.gcode.3mf",
+         "file_type": "gcode.3mf", "file_size": 154487, "sliced_for_model": "P1S"},
+        {"id": 12, "folder_id": 1, "filename": "render.png", "file_size": 90}],
+    4: [{"id": 40, "folder_id": 4, "filename": "pit.gcode.3mf", "file_size": 5}],
+    66: [{"id": 60, "folder_id": 66, "filename": "draft.3mf", "file_size": 7}],
+}
+
+
+class TestTheFolderListCarriesItsOwnSubtree:
+    """The structure was in the first reply the whole time — one level down.
+
+    Bambuddy answers "list folders" with the top level and hangs each row's
+    subtree off it under `children`. A reader that only looked at the top of the
+    reply saw a library with no subfolders in it at all, which is exactly what
+    it reported: twenty folders, every one of them empty.
+    """
+
+    def test_the_subtree_is_brought_out_flat(self):
+        folders = flatten_library_folders(REAL_FOLDERS)
+        assert [(f["id"], f["parent_id"]) for f in folders] == [
+            (1, None), (2, None), (4, 2), (5, 2), (66, 5)
+        ]
+
+    def test_a_nested_row_that_omits_its_parent_takes_it_from_the_nesting(self):
+        folders = flatten_library_folders(
+            [{"id": 1, "name": "Top", "children": [{"id": 2, "name": "Under"}]}]
+        )
+        assert folders[1]["parent_id"] == 1
+
+    def test_the_file_count_comes_through(self):
+        counts = {f["id"]: f["file_count"] for f in flatten_library_folders(REAL_FOLDERS)}
+        assert counts == {1: 2, 2: 0, 4: 1, 5: 0, 66: 1}
+
+    def test_a_subtree_that_contains_itself_does_not_recurse_forever(self):
+        loop: dict = {"id": 1, "name": "A", "children": []}
+        loop["children"].append(loop)
+        assert len(flatten_library_folders([loop], max_depth=4)) == 5
+
+
+class TestTheReportedInstance:
+    """End to end against the shapes a live instance actually returns."""
+
+    class Real(LibraryClient):
+        async def _call(self, method, path, *, retries=2, **kwargs):
+            params = kwargs.get("params") or {}
+            self.calls.append((path, params.get("folder_id")))
+            if path.endswith("folders"):
+                return REAL_FOLDERS          # a bare list; parent_id ignored
+            folder_id = params.get("folder_id")
+            if folder_id is None:
+                return []                    # empty without a folder named
+            return REAL_FILES.get(folder_id, [])
+
+    async def test_every_folder_and_every_file_arrives(self):
+        client = self.Real()
+        tree = await client.library_tree()
+
+        by_path = {node["path"]: node for node in tree["files"]}
+        assert "/Dump Pits/H2C" in by_path
+        assert "/Dump Pits/P1S/Draft" in by_path
+        assert "/Dump Pits/P1S/Draft/draft.3mf" in by_path
+        assert "/Custom Projects/Door.gcode.3mf" in by_path
+        assert (tree["folders"], tree["printable"]) == (5, 3)
+        # A .png in the library is real, and is not a print file.
+        assert by_path["/Custom Projects/render.png"]["printable"] is False
+
+    async def test_the_folder_list_is_read_once_and_not_walked(self):
+        client = self.Real()
+        await client.library_tree()
+        assert len([1 for path, _ in client.calls if path.endswith("folders")]) == 1
+
+    async def test_a_folder_that_says_it_holds_nothing_is_not_asked(self):
+        client = self.Real()
+        await client.library_tree()
+        asked = [fid for path, fid in client.calls if path.endswith("files")]
+        # The bare call, then only the three folders with a file_count above nil.
+        assert asked == [None, 1, 4, 66]
+
+    async def test_the_library_file_id_is_what_gets_stored(self):
+        tree = await self.Real().library_tree()
+        door = next(n for n in tree["files"] if n["name"] == "Door.gcode.3mf")
+        assert door["archive_id"] == 11
 
 
 class TestAFolderListThatAnswersForOneLevel:

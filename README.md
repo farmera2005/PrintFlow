@@ -304,22 +304,24 @@ library.
 Two things the collections may not hand over on the first ask, both of which
 look like an empty library rather than a missing question:
 
-* **A folder list that answers for the top level only.** That is a reasonable
-  thing for an API to be, and indistinguishable from a complete list until a
-  folder holding only subfolders shows as empty and everything filed inside is
-  invisible. So if nothing in the list sits inside anything else in it,
-  PrintFlow works out how this instance answers "what is inside this folder?"
-  and then asks, folder by folder. Two shapes, tried in order on the first
+* **A subtree carried inline.** Bambuddy answers "list folders" with the top
+  level, each row hanging its whole subtree off it under `children` — so the
+  structure is in the first reply already, one level down from the top of it.
+  That is read first, because it costs nothing.
+* **A folder list that really is one level.** Where the reply carries no
+  nesting, PrintFlow works out how the instance answers "what is inside this
+  folder?" and then asks, folder by folder. Two shapes, tried on the first
   folder and then used for the rest: a list endpoint that filters on a parent
   (`?parent_id=`, `?parent=`, `?folder_id=`), or — where it filters on none of
   them — `GET …/library/folders/{id}`, which is how a file manager drills in
-  and which returns the folder together with what it holds, subfolders and
-  files alike. An instance that does neither is left alone rather than walked
-  pointlessly.
+  and which returns the folder together with what it holds. An instance that
+  does neither is left alone rather than walked pointlessly.
 * **A file list that wants a folder named.** If it comes back empty while
-  folders did not, PrintFlow asks again per folder — `?folder_id=…`, once each.
-  A file filed in no folder at all is the one thing that cannot be recovered
-  that way, since there is no folder to ask about.
+  folders did not, PrintFlow asks again per folder — `?folder_id=…`. Only the
+  folders that said they hold something: the rows carry a `file_count`, and on
+  a library organised by printer model most of the folders are containers with
+  nothing directly in them. A file filed in no folder at all is the one thing
+  that cannot be recovered this way, since there is no folder to ask about.
 
 Both are recorded in the picker's endpoint line, so a slower read is never
 mistaken for the fast one.

@@ -536,7 +536,43 @@ def parse_library_folder(row: dict[str, Any]) -> dict[str, Any]:
             )
         ),
         "path": join_path("", str(raw_path)) if raw_path else None,
+        # How many files the folder says it holds. Worth having: it saves asking
+        # an endpoint for the contents of a folder that has already said it has
+        # none, and it is the only cross-check on whether a read was complete.
+        "file_count": _first(row, "file_count", "fileCount", "files_count", "num_files"),
     }
+
+
+def flatten_library_folders(
+    rows: list[dict[str, Any]], *, max_folders: int = 4000, max_depth: int = 16
+) -> list[dict[str, Any]]:
+    """The folder list, with any subtree it carries inline brought out flat.
+
+    Bambuddy's folder list answers with the top level and hangs each row's whole
+    subtree off it under `children`. The structure is in the reply already — it
+    is just not at the top of it, and a reader that only looked at the top saw a
+    library with no subfolders in it whatsoever.
+    """
+    out: list[dict[str, Any]] = []
+
+    def walk(rows: list[Any], parent_id: Any, depth: int) -> None:
+        for row in rows:
+            if not isinstance(row, dict) or len(out) >= max_folders:
+                continue
+            folder = parse_library_folder(row)
+            if folder["id"] is None:
+                continue
+            # A nested row usually repeats its parent; where it does not, the
+            # nesting itself said so.
+            if folder["parent_id"] is None and parent_id is not None:
+                folder["parent_id"] = parent_id
+            out.append(folder)
+            children = row.get("children")
+            if isinstance(children, list) and depth < max_depth:
+                walk(children, folder["id"], depth + 1)
+
+    walk(rows, None, 0)
+    return out
 
 
 def parse_library_file(row: dict[str, Any]) -> dict[str, Any]:
@@ -1134,6 +1170,10 @@ class BambuddyClient:
         worse than a slower read.
         """
         rows: list[dict[str, Any]] = []
+        # Folders that have already said they hold nothing are not asked. On a
+        # library organised by printer model that is most of them, and a request
+        # per folder is the whole cost of this path.
+        folders = [folder for folder in folders if folder["file_count"] != 0]
         truncated = len(folders) > max_folders
         for folder in folders[:max_folders]:
             folder_id = folder["id"]
@@ -1250,7 +1290,7 @@ class BambuddyClient:
         asks per folder rather than showing a library with holes in it.
         """
         folder_rows = await self._all_rows(self.paths["library_folders"])
-        folders = [parse_library_folder(row) for row in folder_rows]
+        folders = flatten_library_folders(folder_rows)
         known = {folder["id"] for folder in folders if folder["id"] is not None}
         truncated = False
         notes: list[str] = []
