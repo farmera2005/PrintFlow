@@ -508,6 +508,41 @@ async def label_context(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
 
+@router.get("/orders/{order_id}/label-rates")
+async def label_rates(
+    order_id: uuid.UUID,
+    carrier_code: str,
+    weight_value: float,
+    weight_units: str = "ounces",
+    package_code: str = "",
+    confirmation: str = "",
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """What the carrier would charge, so the price is known before the click.
+
+    Read-only: quoting costs nothing and buys nothing, which is the whole
+    reason it can be called on every keystroke of the weight box.
+    """
+    order = await _get_order(session, order_id)
+    try:
+        return await shipping.label_rates(
+            session,
+            order,
+            carrier_code=carrier_code,
+            weight_value=weight_value,
+            weight_units=weight_units,
+            package_code=package_code,
+            confirmation=confirmation,
+        )
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except IntegrationError as exc:
+        # A carrier that will not quote is not a reason to block the purchase:
+        # the operator can still buy the label, just without knowing first.
+        return {"available": False, "reason": str(exc)}
+
+
 class CreateLabelRequest(BaseModel):
     carrier_code: str
     service_code: str

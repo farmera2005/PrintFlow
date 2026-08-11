@@ -738,3 +738,157 @@ class TestCacheHeaders:
         response = await client.get("/api/board")
         assert response.status_code == 401
         assert response.headers.get("cache-control") == "no-store"
+
+
+class TestLabelQuote:
+    """What it will cost, before the money is spent.
+
+    The quote is a different thing from the charge — the carrier prices again
+    when the label is actually bought — but "is this the $30 service or the $9
+    one" is exactly the question being asked at the moment of choosing, and it
+    was previously unanswerable without leaving PrintFlow.
+    """
+
+    class FakeShipStation:
+        def __init__(self, *, warehouses=None, rates=None, ship_to=None):
+            self.warehouses = warehouses if warehouses is not None else [
+                {"warehouseId": 9, "isDefault": True,
+                 "originAddress": {"postalCode": "61234"}},
+            ]
+            self.rates = rates if rates is not None else [
+                {"serviceCode": "ups_ground", "serviceName": "UPS® Ground",
+                 "shipmentCost": 11.42, "otherCost": 0.63},
+                {"serviceCode": "ups_2nd_day_air", "serviceName": "UPS 2nd Day Air®",
+                 "shipmentCost": 31.08, "otherCost": 0},
+            ]
+            self.ship_to = ship_to if ship_to is not None else {
+                "postalCode": "62341-3104", "state": "IL", "country": "US",
+                "residential": True,
+            }
+            self.asked: list[dict] = []
+
+        async def get_order(self, order_id):
+            return {"shipTo": self.ship_to, "advancedOptions": {"warehouseId": 9}}
+
+        async def list_warehouses(self):
+            return self.warehouses
+
+        async def get_rates(self, **kwargs):
+            self.asked.append(kwargs)
+            return self.rates
+
+    async def _order(self, signed_in, db, sku, receipt):
+        await make_product(signed_in, sku=sku, fulfillment="stocked")
+        order, _ = await intake.ingest_receipt(
+            db,
+            {"receipt_id": receipt,
+             "transactions": [{"transaction_id": 1, "sku": sku, "quantity": 1}]},
+        )
+        order.shipstation_order_id = 44444
+        await db.commit()
+        return order
+
+    def _use(self, monkeypatch, fake):
+        async def client_for(_session):
+            return fake
+
+        monkeypatch.setattr("app.services.shipping.ss_api.client_for", client_for)
+
+    async def test_every_service_is_priced_in_one_ask(self, signed_in, db, monkeypatch):
+        # The dropdown has a dozen lines and the operator is choosing between
+        # them, so pricing them one at a time would be a dozen round trips.
+        fake = self.FakeShipStation()
+        self._use(monkeypatch, fake)
+        order = await self._order(signed_in, db, "STOCKED-Q1", 6101)
+
+        body = (
+            await signed_in.get(
+                f"/api/orders/{order.id}/label-rates"
+                "?carrier_code=ups_walleted&weight_value=3&weight_units=pounds"
+            )
+        ).json()
+
+        assert body["available"] is True
+        # Surcharges are charged too, so they are part of the number shown.
+        assert body["rates"] == [
+            {"service_code": "ups_ground", "service_name": "UPS® Ground", "total": "12.05"},
+            {"service_code": "ups_2nd_day_air", "service_name": "UPS 2nd Day Air®",
+             "total": "31.08"},
+        ]
+        assert len(fake.asked) == 1
+        # No service named: that is what makes one ask cover all of them.
+        assert "service_code" not in fake.asked[0] or fake.asked[0]["service_code"] is None
+        assert fake.asked[0]["from_postal_code"] == "61234"
+        assert fake.asked[0]["to_postal_code"] == "62341-3104"
+
+    async def test_it_ships_from_the_order_s_own_warehouse(self, signed_in, db, monkeypatch):
+        fake = self.FakeShipStation(
+            warehouses=[
+                {"warehouseId": 1, "isDefault": True,
+                 "originAddress": {"postalCode": "10001"}},
+                {"warehouseId": 9, "originAddress": {"postalCode": "61234"}},
+            ]
+        )
+        self._use(monkeypatch, fake)
+        order = await self._order(signed_in, db, "STOCKED-Q2", 6102)
+
+        await signed_in.get(
+            f"/api/orders/{order.id}/label-rates?carrier_code=ups&weight_value=3"
+        )
+        # The order names warehouse 9, so 9 is where it ships from — not the
+        # default, which is a different building.
+        assert fake.asked[0]["from_postal_code"] == "61234"
+
+    async def test_no_ship_from_address_says_so_rather_than_guessing(
+        self, signed_in, db, monkeypatch
+    ):
+        self._use(monkeypatch, self.FakeShipStation(warehouses=[]))
+        order = await self._order(signed_in, db, "STOCKED-Q3", 6103)
+
+        body = (
+            await signed_in.get(
+                f"/api/orders/{order.id}/label-rates?carrier_code=ups&weight_value=3"
+            )
+        ).json()
+        assert body["available"] is False
+        assert "ship-from" in body["reason"]
+
+    async def test_a_carrier_that_will_not_quote_does_not_block_the_purchase(
+        self, signed_in, db, monkeypatch
+    ):
+        """Not knowing the price is a worse screen, not a broken one."""
+        from app.integrations.base import IntegrationError
+
+        class Refuses(self.FakeShipStation):
+            async def get_rates(self, **kwargs):
+                raise IntegrationError("shipstation", "HTTP 400 — carrier not enabled")
+
+        self._use(monkeypatch, Refuses())
+        order = await self._order(signed_in, db, "STOCKED-Q4", 6104)
+
+        response = await signed_in.get(
+            f"/api/orders/{order.id}/label-rates?carrier_code=ups&weight_value=3"
+        )
+        assert response.status_code == 200
+        assert response.json()["available"] is False
+        assert "carrier not enabled" in response.json()["reason"]
+
+    async def test_an_order_shipstation_has_never_seen_is_not_quoted(
+        self, signed_in, db, monkeypatch
+    ):
+        self._use(monkeypatch, self.FakeShipStation())
+        await make_product(signed_in, sku="STOCKED-Q5", fulfillment="stocked")
+        order, _ = await intake.ingest_receipt(
+            db,
+            {"receipt_id": 6105,
+             "transactions": [{"transaction_id": 1, "sku": "STOCKED-Q5", "quantity": 1}]},
+        )
+        await db.commit()
+
+        body = (
+            await signed_in.get(
+                f"/api/orders/{order.id}/label-rates?carrier_code=ups&weight_value=3"
+            )
+        ).json()
+        assert body["available"] is False
+        assert "Not matched" in body["reason"]

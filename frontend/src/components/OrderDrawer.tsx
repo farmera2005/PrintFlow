@@ -764,8 +764,9 @@ export default function OrderDrawer({
         <LabelDialog
           order={order}
           onClose={() => setLabelOpen(false)}
+          // The dialog stays up after a purchase to say what it cost, so it
+          // decides when it closes. This only refreshes what is behind it.
           onCreated={async () => {
-            setLabelOpen(false)
             await load()
             onChanged()
           }}

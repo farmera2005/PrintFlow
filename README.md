@@ -207,15 +207,40 @@ decided rather than observed.
 
 Every move is written to the audit log with the note you gave it.
 
-### What the label cost
+### What the label costs, and what it cost
 
-Buying a label is the only thing PrintFlow spends money on, and until now the
-price vanished into ShipStation the moment it was bought. It is now recorded on
-the order and shown in three places: on the **card**, next to the tracking
-number; in the **drawer**, on the line that already says when the label was made
-and by which service; and in the **label dialog**, which stays open after the
-purchase to say what it cost rather than closing on success and hiding the
-number at the only moment somebody is thinking about it.
+Buying a label is the only thing PrintFlow spends money on, so the price is
+shown on both sides of the click.
+
+**Before.** Pick a carrier and a weight and the label dialog asks ShipStation
+what each of that carrier's services would charge, and prints the answer beside
+every line of the Service dropdown — *UPS® Ground — $28.05*, *UPS Next Day Air®
+— $523.53* — with the chosen one spelled out under the form and repeated on the
+confirm button. Every service is priced in **one** request, not one per line:
+the dropdown has a dozen entries and the operator is choosing between them. The
+quote re-asks when the carrier, weight, units or package change, half a second
+after typing stops.
+
+It says **"about"**, and it means it. The carrier prices again at the moment the
+label is bought, and a surcharge that depends on something ShipStation has not
+been told yet lands on the real charge and not on this one. A number that is
+nearly always right is worth a great deal when the question is *is this the $28
+service or the $523 one*; presenting it as the price would be a promise nobody
+here can make.
+
+Quoting needs a **ship-from** postcode, which an order does not carry. It comes
+from the warehouse the ShipStation order names, falling back to the default
+warehouse and then to any of them. An instance with no warehouse origin at all
+says so rather than guessing — and, like a carrier that refuses to quote, does
+not block the purchase. Not knowing the price makes for a worse screen, not a
+broken one.
+
+**After.** The price is recorded on the order and shown in three places: on the
+**card**, next to the tracking number; in the **drawer**, on the line that
+already says when the label was made and by which service; and in the **label
+dialog**, which now stays open after the purchase to say what it actually cost
+rather than closing on success and hiding the number at the only moment somebody
+is thinking about it.
 
 Postage and insurance are added together, because both are charged and both
 appear on the shipping bill — a card showing only the postage would be quietly

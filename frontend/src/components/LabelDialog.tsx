@@ -14,6 +14,16 @@ interface Bought {
 }
 import { Alert, Button, Field, Modal, Spinner, inputClass } from './ui'
 
+/** What a carrier would charge per service. A quote, not the price: the carrier
+ *  prices again when the label is actually bought. */
+interface Quote {
+  available: boolean
+  reason?: string
+  from_postal_code?: string
+  to_postal_code?: string
+  rates?: { service_code: string; service_name: string | null; total: string | null }[]
+}
+
 interface LabelContext {
   available: boolean
   reason?: string
@@ -50,6 +60,39 @@ export default function LabelDialog({
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [bought, setBought] = useState<Bought | null>(null)
+  const [quote, setQuote] = useState<Quote | null>(null)
+  const [quoting, setQuoting] = useState(false)
+
+  // What the carrier would charge, asked whenever the answer would change.
+  // Debounced because the weight box is typed into a digit at a time, and
+  // every keystroke would otherwise be a request to ShipStation.
+  useEffect(() => {
+    const grams = Number(weight)
+    if (!carrier || !(grams > 0)) {
+      setQuote(null)
+      return
+    }
+    setQuoting(true)
+    const timer = window.setTimeout(() => {
+      const query = new URLSearchParams({
+        carrier_code: carrier,
+        weight_value: String(grams),
+        weight_units: units,
+        package_code: packageCode || '',
+      })
+      api
+        .get<Quote>(`/api/orders/${order.id}/label-rates?${query}`)
+        .then(setQuote)
+        // A quote that will not come is not an error on this screen: the label
+        // can still be bought, just without knowing the price first.
+        .catch(() => setQuote({ available: false, reason: 'ShipStation would not quote.' }))
+        .finally(() => setQuoting(false))
+    }, 500)
+    return () => {
+      window.clearTimeout(timer)
+      setQuoting(false)
+    }
+  }, [order.id, carrier, weight, units, packageCode])
 
   useEffect(() => {
     api
@@ -109,6 +152,10 @@ export default function LabelDialog({
       setBusy(false)
     }
   }
+
+  const rateFor = (code: string) =>
+    (quote?.rates ?? []).find((rate) => rate.service_code === code)?.total ?? null
+  const chosen = service ? rateFor(service) : null
 
   const ready = carrier && service && Number(weight) > 0
 
@@ -191,11 +238,15 @@ export default function LabelDialog({
               onChange={(e) => setService(e.target.value)}
             >
               <option value="">Select a service…</option>
-              {services.map((s) => (
-                <option key={s.code} value={s.code}>
-                  {s.name}
-                </option>
-              ))}
+              {services.map((s) => {
+                const priced = rateFor(s.code)
+                return (
+                  <option key={s.code} value={s.code}>
+                    {s.name}
+                    {priced ? ` — ${formatMoney(priced)}` : ''}
+                  </option>
+                )
+              })}
               {service && !services.some((s) => s.code === service) ? (
                 <option value={service}>{service} (ShipStation default)</option>
               ) : null}
@@ -241,6 +292,13 @@ export default function LabelDialog({
             </Field>
           </div>
 
+          <QuotedPrice
+            quote={quote}
+            quoting={quoting}
+            service={service}
+            hasWeight={Number(weight) > 0}
+          />
+
           {order.status !== 'ready_to_ship' ? (
             <Alert tone="warning">
               This order is not Ready to Ship yet. Creating a label anyway will be recorded
@@ -253,7 +311,11 @@ export default function LabelDialog({
             <Button onClick={onClose}>Cancel</Button>
             {confirming ? (
               <Button variant="danger" onClick={submit} disabled={busy}>
-                {busy ? 'Buying…' : 'Yes — buy the label'}
+                {busy
+                  ? 'Buying…'
+                  : chosen
+                    ? `Yes — buy it for about ${formatMoney(chosen)}`
+                    : 'Yes — buy the label'}
               </Button>
             ) : (
               <Button
@@ -268,5 +330,75 @@ export default function LabelDialog({
         </div>
       )}
     </Modal>
+  )
+}
+
+/** The quoted price for the chosen service, said to be a quote.
+ *
+ *  The carrier prices again at the moment the label is bought, and a surcharge
+ *  that depends on something ShipStation does not know yet lands on the real
+ *  charge and not on this one. So this says "about" — a number that is nearly
+ *  always right is worth a great deal when the question is which service to
+ *  pick, but presenting it as the price would be a promise nobody here can
+ *  make. What was actually charged appears the moment the label is bought. */
+function QuotedPrice({
+  quote,
+  quoting,
+  service,
+  hasWeight,
+}: {
+  quote: Quote | null
+  quoting: boolean
+  service: string
+  hasWeight: boolean
+}) {
+  if (!hasWeight) {
+    return (
+      <p className="text-xs text-ink-500">
+        Enter a weight to see what each service costs.
+      </p>
+    )
+  }
+  if (quoting) {
+    return <p className="text-xs text-ink-500">Asking ShipStation what this costs…</p>
+  }
+  if (!quote) return null
+  if (!quote.available) {
+    return (
+      <p className="text-xs text-ink-500">
+        {quote.reason ?? 'ShipStation could not price this.'} You can still buy the
+        label; the price will be shown once it is bought.
+      </p>
+    )
+  }
+
+  const rate = (quote.rates ?? []).find((row) => row.service_code === service)
+  if (!service) {
+    return (
+      <p className="text-xs text-ink-500">
+        {(quote.rates ?? []).length} service
+        {(quote.rates ?? []).length === 1 ? '' : 's'} priced — pick one to see it.
+      </p>
+    )
+  }
+  if (!rate?.total) {
+    return (
+      <p className="text-xs text-ink-500">
+        ShipStation did not price this service. You can still buy the label.
+      </p>
+    )
+  }
+  return (
+    <div className="rounded-md bg-ink-50 p-3">
+      <p className="text-sm text-ink-800">
+        About <span className="font-semibold">{formatMoney(rate.total)}</span> —{' '}
+        {rate.service_name ?? service}
+      </p>
+      <p className="mt-0.5 text-xs text-ink-500">
+        A quote from ShipStation for {quote.from_postal_code} → {quote.to_postal_code}.
+        The carrier prices again when the label is bought, so surcharges can move
+        it a little.
+      </p>
+    </div>
   )
 }

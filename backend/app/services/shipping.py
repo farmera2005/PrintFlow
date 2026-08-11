@@ -113,6 +113,85 @@ async def label_context(session: AsyncSession, order: Order) -> dict[str, Any]:
     }
 
 
+async def label_rates(
+    session: AsyncSession,
+    order: Order,
+    *,
+    carrier_code: str,
+    weight_value: float,
+    weight_units: str = "ounces",
+    package_code: str | None = None,
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    """What this carrier would charge to ship this order, per service.
+
+    A quote, not a purchase — and said to be one, because the two differ. The
+    carrier prices again at the moment the label is bought, and a surcharge
+    that depends on something ShipStation does not know here (a dimension, a
+    residential flag it decides later) lands on the real charge and not on this
+    one. A number that is nearly always right is worth far more than no number
+    at all when the question is "is this the £30 service or the £9 one" — but it
+    must not be presented as the price.
+
+    Every service is priced in one request rather than one per service: the
+    dropdown has a dozen lines and the operator is choosing between them.
+    """
+    if order.shipstation_order_id is None:
+        return {"available": False, "reason": "Not matched in ShipStation yet."}
+    if not carrier_code or not weight_value or float(weight_value) <= 0:
+        return {"available": False, "reason": "Pick a carrier and a weight first."}
+
+    client = await ss_api.client_for(session)
+    remote = await client.get_order(order.shipstation_order_id)
+    ship_to = remote.get("shipTo") or {}
+    to_postal = str(ship_to.get("postalCode") or "").strip()
+    if not to_postal:
+        return {
+            "available": False,
+            "reason": "This order has no destination postcode in ShipStation.",
+        }
+
+    advanced = remote.get("advancedOptions") or {}
+    origin = ss_api.origin_postal_code(
+        await client.list_warehouses(), advanced.get("warehouseId")
+    )
+    if not origin:
+        return {
+            "available": False,
+            "reason": (
+                "ShipStation has no ship-from address, so it cannot price "
+                "anything. Add a warehouse origin in ShipStation."
+            ),
+        }
+
+    rows = await client.get_rates(
+        carrier_code=carrier_code,
+        from_postal_code=origin,
+        to_state=ship_to.get("state"),
+        to_country=ship_to.get("country") or "US",
+        to_postal_code=to_postal,
+        weight={"value": float(weight_value), "units": weight_units},
+        package_code=package_code or None,
+        confirmation=confirmation or None,
+        residential=ship_to.get("residential"),
+    )
+    rates = [ss_api.parse_rate(row) for row in rows]
+    return {
+        "available": True,
+        "from_postal_code": origin,
+        "to_postal_code": to_postal,
+        "rates": [
+            {
+                "service_code": rate["service_code"],
+                "service_name": rate["service_name"],
+                "total": str(money(rate["total"])) if rate["total"] is not None else None,
+            }
+            for rate in rates
+            if rate["service_code"]
+        ],
+    }
+
+
 async def create_label(
     session: AsyncSession,
     order: Order,

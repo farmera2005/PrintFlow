@@ -99,6 +99,52 @@ class ShipStationClient:
         )
         return data if isinstance(data, list) else data.get("packages") or []
 
+    async def list_warehouses(self) -> list[dict[str, Any]]:
+        data = await self._call("GET", "/warehouses")
+        rows = data if isinstance(data, list) else data.get("warehouses") or []
+        return [row for row in rows if isinstance(row, dict)]
+
+    async def get_rates(
+        self,
+        *,
+        carrier_code: str,
+        from_postal_code: str,
+        to_state: str | None,
+        to_country: str,
+        to_postal_code: str,
+        weight: dict[str, Any],
+        service_code: str | None = None,
+        package_code: str | None = None,
+        confirmation: str | None = None,
+        residential: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """What this carrier would charge. A quote, not a purchase.
+
+        `serviceCode` is left out deliberately where the caller has not fixed
+        one: ShipStation then prices every service the carrier offers, which is
+        one request instead of one per line of a dropdown.
+        """
+        body: dict[str, Any] = {
+            "carrierCode": carrier_code,
+            "fromPostalCode": from_postal_code,
+            "toCountry": to_country or "US",
+            "toPostalCode": to_postal_code,
+            "weight": weight,
+        }
+        if to_state:
+            body["toState"] = to_state
+        if service_code:
+            body["serviceCode"] = service_code
+        if package_code:
+            body["packageCode"] = package_code
+        if confirmation:
+            body["confirmation"] = confirmation
+        if residential is not None:
+            body["residential"] = residential
+        data = await self._call("POST", "/shipments/getrates", json=body, retries=1)
+        rows = data if isinstance(data, list) else (data or {}).get("rates") or []
+        return [row for row in rows if isinstance(row, dict)]
+
     async def create_label_for_order(
         self,
         *,
@@ -143,6 +189,45 @@ def order_defaults(order: dict[str, Any]) -> dict[str, Any]:
         "order_status": order.get("orderStatus"),
         "ship_to": order.get("shipTo") or {},
     }
+
+
+def parse_rate(row: dict[str, Any]) -> dict[str, Any]:
+    """One quoted service. `otherCost` is surcharges, and it is charged too."""
+    shipment = row.get("shipmentCost")
+    other = row.get("otherCost")
+    total: Decimal | None = None
+    for part in (shipment, other):
+        if part is None:
+            continue
+        try:
+            total = (total or Decimal(0)) + Decimal(str(part))
+        except (ArithmeticError, ValueError):
+            continue
+    return {
+        "service_code": row.get("serviceCode"),
+        "service_name": row.get("serviceName"),
+        "total": total,
+    }
+
+
+def origin_postal_code(warehouses: list[dict[str, Any]], warehouse_id: Any) -> str | None:
+    """Where the parcel ships from — the one thing a quote needs that an order
+    does not carry. The order's own warehouse if it names one, else the default,
+    else whichever came first: any of them prices better than none of them."""
+    rows = [row for row in warehouses if isinstance(row, dict)]
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("warehouseId")) != str(warehouse_id),
+            not row.get("isDefault"),
+        ),
+    )
+    for row in ranked:
+        address = row.get("originAddress") or {}
+        code = address.get("postalCode") if isinstance(address, dict) else None
+        if code:
+            return str(code)
+    return None
 
 
 def label_cost(response: dict[str, Any]) -> Decimal | None:
