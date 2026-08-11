@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -69,6 +70,9 @@ DEFAULT_PATHS: dict[str, str] = {
     # LAN and needs an API key, and neither is true of the browser looking at
     # PrintFlow through a tunnel.
     "printer_camera": "/api/printers/{printer_id}/camera",
+    # Cameras can be behind their own short-lived token rather than the API key,
+    # minted here. Only ever called after a camera has refused without one.
+    "camera_token": "/api/v1/printers/camera/stream-token",
 }
 
 DEFAULT_FIELDS: dict[str, str] = {
@@ -289,13 +293,24 @@ def discover_printer_detail(spec_paths: dict[str, Any]) -> dict[str, Any]:
     return _discover_under_printer(spec_paths, _score_printer_detail)
 
 
-# What a camera endpoint is called, best first. The live one is wanted even
-# where a build also offers a still: a single frame can be taken out of a
-# stream, but a stream cannot be made out of a still.
+# What a camera endpoint is called. Order is preference, and it is deliberately
+# the least specific first: `camera` alone is the whole camera, where the rest
+# are things a build offers *of* it.
 CAMERA_LEAVES = (
-    "camera", "cam", "stream", "video", "webcam", "mjpeg", "feed", "snapshot",
-    "image", "still",
+    "camera", "cam", "webcam", "snapshot", "still", "image", "photo",
+    "stream", "video", "mjpeg", "feed",
 )
+
+# The ones that hand over a single picture. PrintFlow only ever wants a frame,
+# so where a build offers both, the still is the cheaper way to be given one —
+# opening a stream to read its first frame and hang up is work for both ends.
+STILL_LEAVES = ("snapshot", "still", "image", "photo")
+
+
+def _still_bonus(tail: list[str]) -> int:
+    """A nudge towards the endpoint that hands over one picture."""
+    words = {w for s in tail for w in re.split(r"[-_.]", s.lower())}
+    return 5 if words & set(STILL_LEAVES) else 0
 
 
 def _camera_rank(segment: str) -> int | None:
@@ -337,9 +352,11 @@ def _score_printer_camera(path: str, methods: set[str]) -> int | None:
         ranks = [_camera_rank(s) for s in tail]
         if not ranks or any(rank is None for rank in ranks):
             return None
-        # `/printers/{id}/camera` beats `/printers/{id}/camera/snapshot`, and
-        # camera beats snapshot, so the shorter and more live path wins.
-        return 100 - ranks[0] * 10 - len(tail)
+        # `/printers/{id}/camera` beats both of its children, being the camera
+        # rather than one view of it. Between the children the still wins: a
+        # frame is all PrintFlow ever wants, and asking for one beats opening a
+        # stream to take its first frame and hang up.
+        return 100 - ranks[0] * 10 - len(tail) + _still_bonus(tail)
 
     # `/camera/{id}`, or `/camera/{id}/stream`. The machine is the template, so
     # anything after it must still be about the camera.
@@ -349,7 +366,7 @@ def _score_printer_camera(path: str, methods: set[str]) -> int | None:
     ranks = [_camera_rank(s) for s in tail]
     if any(rank is None for rank in ranks):
         return None
-    return 90 - owner * 10 - len(tail)
+    return 90 - owner * 10 - len(tail) + _still_bonus(tail)
 
 
 def _discover_under_printer(spec_paths: dict[str, Any], score) -> dict[str, Any]:
@@ -369,6 +386,63 @@ def _discover_under_printer(spec_paths: dict[str, Any], score) -> dict[str, Any]
 
 def discover_printer_camera(spec_paths: dict[str, Any]) -> dict[str, Any]:
     return _discover_under_printer(spec_paths, _score_printer_camera)
+
+
+def _score_camera_token(path: str, methods: set[str]) -> int | None:
+    """Rank a spec path as "mint me a camera token".
+
+    A camera can sit behind a short-lived token of its own rather than the API
+    key, in which case it refuses until one is fetched from somewhere else. That
+    somewhere is a POST, it says token, and it says camera or stream.
+    """
+    if "post" not in methods:
+        return None
+    words = {w for s in path.lower().split("/") for w in re.split(r"[-_.]", s) if w}
+    if "token" not in words:
+        return None
+    if not words & {"camera", "cam", "webcam", "stream", "video"}:
+        return None
+    # A farm-wide one over a per-printer one: fewer round trips for the same
+    # answer, and a token minted per machine is the unusual shape.
+    return 100 - path.count("{") * 20 - len([s for s in path.split("/") if s])
+
+
+def discover_camera_token(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    scored: list[tuple[int, str]] = []
+    for path, operations in spec_paths.items():
+        if not isinstance(operations, dict):
+            continue
+        methods = {m.lower() for m in operations if isinstance(m, str)}
+        rank = _score_camera_token(str(path), methods)
+        if rank is not None:
+            scored.append((rank, str(path)))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    paths = [re.sub(r"\{[^}]+\}", "{printer_id}", path) for _, path in scored]
+    return {"path": paths[0] if paths else None, "alternatives": paths[1:6]}
+
+
+def camera_token_param(spec_paths: dict[str, Any], camera_path: str) -> str | None:
+    """The query parameter the camera declares for its token, if it declares one.
+
+    Worth asking before guessing: the document names the parameter exactly, and
+    a build that wants `?token=` and a build that wants `?stream_token=` look
+    the same from a 401.
+    """
+    template = camera_path.replace("{printer_id}", "")
+    for path, operations in spec_paths.items():
+        if not isinstance(operations, dict):
+            continue
+        if re.sub(r"\{[^}]+\}", "", str(path)) != template:
+            continue
+        get = operations.get("get")
+        params = (get or {}).get("parameters") if isinstance(get, dict) else None
+        for param in params or []:
+            if not isinstance(param, dict) or param.get("in") != "query":
+                continue
+            name = str(param.get("name") or "")
+            if "token" in name.lower():
+                return name
+    return None
 
 
 def discover_printer_files(spec_paths: dict[str, Any]) -> dict[str, Any]:
@@ -404,6 +478,7 @@ def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
         "printer_files": discover_printer_files(spec_paths),
         "printer_detail": discover_printer_detail(spec_paths),
         "printer_camera": discover_printer_camera(spec_paths),
+        "camera_token": discover_camera_token(spec_paths),
     }
     for name, role in PATH_ROLES.items():
         scored: list[tuple[int, str]] = []
@@ -1129,6 +1204,9 @@ class BambuddyClient:
                     "discovered": discover_paths(spec_paths),
                     "collections": collection_paths(spec_paths),
                     "cameras": camera_paths(spec_paths),
+                    "camera_query_param": camera_token_param(
+                        spec_paths, self.paths["printer_camera"]
+                    ),
                 }
         raise IntegrationError(
             PROVIDER_BAMBUDDY,
@@ -1274,9 +1352,27 @@ class BambuddyClient:
             base.scheme, base.host, base.port
         )
 
+    async def mint_camera_token(self, printer_id: Any = None) -> str | None:
+        """Ask for a camera token. Only ever called after one was demanded."""
+        body: dict[str, Any] = {}
+        if printer_id is not None:
+            # A farm-wide minter ignores it; a per-printer one needs it.
+            body["printer_id"] = printer_id
+        data = await self._call("POST", self.paths["camera_token"], json=body)
+        item = _as_item(data)
+        return _first_scalar(
+            item, "token", "stream_token", "streamToken", "access_token",
+            "accessToken", "camera_token", "value", "key",
+        )
+
     @asynccontextmanager
     async def camera(
-        self, printer_id: Any, *, override: str | None = None
+        self,
+        printer_id: Any,
+        *,
+        override: str | None = None,
+        token: str | None = None,
+        style: str | None = None,
     ) -> AsyncIterator[httpx.Response]:
         """The camera's response, still open — an image, or a stream of them.
 
@@ -1285,9 +1381,20 @@ class BambuddyClient:
         the bytes on as they arrive.
         """
         target = self.camera_target(printer_id, override)
+        headers = self._headers()
+        params: dict[str, str] = {}
+        if token:
+            if style and style.startswith("query:"):
+                params[style.split(":", 1)[1]] = token
+            elif style == "bearer":
+                headers["Authorization"] = f"Bearer {token}"
+            elif style:
+                headers[style] = token
         client = new_client(timeout=CAMERA_TIMEOUT)
         try:
-            async with client.stream("GET", target, headers=self._headers()) as response:
+            async with client.stream(
+                "GET", target, headers=headers, params=params or None
+            ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread())[:400].decode("utf-8", "replace")
                     raise IntegrationError(
@@ -1943,6 +2050,169 @@ async def with_healing(
     return await call()
 
 
+# How a build wants its camera token presented, in the order they are tried.
+# Every one of these is one request, and only ever on a camera that has already
+# refused without a token — after which what worked is remembered and the
+# ladder is never climbed again.
+TOKEN_STYLES = (
+    "query:token",
+    "query:stream_token",
+    "query:access_token",
+    "bearer",
+    "X-Stream-Token",
+    "X-Camera-Token",
+)
+
+# Minted tokens, by instance. A token per frame would be ten extra round trips
+# per page load for a credential that is good for minutes — but it is also
+# short-lived by design, so it is held briefly and re-minted the moment a camera
+# says it has gone stale.
+_camera_tokens: dict[str, tuple[str, str, float]] = {}
+_TOKEN_TTL = 120.0
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def forget_camera_token(base_url: str) -> None:
+    _camera_tokens.pop(base_url, None)
+
+
+def _token_path_from(body: str | None) -> str | None:
+    """The minter the camera named in its own refusal.
+
+    More reliable than any amount of matching: a build that gates its camera
+    behind a token generally says where to get one, and that sentence is the
+    instance stating its own answer rather than PrintFlow inferring it.
+    """
+    if not body:
+        return None
+    found = re.search(r"(?:POST|GET)\s+(/[\w\-./{}]+)", body)
+    return found.group(1) if found else None
+
+
+async def _remember_camera_auth(
+    session: AsyncSession, *, token_path: str | None, style: str | None
+) -> None:
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY)
+    if payload is None:
+        return
+    auth = {**(payload.get("camera_auth") or {})}
+    if token_path:
+        auth["token_path"] = token_path
+    if style:
+        auth["style"] = style
+    if auth == (payload.get("camera_auth") or {}):
+        return
+    payload["camera_auth"] = auth
+    await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
+
+
+@asynccontextmanager
+async def open_camera(
+    session: AsyncSession,
+    client: BambuddyClient,
+    printer_id: Any,
+    *,
+    override: str | None = None,
+) -> AsyncIterator[httpx.Response]:
+    """A machine's camera, getting past whatever it is guarded by.
+
+    Most builds let the API key through. Some keep cameras behind a short-lived
+    token of their own and refuse without one, saying so and — usefully — saying
+    where to get one. That refusal is the whole protocol: it is not an error to
+    report, it is an instruction to follow.
+
+    What is not knowable from the refusal is *how* the token should be presented
+    — a query parameter under one of several names, or a header under another.
+    So the ways are tried in turn, once, and the one that works is remembered
+    next to the connection. After that it is a single request like any other.
+    """
+    async def opened(token: str | None, style: str | None):
+        """Open it, or raise. Kept apart from the yield below so that a failure
+        while the caller is *reading* the picture is never mistaken for the
+        camera refusing to hand one over."""
+        manager = client.camera(
+            printer_id, override=override, token=token, style=style
+        )
+        return manager, await manager.__aenter__()
+
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY) or {}
+    auth = payload.get("camera_auth") or {}
+    if auth.get("token_path"):
+        client.paths["camera_token"] = auth["token_path"]
+    cached = _camera_tokens.get(client.base_url)
+    token = cached[0] if cached and cached[2] > _now() else None
+    style = auth.get("style") or (cached[1] if cached else None)
+
+    if style and not token:
+        # This build is known to want a token and the last one has expired, so
+        # asking without one is a round trip spent to be told what we know.
+        # Only ever true of an instance that has already refused once.
+        try:
+            token = await client.mint_camera_token(printer_id)
+        except IntegrationError:
+            token = None
+
+    try:
+        manager, response = await opened(token, style)
+    except IntegrationError as exc:
+        if exc.status_code not in (401, 403):
+            raise
+        refusal = exc
+    else:
+        if token and style:
+            _camera_tokens[client.base_url] = (token, style, _now() + _TOKEN_TTL)
+        try:
+            yield response
+        finally:
+            await manager.__aexit__(None, None, None)
+        return
+
+    # It wants a token, or the one we had has expired.
+    forget_camera_token(client.base_url)
+    named = _token_path_from(refusal.body)
+    if named and named != client.paths["camera_token"]:
+        client.paths["camera_token"] = named
+    elif not auth.get("token_path"):
+        adopted = await client.resolve_paths(("camera_token",))
+        await remember_paths(session, adopted)
+
+    fresh = await client.mint_camera_token(printer_id)
+    if not fresh:
+        raise IntegrationError(
+            PROVIDER_BAMBUDDY,
+            f"{refusal}. PrintFlow asked "
+            f"{client.paths['camera_token']} for a camera token and could not "
+            "find one in the reply.",
+            status_code=refusal.status_code,
+            body=refusal.body,
+        )
+
+    # A remembered style is the only one worth trying; otherwise, each in turn.
+    ladder = (style,) if style else TOKEN_STYLES
+    last = refusal
+    for attempt in ladder:
+        try:
+            manager, response = await opened(fresh, attempt)
+        except IntegrationError as exc:
+            if exc.status_code not in (401, 403):
+                raise
+            last = exc
+            continue
+        _camera_tokens[client.base_url] = (fresh, attempt, _now() + _TOKEN_TTL)
+        await _remember_camera_auth(
+            session, token_path=client.paths["camera_token"], style=attempt
+        )
+        try:
+            yield response
+        finally:
+            await manager.__aexit__(None, None, None)
+        return
+    raise last
+
+
 # Bumped whenever the rules for recognising a camera endpoint change. A stored
 # "this build has no camera" was an answer to the rules of the day, and a
 # release that widens them has to ask again — otherwise the shop that upgrades
@@ -2031,8 +2301,8 @@ async def camera_report(
         target = client.camera_target(first["id"], first.get("camera_url"))
         probe = {"endpoint": target, "printer": first.get("name")}
         try:
-            async with client.camera(
-                first["id"], override=first.get("camera_url")
+            async with open_camera(
+                session, client, first["id"], override=first.get("camera_url")
             ) as response:
                 head = b""
                 async for chunk in response.aiter_bytes():

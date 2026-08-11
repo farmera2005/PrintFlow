@@ -737,6 +737,13 @@ const PATH_ROLES: {
     templated: true,
   },
   {
+    key: 'camera_token',
+    label: 'Camera token',
+    hint:
+      'Only used by builds that keep cameras behind a short-lived token ' +
+      'instead of the API key. Called when a camera refuses without one.',
+  },
+  {
     key: 'printer_detail',
     label: 'One printer',
     hint:

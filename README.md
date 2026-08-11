@@ -541,16 +541,36 @@ fetched out of sight and swapped in only once it has arrived so the picture
 never blinks through empty. A camera that stops answering slows the asking
 rather than stopping it, since a camera comes back when its machine wakes up.
 
-**The endpoint** is discovered like the others — `camera`, `cam`, `stream`,
-`video`, `webcam`, `mjpeg`, `feed`, then `snapshot`, `image`, `still`, in that
-order of preference, since a frame can be taken out of a stream but a stream
-cannot be made out of a frame. Both shapes are read, because builds disagree
+**The endpoint** is discovered like the others. A camera can have a whole family
+of endpoints — one real instance serves ten under `…/camera/`, of which
+`status`, `stop`, `test`, `check-plate` and `plate-detection` are not pictures
+at all — so a path only counts when *every* segment after the machine is about
+the camera, which is why `camera-settings` is not one. Among the ones that are,
+the still (`snapshot`, `still`, `image`, `photo`) is preferred over the stream:
+a frame is all PrintFlow ever wants, and asking for one beats opening a stream
+to take its first frame and hang up. Both shapes are read, because builds
+disagree
 about which noun owns the other: `/printers/{id}/camera` hangs the camera off
 the machine and `/camera/{id}` hangs the machine off the camera, and they name
 the same thing. Separators are not different words, so `camera_stream`,
 `camera-feed` and `camera/stream` all read alike — but a segment has to be
 *entirely* camera-ish to count, which is why `camera-settings` is not one. It is
 editable under **Advanced** as *One printer's camera*.
+
+**A camera may not accept the API key.** Some builds gate cameras behind a
+short-lived token of their own and refuse without one — and, usefully, say where
+to get one in the refusal itself. That sentence is the whole protocol: it is not
+an error to report, it is an instruction to follow. PrintFlow mints a token,
+retries, and holds it for a couple of minutes so that ten cards do not mean ten
+tokens.
+
+What the refusal does *not* say is **how** the token should be presented — a
+query parameter under one of several names, or a header under another. So the
+ways are tried in turn, once, and the one that works is remembered next to the
+connection. After that a picture is a single request, and an instance known to
+want a token asks for one up front rather than spending a round trip being told
+what it already knows. The minter is discovered like any other endpoint and is
+editable under **Advanced** as *Camera token*.
 
 Whether this build has cameras at all is asked **once** and remembered beside
 the connection: the alternative is either ten broken pictures on every page

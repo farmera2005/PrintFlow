@@ -92,12 +92,15 @@ async def printer_camera(
     except IntegrationNotConfigured as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     try:
-        async with client.camera(
-            printer_id, override=farm.camera_url_for(printer_id)
+        async with bambuddy_api.open_camera(
+            session, client, printer_id, override=farm.camera_url_for(printer_id)
         ) as response:
             frame, kind = await _still_frame(response)
     except IntegrationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    # Getting the picture may have worked out how this build wants its camera
+    # token presented, which is worth exactly one round of trial and error.
+    await session.commit()
     # The page asks again for every new frame, so this must not come back out
     # of a cache: a frozen picture of a working printer is worse than none.
     return Response(frame, media_type=kind, headers={"Cache-Control": "no-store"})

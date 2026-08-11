@@ -11,6 +11,7 @@ and a Bambuddy that is down altogether while the shop still needs its queue.
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -249,8 +250,13 @@ def _serve(monkeypatch, content_type: str, chunks: list[bytes], status: int = 20
                 yield chunk
 
     class Camera:
+        base_url = "http://b.local"
+        paths = {"camera_token": "/api/v1/printers/camera/stream-token"}
+        explicit_paths: dict = {}
+        discovered_paths: dict = {}
+
         @asynccontextmanager
-        async def camera(self, printer_id, *, override=None):
+        async def camera(self, printer_id, *, override=None, token=None, style=None):
             if status >= 400:
                 raise IntegrationError(
                     "bambuddy", f"HTTP {status}", status_code=status
@@ -480,7 +486,7 @@ class CameraFarm(FarmClient):
         self.reply = reply
 
     @asynccontextmanager
-    async def camera(self, printer_id, *, override=None):
+    async def camera(self, printer_id, *, override=None, token=None, style=None):
         if self.reply is None:
             raise IntegrationError("bambuddy", "HTTP 404", status_code=404)
         content_type, body = self.reply
@@ -493,6 +499,216 @@ class CameraFarm(FarmClient):
                 yield body
 
         yield Reply()
+
+
+class TokenGated(FarmClient):
+    """A camera behind a short-lived token of its own — the reported shape.
+
+    Refuses without one and says where to get one, which is how a build that
+    does this generally behaves: the refusal is an instruction, not a fault.
+    """
+
+    def __init__(self, *, style: str = "query:token", names_the_minter: bool = True,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.style = style
+        self.names_the_minter = names_the_minter
+        self.minted = 0
+        self.presented: list[tuple[str | None, str | None]] = []
+
+    async def mint_camera_token(self, printer_id=None):
+        self.minted += 1
+        self.asked.append("POST " + self.paths["camera_token"])
+        return "tok"
+
+    @asynccontextmanager
+    async def camera(self, printer_id, *, override=None, token=None, style=None):
+        self.presented.append((token, style))
+        if token != "tok" or style != self.style:
+            detail = "Valid camera stream token required."
+            if self.names_the_minter:
+                detail += " Obtain one from POST /api/v1/printers/camera/stream-token"
+            raise IntegrationError(
+                "bambuddy", "HTTP 401", status_code=401, body=json.dumps({"detail": detail})
+            )
+
+        class Reply:
+            status_code = 200
+            headers = {"content-type": "image/jpeg"}
+
+            async def aiter_bytes(self):
+                yield JPEG
+
+        yield Reply()
+
+
+class TestTokenGatedCamera:
+    async def _saved(self, db, **extra):
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY,
+            {"base_url": "http://b.local", "api_key": "k", **extra},
+        )
+        await db.commit()
+
+    def _client(self, **kwargs) -> TokenGated:
+        return TokenGated(
+            spec_paths={
+                "/api/printers": {"get": {}},
+                "/api/v1/printers/{printer_id}/camera/snapshot": {"get": {}},
+                "/api/v1/printers/camera/stream-token": {"post": {}},
+            },
+            listing=LIVE_LISTING,
+            **kwargs,
+        )
+
+    async def test_the_refusal_is_followed_rather_than_reported(self, db):
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client()
+
+        async with bambuddy_api.open_camera(db, client, 1) as response:
+            assert response.status_code == 200
+        assert client.minted == 1
+        # Asked plainly first, then with the token — the second one worked.
+        assert client.presented[0] == (None, None)
+        assert ("tok", "query:token") in client.presented
+
+    async def test_what_worked_is_remembered(self, db):
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client()
+        async with bambuddy_api.open_camera(db, client, 1):
+            pass
+        await db.commit()
+
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["camera_auth"] == {
+            "token_path": "/api/v1/printers/camera/stream-token",
+            "style": "query:token",
+        }
+
+    async def test_a_known_build_does_not_wait_to_be_refused(self, db):
+        """One round trip spent being told what is already known is one too many."""
+        await self._saved(
+            db,
+            camera_auth={
+                "token_path": "/api/v1/printers/camera/stream-token",
+                "style": "query:token",
+            },
+        )
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client()
+
+        async with bambuddy_api.open_camera(db, client, 1):
+            pass
+        # Straight out with a token; never asked without one.
+        assert client.presented == [("tok", "query:token")]
+
+    async def test_the_token_is_not_minted_once_per_picture(self, db):
+        # A farm of ten cards would otherwise mint ten tokens per page load.
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client()
+        for printer_id in (1, 2, 3):
+            async with bambuddy_api.open_camera(db, client, printer_id):
+                pass
+        assert client.minted == 1
+
+    async def test_a_build_wanting_a_header_instead_is_found_too(self, db):
+        # Nothing in a 401 says *how* the token should be presented, so the
+        # ways are tried in turn — once, and then remembered.
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client(style="X-Stream-Token")
+
+        async with bambuddy_api.open_camera(db, client, 1) as response:
+            assert response.status_code == 200
+        await db.commit()
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["camera_auth"]["style"] == "X-Stream-Token"
+
+    async def test_a_minter_the_refusal_names_is_used_over_a_guess(self, db):
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client()
+        client.paths["camera_token"] = "/api/printers/camera/stream-token"
+
+        async with bambuddy_api.open_camera(db, client, 1):
+            pass
+        assert client.paths["camera_token"] == "/api/v1/printers/camera/stream-token"
+
+    async def test_a_refusal_that_names_nothing_falls_back_to_the_document(self, db):
+        await self._saved(db)
+        bambuddy_api.forget_camera_token("http://b.local")
+        client = self._client(names_the_minter=False)
+        client.paths["camera_token"] = "/api/printers/camera/stream-token"
+
+        async with bambuddy_api.open_camera(db, client, 1):
+            pass
+        assert client.specs_read == 1
+        assert client.paths["camera_token"] == "/api/v1/printers/camera/stream-token"
+
+    async def test_a_failure_that_is_not_about_a_token_is_left_alone(self, db):
+        await self._saved(db)
+
+        class Broken(TokenGated):
+            @asynccontextmanager
+            async def camera(self, printer_id, *, override=None, token=None, style=None):
+                raise IntegrationError("bambuddy", "HTTP 500", status_code=500)
+                yield  # pragma: no cover
+
+        client = Broken(
+            spec_paths={"/api/printers": {"get": {}}}, listing=LIVE_LISTING
+        )
+        bambuddy_api.forget_camera_token("http://b.local")
+        with pytest.raises(IntegrationError) as caught:
+            async with bambuddy_api.open_camera(db, client, 1):
+                pass
+        assert caught.value.status_code == 500
+        assert client.minted == 0
+
+
+class TestDiscoverCameraToken:
+    def test_the_minter_is_read_off_the_document(self):
+        found = discover_paths(
+            {
+                "/api/v1/printers/camera/stream-token": {"post": {}},
+                "/api/v1/auth/token": {"post": {}},
+            }
+        )["camera_token"]
+        assert found["path"] == "/api/v1/printers/camera/stream-token"
+
+    def test_a_token_endpoint_about_something_else_is_not_it(self):
+        found = discover_paths({"/api/v1/auth/token": {"post": {}}})["camera_token"]
+        assert found["path"] is None
+
+    def test_the_reported_instance_picks_the_snapshot_among_its_decoys(self):
+        """Its camera has ten endpoints and only one of them hands over a picture."""
+        spec = {
+            path: {"get": {}}
+            for path in (
+                "/api/v1/printers/{printer_id}/camera/snapshot",
+                "/api/v1/printers/{printer_id}/camera/stream",
+                "/api/v1/printers/{printer_id}/camera/status",
+                "/api/v1/printers/{printer_id}/camera/stop",
+                "/api/v1/printers/{printer_id}/camera/test",
+                "/api/v1/printers/{printer_id}/camera/check-plate",
+                "/api/v1/printers/{printer_id}/camera/plate-detection/status",
+                "/api/v1/printers/usb-cameras",
+                "/api/v1/camwall/printers",
+            )
+        }
+        spec["/api/v1/printers/camera/stream-token"] = {"post": {}}
+        found = discover_paths(spec)
+
+        assert found["printer_camera"]["path"] == (
+            "/api/v1/printers/{printer_id}/camera/snapshot"
+        )
+        # The stream is the runner-up; everything else is not a picture at all.
+        assert found["printer_camera"]["alternatives"] == [
+            "/api/v1/printers/{printer_id}/camera/stream"
+        ]
+        assert found["camera_token"]["path"] == "/api/v1/printers/camera/stream-token"
 
 
 class TestCameraReport:
