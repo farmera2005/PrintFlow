@@ -21,6 +21,7 @@ from ..models import (
     PrintJob,
 )
 from ..services import credentials
+from ..services.manufacturing import money
 from ..services.state import suggested_status
 
 
@@ -149,6 +150,11 @@ def order_card(order: Order) -> dict[str, Any]:
         "suggested_status": suggested_status(order, list(order.lines)),
         "tracking_number": order.tracking_number,
         "label_created_at": order.label_created_at,
+        # A string, not a float: this is money on its way to a screen, and
+        # JSON's only number is the one that cannot hold 7.41 exactly. Rounded
+        # to cents on the way out like every other figure PrintFlow shows.
+        "label_cost": str(money(order.label_cost)) if order.label_cost is not None else None,
+        "label_currency": order.label_currency,
         "shipstation_order_id": order.shipstation_order_id,
         "summary": _summary(order),
         "lines": _line_tree(order),

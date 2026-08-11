@@ -8,6 +8,7 @@ labels, and never duplicates the tracking write (§4.4).
 from __future__ import annotations
 
 import base64
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,6 +143,29 @@ def order_defaults(order: dict[str, Any]) -> dict[str, Any]:
         "order_status": order.get("orderStatus"),
         "ship_to": order.get("shipTo") or {},
     }
+
+
+def label_cost(response: dict[str, Any]) -> Decimal | None:
+    """What the label actually cost, postage and insurance together.
+
+    Both parts are charged and both appear on the shipping bill, so a card
+    showing only the postage would be quietly wrong on any order insured. A
+    reply that prices nothing gives nothing back rather than zero: "ShipStation
+    did not say" and "it was free" are different, and only one of them should
+    ever be shown as $0.00.
+    """
+    total = Decimal(0)
+    seen = False
+    for field in ("shipmentCost", "insuranceCost"):
+        value = response.get(field)
+        if value is None:
+            continue
+        try:
+            total += Decimal(str(value))
+        except (ArithmeticError, ValueError):
+            continue
+        seen = True
+    return total if seen else None
 
 
 def decode_label_pdf(response: dict[str, Any]) -> bytes | None:

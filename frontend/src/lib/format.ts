@@ -10,6 +10,24 @@ export const ORDER_STATUSES: OrderStatus[] = [
   'cancelled',
 ]
 
+/** Money, as sent: a decimal string, because JSON's only number cannot hold
+ *  7.41 exactly and this is a figure somebody will reconcile against a bill.
+ *  Anything unparseable is shown as it arrived rather than as NaN. */
+export function formatMoney(amount: string | null, currency?: string | null): string {
+  if (amount === null || amount === undefined || amount === '') return '—'
+  const value = Number(amount)
+  if (!Number.isFinite(value)) return String(amount)
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: currency || 'USD',
+    }).format(value)
+  } catch {
+    // An unknown currency code is not a reason to show nothing.
+    return `${value.toFixed(2)} ${currency ?? ''}`.trim()
+  }
+}
+
 export const COLUMN_LABELS: Record<OrderStatus, string> = {
   new: 'New',
   in_production: 'In Production',

@@ -207,6 +207,23 @@ decided rather than observed.
 
 Every move is written to the audit log with the note you gave it.
 
+### What the label cost
+
+Buying a label is the only thing PrintFlow spends money on, and until now the
+price vanished into ShipStation the moment it was bought. It is now recorded on
+the order and shown in three places: on the **card**, next to the tracking
+number; in the **drawer**, on the line that already says when the label was made
+and by which service; and in the **label dialog**, which stays open after the
+purchase to say what it cost rather than closing on success and hiding the
+number at the only moment somebody is thinking about it.
+
+Postage and insurance are added together, because both are charged and both
+appear on the shipping bill — a card showing only the postage would be quietly
+wrong on any insured order. A label ShipStation did not price shows no price:
+"nothing was said" and "it was free" are different, and only one of them should
+read as $0.00. Labels bought before this release have no cost to show, since
+the number was never kept.
+
 ## Finding an order, and changing a match
 
 The board draws the five live columns, so a cancelled order is not on it and a
@@ -1032,7 +1049,7 @@ an audit row**.
 - **Assembly** — production finished but the order contains a bundle, which
   needs a manual check-off per bundle. Orders without bundles skip this column.
 - **Ready to Ship** — every line ready. The Create Label button goes live.
-- **Shipped** — label bought, tracking shown.
+- **Shipped** — label bought, tracking and what it cost shown.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
 printer models, BOM editor), [**Printers**](#printers) (the farm, live, with

@@ -5,6 +5,7 @@ import {
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
   formatAge,
+  formatMoney,
 } from '../lib/format'
 import type { BoardResponse, Order, OrderLine, OrderStatus } from '../lib/types'
 import OrderDrawer from '../components/OrderDrawer'
@@ -104,6 +105,13 @@ function OrderCard({
         {order.tracking_number ? (
           <Badge className="bg-indigo-100 text-indigo-800 ring-indigo-300">
             {order.tracking_number}
+          </Badge>
+        ) : null}
+        {/* What the label cost. Labels are the one thing PrintFlow spends
+            money on, and the number is otherwise only visible in ShipStation. */}
+        {order.label_cost ? (
+          <Badge className="bg-ink-100 text-ink-700 ring-ink-300">
+            {formatMoney(order.label_cost, order.label_currency)}
           </Badge>
         ) : null}
       </div>

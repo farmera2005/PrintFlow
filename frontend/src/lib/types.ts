@@ -93,6 +93,11 @@ export interface Order {
   suggested_status: OrderStatus | null
   tracking_number: string | null
   label_created_at: string | null
+  /** What the label cost, postage and insurance together — a decimal string,
+   *  because this is money and JSON's only number cannot hold 7.41 exactly.
+   *  Null for a label bought before PrintFlow recorded it. */
+  label_cost: string | null
+  label_currency: string | null
   shipstation_order_id: number | null
   summary: OrderSummary
   lines: OrderLine[]

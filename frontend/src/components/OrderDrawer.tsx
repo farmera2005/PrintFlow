@@ -7,6 +7,7 @@ import {
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
   formatDateTime,
+  formatMoney,
 } from '../lib/format'
 import type { Order, OrderLine, OrderStatus, Product } from '../lib/types'
 import LabelDialog from './LabelDialog'
@@ -619,6 +620,9 @@ export default function OrderDrawer({
                       <p className="text-xs text-ink-500">
                         Label created {formatDateTime(order.label_created_at)} ·{' '}
                         {order.carrier_code} / {order.service_code}
+                        {order.label_cost
+                          ? ` · ${formatMoney(order.label_cost, order.label_currency)}`
+                          : ''}
                       </p>
                       <p className="text-xs text-ink-500">
                         ShipStation pushes this tracking number back to Etsy.

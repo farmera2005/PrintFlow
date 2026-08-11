@@ -17,6 +17,7 @@ from ..models import (
     Order,
 )
 from ..services import credentials
+from ..services.manufacturing import money
 from ..services.state import recompute_order
 
 log = logging.getLogger("printflow.shipping")
@@ -152,6 +153,12 @@ async def create_label(
     order.service_code = service_code
     order.label_created_at = datetime.now(timezone.utc)
     order.label_pdf = ss_api.decode_label_pdf(response)
+    # The one thing PrintFlow spends money on. Kept on the order rather than
+    # left in ShipStation, so the board can show what the card cost and a
+    # question about last month's postage can be answered from the orders.
+    order.label_cost = ss_api.label_cost(response)
+    if order.label_cost is not None:
+        order.label_currency = str(response.get("currency") or "USD")
     await session.flush()
     await credentials.mark_ok(session, "shipstation")
     # Tracking flows back to Etsy through ShipStation's own store connection —
@@ -162,5 +169,7 @@ async def create_label(
         "carrier_code": carrier_code,
         "service_code": service_code,
         "shipment_cost": response.get("shipmentCost"),
+        "label_cost": str(money(order.label_cost)) if order.label_cost is not None else None,
+        "label_currency": order.label_currency,
         "has_pdf": order.label_pdf is not None,
     }

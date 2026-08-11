@@ -604,6 +604,98 @@ class TestLabelCreation:
         entries = (await db.execute(select(AuditLog))).scalars().all()
         assert any(entry.action == "label_created" for entry in entries)
 
+    async def test_what_the_label_cost_reaches_the_board(self, signed_in, db, monkeypatch):
+        """Labels are the one thing PrintFlow spends money on."""
+        class FakeShipStation:
+            async def create_label_for_order(self, **kwargs):
+                return {
+                    "trackingNumber": "9400111899224",
+                    # Postage and insurance are both charged and both land on
+                    # the shipping bill, so the card has to show the sum.
+                    "shipmentCost": 7.16,
+                    "insuranceCost": 0.25,
+                    "currency": "USD",
+                }
+
+        async def client_for(_session):
+            return FakeShipStation()
+
+        monkeypatch.setattr("app.services.shipping.ss_api.client_for", client_for)
+
+        await make_product(signed_in, sku="STOCKED-C", fulfillment="stocked")
+        order, _ = await intake.ingest_receipt(
+            db,
+            {
+                "receipt_id": 6002,
+                "transactions": [{"transaction_id": 1, "sku": "STOCKED-C", "quantity": 1}],
+            },
+        )
+        order.shipstation_order_id = 22222
+        order.status = "ready_to_ship"
+        await db.commit()
+
+        bought = await signed_in.post(
+            f"/api/orders/{order.id}/label",
+            json={
+                "carrier_code": "stamps_com",
+                "service_code": "usps_ground_advantage",
+                "weight_value": 6.5,
+            },
+        )
+        assert bought.status_code == 200, bought.text
+        # A string, not a float: JSON's only number cannot hold 7.41 exactly,
+        # and this is a figure somebody reconciles against a bill.
+        assert bought.json()["label_cost"] == "7.41"
+        assert bought.json()["label_currency"] == "USD"
+
+        board = (await signed_in.get("/api/board")).json()
+        cards = [
+            card
+            for column in board["columns"]
+            for card in column["orders"]
+            if card["id"] == str(order.id)
+        ]
+        assert cards[0]["label_cost"] == "7.41"
+        assert cards[0]["label_currency"] == "USD"
+
+    async def test_a_label_shipstation_did_not_price_shows_no_price(
+        self, signed_in, db, monkeypatch
+    ):
+        """"Nothing was said" and "it was free" must not look the same."""
+        class Silent:
+            async def create_label_for_order(self, **kwargs):
+                return {"trackingNumber": "9400111899225"}
+
+        async def client_for(_session):
+            return Silent()
+
+        monkeypatch.setattr("app.services.shipping.ss_api.client_for", client_for)
+
+        await make_product(signed_in, sku="STOCKED-D", fulfillment="stocked")
+        order, _ = await intake.ingest_receipt(
+            db,
+            {
+                "receipt_id": 6003,
+                "transactions": [{"transaction_id": 1, "sku": "STOCKED-D", "quantity": 1}],
+            },
+        )
+        order.shipstation_order_id = 33333
+        order.status = "ready_to_ship"
+        await db.commit()
+
+        bought = await signed_in.post(
+            f"/api/orders/{order.id}/label",
+            json={
+                "carrier_code": "stamps_com",
+                "service_code": "usps_ground_advantage",
+                "weight_value": 6.5,
+            },
+        )
+        assert bought.status_code == 200, bought.text
+        assert bought.json()["label_cost"] is None
+        await db.refresh(order)
+        assert order.label_cost is None and order.label_currency is None
+
 
 class TestSyncAndAudit:
     async def test_sync_log_and_audit_endpoints(self, signed_in):

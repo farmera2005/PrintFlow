@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import type { Order } from '../lib/types'
+import { formatMoney } from '../lib/format'
+
+/** What buying a label gives back. The cost is the reason this is shown at all:
+ *  it is the only action in PrintFlow that spends money. */
+interface Bought {
+  tracking_number: string
+  carrier_code: string | null
+  service_code: string | null
+  label_cost: string | null
+  label_currency: string | null
+}
 import { Alert, Button, Field, Modal, Spinner, inputClass } from './ui'
 
 interface LabelContext {
@@ -38,6 +49,7 @@ export default function LabelDialog({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [bought, setBought] = useState<Bought | null>(null)
 
   useEffect(() => {
     api
@@ -77,7 +89,7 @@ export default function LabelDialog({
     setBusy(true)
     setError(null)
     try {
-      await api.post(`/api/orders/${order.id}/label`, {
+      const receipt = await api.post<Bought>(`/api/orders/${order.id}/label`, {
         carrier_code: carrier,
         service_code: service,
         package_code: packageCode || 'package',
@@ -85,6 +97,10 @@ export default function LabelDialog({
         weight_units: units,
         allow_not_ready: order.status !== 'ready_to_ship',
       })
+      // The dialog stays up to say what it cost. This is the one action in
+      // PrintFlow that spends money, and closing on success would hide the
+      // number at the only moment somebody is thinking about it.
+      setBought(receipt)
       onCreated()
     } catch (err) {
       setError(errorMessage(err))
@@ -101,6 +117,28 @@ export default function LabelDialog({
       {!context ? (
         <div className="flex justify-center py-6">
           <Spinner className="h-6 w-6" />
+        </div>
+      ) : bought ? (
+        <div className="space-y-3">
+          <Alert tone="success">
+            Label bought{' '}
+            {bought.label_cost
+              ? `for ${formatMoney(bought.label_cost, bought.label_currency)}`
+              : '— ShipStation did not price it'}
+            .
+          </Alert>
+          <p className="text-sm text-ink-700">
+            Tracking <span className="font-mono">{bought.tracking_number}</span>
+          </p>
+          <p className="text-xs text-ink-500">
+            {bought.carrier_code} / {bought.service_code}. ShipStation pushes the
+            tracking number back to Etsy.
+          </p>
+          <div className="flex justify-end">
+            <Button variant="primary" onClick={onClose}>
+              Done
+            </Button>
+          </div>
         </div>
       ) : !context.available ? (
         <Alert tone="warning">{context.reason}</Alert>

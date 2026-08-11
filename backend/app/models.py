@@ -562,6 +562,13 @@ class Order(Base):
     service_code: Mapped[str | None] = mapped_column(Text)
     label_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     label_pdf: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # What the label cost, as ShipStation charged it — postage plus insurance,
+    # which is the number that will appear on the shipping bill. Numeric rather
+    # than float: this is money, and a card that says $7.41 must not be a
+    # rounding of something else. Null for an order whose label predates this,
+    # and for one ShipStation priced at nothing.
+    label_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    label_currency: Mapped[str | None] = mapped_column(Text)
 
     raw: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
     created_at: Mapped[datetime] = _created_at()
@@ -572,6 +579,7 @@ class Order(Base):
             "status in ('new','in_production','assembly','ready_to_ship','shipped','cancelled')",
             name="ck_orders_status",
         ),
+        CheckConstraint("label_cost >= 0", name="ck_orders_label_cost_not_negative"),
         Index("ix_orders_status", "status"),
     )
 
