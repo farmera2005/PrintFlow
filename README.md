@@ -418,7 +418,7 @@ instead of stacking behind whichever file happens to be first in the list.
 Deciding earlier would mean deciding against a farm that has since changed.
 
 A plate that has not gone out yet still names a file — the first candidate — so
-the print queue has something to show rather than a blank row. Adding, editing
+the [Printers](#printers) screen has something to show rather than a blank row. Adding, editing
 or removing a file re-plans any plate that has not reached Bambuddy, so a fourth
 machine getting its own slicing is picked up by the orders already waiting.
 Plates already on a printer are left alone.
@@ -458,6 +458,69 @@ through with nothing ticked, which is the behaviour they already had. A file now
 needs an archive id *or* a file-manager path rather than an id outright, since a
 file manager entry may have no id at all. A product that had one print mapping
 comes through as a product with one file in its list, unchanged.
+
+## Printers
+
+**Printers** is the farm: a card per machine, live from Bambuddy, with the
+plates PrintFlow sent to that machine underneath it. It replaces the old flat
+Print Queue, which answered "what is outstanding" — a question the board already
+answers per order. Standing in the shop the question is nearly always the other
+one, *which machine should I be looking at*, and a list sorted by order cannot
+answer it however it is filtered.
+
+Each card carries what its build will say: online or not, what it is doing, how
+far through with how long left, the layer it is on, the file on it, and nozzle,
+bed and chamber temperatures. Every reading is optional and a missing one is
+shown as missing rather than as a zero — "no progress reported" and "0% done"
+are different things to act on. A machine reporting a fault says so in red; a
+Bambu machine reports "no fault" as the number 0, which is read as no fault
+rather than printed as one.
+
+Underneath, the plates. This is the half Bambuddy cannot answer: it knows a
+machine is at 37%, not that the plate belongs to order #1042. **Cancel** and
+**Re-queue** are on each plate, where the Print Queue had them.
+
+Two groups sit below the farm, and both exist because a plate that is not on a
+machine is a plate nobody would otherwise see:
+
+* **Not on a machine** — waiting to be sent, or sent to a printer the farm no
+  longer lists. A plate whose files all name models with none on the farm stays
+  here until one appears, and says which models it is waiting for. **Send N
+  waiting plates** pushes them all now rather than at the next poll.
+* **Finished plates**, folded away. History, but the kind somebody asks about.
+
+**When Bambuddy is down the plates are still there.** The farm read is allowed
+to fail on its own: the machines go, a message explains why, and the queue and
+its buttons stay — that is precisely when an operator needs them. And a plate on
+a machine that has since been unplugged moves to *Not on a machine* rather than
+disappearing with the card.
+
+### Where the readings come from
+
+The farm listing is asked first and plainly, because on most builds it already
+carries the live values and one call is the whole answer. Only where it comes
+back a bare inventory — names and models, nothing about what any of them is
+doing — is each machine asked about individually, at one call per printer.
+
+That per-machine endpoint is discovered from the instance's own document like
+the others, preferring `…/printers/{id}/status` over `…/printers/{id}`: the
+first is what the machine is doing this second, the second may be no more than
+the inventory row again. It is corrected under **Settings → Bambuddy →
+Advanced**, where it appears as *One printer*. A 404 there heals exactly as the
+rest do, and once for the whole farm rather than once per machine — re-reading
+the document ten times to learn one path is ten fetches for one fact.
+
+The listing stays the spine either way: the detail only fills in what the
+listing left blank, so a thin reply cannot blank out a name that did arrive. A
+machine that will not answer keeps its row and the farm says which one refused —
+a printer PrintFlow cannot reach is still a printer, and a farm screen that
+quietly drops one is worse than useless.
+
+If the cards come back with no readings on them at all, the page says so and
+offers **Show what Bambuddy sent** — the printer listing and one machine's
+detail, verbatim, the same diagnostic the file picker carries and for the same
+reason. No two self-hosted builds spell a temperature the same way, and a blank
+card cannot be diagnosed from outside. It can be shown.
 
 ## Bills of materials, from QuickBooks
 
@@ -874,9 +937,8 @@ an audit row**.
 - **Shipped** — label bought, tracking shown.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
-printer models, BOM editor), **Print Queue** (every plate across all orders,
-re-queue/cancel — each row naming the file it is using and the machine it went
-to, since several plates of one product may be several different files),
+printer models, BOM editor), [**Printers**](#printers) (the farm, live, with
+every plate grouped under the machine it went to and re-queue/cancel on each),
 **Sync Log** (background runs + audit trail), **Settings**.
 
 ## How the decisioning works

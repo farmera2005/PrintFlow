@@ -470,7 +470,7 @@ async def _order_id_for_job(session: AsyncSession, job: PrintJob):
 
 
 async def open_jobs_overview(session: AsyncSession) -> list[dict]:
-    """Flat Print Queue view across all orders."""
+    """Every plate across all orders, newest first — what the farm screen groups."""
     rows = (
         (
             await session.execute(

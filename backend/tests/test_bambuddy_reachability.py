@@ -176,9 +176,9 @@ class TestValidationIsBounded:
 
         _patch_transport(monkeypatch, handler)
         result = await _client().validate()
-        assert result["printers"] == [
-            {"id": 1, "name": "P1S", "model": None, "status": None, "online": None}
-        ]
+        # The machine is what validation is checking for; the live readings a
+        # printer row also carries are the farm screen's business, not this one.
+        assert [(row["id"], row["name"]) for row in result["printers"]] == [(1, "P1S")]
         # A missing spec is a warning, not a failure: printers is the real test.
         assert "warning" in result["openapi"]
 

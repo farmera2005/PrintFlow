@@ -20,6 +20,7 @@ from .routers import (
     manufacturing_router,
     orders_router,
     print_jobs_router,
+    printers_router,
     products_router,
     security_router,
     setup_router,
@@ -69,6 +70,7 @@ app.include_router(products_router.router)
 app.include_router(manufacturing_router.router)
 app.include_router(orders_router.router)
 app.include_router(print_jobs_router.router)
+app.include_router(printers_router.router)
 app.include_router(system_router.router)
 
 

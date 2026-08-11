@@ -55,6 +55,9 @@ DEFAULT_PATHS: dict[str, str] = {
     # instance that keeps one shared library can point this at the same path as
     # `files` and the printer simply becomes where the plate is sent.
     "printer_files": "/api/printers/{printer_id}/files",
+    # One machine, in as much detail as the build keeps — read only where the
+    # farm listing turns out to be a bare inventory with no live readings on it.
+    "printer_detail": "/api/printers/{printer_id}",
 }
 
 DEFAULT_FIELDS: dict[str, str] = {
@@ -216,6 +219,46 @@ def _score_printer_files(path: str, methods: set[str]) -> int | None:
     return 100 - rank * 10 - len(segments)
 
 
+def _score_printer_detail(path: str, methods: set[str]) -> int | None:
+    """Rank a spec path as "everything about one machine".
+
+    Two shapes, and the live one is preferred: `/printers/{id}/status` says
+    what the machine is doing this second, where `/printers/{id}` may be no
+    more than the inventory row again. Anything deeper is a sub-resource — a
+    printer's files, its queue — and belongs to another role.
+    """
+    if "get" not in methods:
+        return None
+    segments = [s for s in path.split("/") if s]
+    templated = [i for i, s in enumerate(segments) if s.startswith("{")]
+    if len(templated) != 1 or not segments:
+        return None
+    slot = templated[0]
+    if slot == 0 or segments[slot - 1].lower().rstrip("s") not in ("printer", "device"):
+        return None
+    tail = segments[slot + 1 :]
+    if not tail:
+        return 90 - len(segments)
+    if len(tail) == 1 and tail[0].lower() in ("status", "state", "info", "detail"):
+        return 100 - len(segments)
+    return None
+
+
+def discover_printer_detail(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    """The per-printer endpoint, with its parameter renamed to ours."""
+    scored: list[tuple[int, str]] = []
+    for path, operations in spec_paths.items():
+        if not isinstance(operations, dict):
+            continue
+        methods = {m.lower() for m in operations if isinstance(m, str)}
+        score = _score_printer_detail(str(path), methods)
+        if score is not None:
+            scored.append((score, str(path)))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    normalized = [re.sub(r"\{[^}]+\}", "{printer_id}", path) for _, path in scored]
+    return {"path": normalized[0] if normalized else None, "alternatives": normalized[1:6]}
+
+
 def discover_printer_files(spec_paths: dict[str, Any]) -> dict[str, Any]:
     """The per-printer file endpoint, rewritten to name its parameter ours.
 
@@ -245,7 +288,10 @@ def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
     Returns the best candidate per role plus every runner-up, because a guess
     the operator cannot see is a guess they cannot correct.
     """
-    found: dict[str, Any] = {"printer_files": discover_printer_files(spec_paths)}
+    found: dict[str, Any] = {
+        "printer_files": discover_printer_files(spec_paths),
+        "printer_detail": discover_printer_detail(spec_paths),
+    }
     for name, role in PATH_ROLES.items():
         scored: list[tuple[int, str]] = []
         for path, operations in spec_paths.items():
@@ -276,6 +322,20 @@ def _first(data: dict[str, Any], *names: str) -> Any:
         if name in data and data[name] is not None:
             return data[name]
     return None
+
+
+def _as_item(data: Any) -> dict[str, Any]:
+    """One object, however this build wrapped it."""
+    if isinstance(data, list):
+        rows = [row for row in data if isinstance(row, dict)]
+        return rows[0] if rows else {}
+    if not isinstance(data, dict):
+        return {}
+    for key in ("printer", "device", "data", "result", "item"):
+        inner = data.get(key)
+        if isinstance(inner, dict):
+            return inner
+    return data
 
 
 def _as_list(data: Any) -> list[dict[str, Any]]:
@@ -435,13 +495,102 @@ def parse_archive(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _first_scalar(data: dict[str, Any], *names: str) -> Any:
+    """The first of these that is a plain value — skipping any that is an object."""
+    for name in names:
+        value = data.get(name)
+        if value is not None and not isinstance(value, (dict, list)):
+            return value
+    return None
+
+
+def _number(value: Any) -> float | None:
+    """A reading, or nothing. A temperature that came back as "--" is nothing."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _rounded(value: Any) -> int | None:
+    number = _number(value)
+    return None if number is None else int(round(number))
+
+
+# What a machine says when nothing is wrong, in the spellings seen.
+_NO_FAULT = {"", "0", "0.0", "none", "null", "ok", "no_error", "noerror", "normal"}
+
+
+def _fault(value: Any) -> str | None:
+    if value is None or value is False:
+        return None
+    text = str(value).strip()
+    return None if text.lower() in _NO_FAULT else text
+
+
 def parse_printer(row: dict[str, Any]) -> dict[str, Any]:
+    """One machine, as much of it as this build cares to say.
+
+    The first five fields are all dispatch needs and every build has them. The
+    rest are what a person standing in the shop wants — is it running, how far
+    through, what is on it, is it hot — and no two builds spell them the same,
+    so each is read from every spelling seen and left null where the instance
+    is silent. A missing reading is shown as missing rather than as a zero: "0%
+    done" and "no progress reported" are different things to act on.
+    """
+    nested = row.get("status") if isinstance(row.get("status"), dict) else {}
+    task = row.get("print") if isinstance(row.get("print"), dict) else {}
+    # A nested object wins for the readings, since a build that has one keeps
+    # the live values there and only a summary at the top level.
+    look = {**row, **nested, **task}
     return {
         "id": _first(row, "id", "printer_id", "printerId"),
         "name": _first(row, "name", "printer_name", "device_name", "dev_name"),
         "model": _first(row, "model", "printer_model", "dev_model"),
-        "status": _first(row, "status", "state", "print_status"),
+        # "status" is a word on most builds and a whole object on some; where
+        # it is an object the word is inside it.
+        "status": _first_scalar(look, "status", "state", "print_status"),
         "online": _first(row, "online", "is_online", "connected"),
+        # What it is doing, in Bambu's own vocabulary — RUNNING, PAUSE, FINISH.
+        "state": _first_scalar(
+            look, "gcode_state", "gcodeState", "print_state", "printState", "job_state"
+        ),
+        # How far through, 0–100.
+        "progress": _rounded(
+            _first(look, "progress", "percent", "percentage", "mc_percent", "print_percent")
+        ),
+        "remaining_minutes": _rounded(
+            _first(
+                look, "remaining_minutes", "remaining_time", "mc_remaining_time",
+                "time_remaining", "eta_minutes",
+            )
+        ),
+        # The plate on it now, which is how a card is matched to a job by eye.
+        "current_file": _first_scalar(
+            look, "current_file", "subtask_name", "task_name", "job_name",
+            "print_name", "filename", "file",
+        ),
+        "layer": _rounded(_first(look, "layer", "layer_num", "current_layer")),
+        "layers": _rounded(_first(look, "layers", "total_layer_num", "total_layers")),
+        "nozzle_temp": _number(_first(look, "nozzle_temp", "nozzle_temper", "nozzle")),
+        "nozzle_target": _number(
+            _first(look, "nozzle_target", "nozzle_target_temper", "nozzle_target_temp")
+        ),
+        "bed_temp": _number(_first(look, "bed_temp", "bed_temper", "bed")),
+        "bed_target": _number(
+            _first(look, "bed_target", "bed_target_temper", "bed_target_temp")
+        ),
+        "chamber_temp": _number(_first(look, "chamber_temp", "chamber_temper", "chamber")),
+        # Whatever it is unhappy about. Bambu machines report this as a numeric
+        # code that is 0 when all is well, so "no fault" arrives as a value
+        # rather than as an absence and has to be recognised — a card reading
+        # "error: 0" in red would be worse than one saying nothing.
+        "error": _fault(
+            _first_scalar(look, "error", "print_error", "error_message", "last_error")
+        ),
     }
 
 
@@ -963,6 +1112,14 @@ class BambuddyClient:
         data = await self._call("GET", self.paths["printers"], retries=retries)
         return [parse_printer(row) for row in _as_list(data)]
 
+    def printer_detail_path(self, printer_id: Any) -> str:
+        return self.paths["printer_detail"].replace("{printer_id}", str(printer_id))
+
+    async def read_printer(self, printer_id: Any) -> dict[str, Any]:
+        """One machine, asked about directly."""
+        data = await self._call("GET", self.printer_detail_path(printer_id))
+        return parse_printer(_as_item(data))
+
     async def list_archives(
         self, *, search: str = "", limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
@@ -1059,6 +1216,24 @@ class BambuddyClient:
             "body": body[:6000],
             "body_truncated": len(body) > 6000,
         }
+
+    async def raw_farm(self) -> dict[str, Any]:
+        """The untouched printer replies, for a farm screen that is missing things.
+
+        Same reason as the file manager: every instance is self-hosted, no two
+        of them spell a temperature the same, and a card with blank readings
+        cannot be diagnosed from outside. The listing and one machine's detail
+        side by side say which of the two has the numbers in it.
+        """
+        probes = [await self._probe(self.paths["printers"])]
+        try:
+            printers = await self.list_printers()
+        except IntegrationError:
+            printers = []
+        first = next((row["id"] for row in printers if row.get("id") is not None), None)
+        if first is not None:
+            probes.append(await self._probe(self.printer_detail_path(first)))
+        return {"probes": probes}
 
     async def raw_listing(
         self, *, path: str = "", printer_id: int | None = None
@@ -1576,6 +1751,74 @@ async def with_healing(
     adopted = await client.resolve_paths(roles)
     await remember_paths(session, adopted)
     return await call()
+
+
+def _has_readings(printer: dict[str, Any]) -> bool:
+    """Whether this row says anything about what the machine is doing now."""
+    return any(
+        printer.get(field) is not None
+        for field in (
+            "state", "progress", "remaining_minutes", "current_file",
+            "nozzle_temp", "bed_temp", "chamber_temp", "layer",
+        )
+    )
+
+
+async def read_farm(
+    session: AsyncSession, client: BambuddyClient, *, max_detail: int = 32
+) -> dict[str, Any]:
+    """Every machine, with whatever this build will say about each.
+
+    The farm listing is asked first and plainly, because on most builds it
+    already carries the live readings and one call is the whole answer. Only
+    where it comes back as a bare inventory — names and models, nothing about
+    what any of them is doing — is each machine asked about individually, which
+    is a call per printer and worth avoiding when the first call sufficed.
+
+    A machine that will not answer keeps its inventory row rather than
+    disappearing: a printer PrintFlow cannot reach is still a printer, and a
+    farm screen that quietly drops one is worse than useless.
+    """
+    printers = await with_healing(session, client, ("printers",), client.list_printers)
+    live = any(_has_readings(row) for row in printers)
+    if not printers or live:
+        return {"printers": printers, "detailed": live, "detail_error": None}
+
+    detailed: list[dict[str, Any]] = []
+    failure: str | None = None
+    healed = False
+    for row in printers[:max_detail]:
+        if row.get("id") is None:
+            detailed.append(row)
+            continue
+        try:
+            # The default for this role is a guess — it is the one endpoint
+            # PrintFlow reaches for only when the listing came back thin, so a
+            # connection made before it existed never discovered it. Heal once
+            # for the farm rather than once per machine: a document re-read per
+            # printer would be ten fetches to learn the same thing.
+            first_ask, healed = not healed, True
+            extra = await (
+                with_healing(
+                    session, client, ("printer_detail",),
+                    lambda: client.read_printer(row["id"]),
+                )
+                if first_ask
+                else client.read_printer(row["id"])
+            )
+        except IntegrationError as exc:
+            failure = failure or str(exc)
+            detailed.append(row)
+            continue
+        # The listing is the spine; the detail only fills in what it left null,
+        # so a thin detail reply cannot blank out a name the list did have.
+        detailed.append({**row, **{k: v for k, v in extra.items() if v is not None}})
+    detailed.extend(printers[max_detail:])
+    return {
+        "printers": detailed,
+        "detailed": any(_has_readings(row) for row in detailed),
+        "detail_error": failure,
+    }
 
 
 async def read_file_manager(

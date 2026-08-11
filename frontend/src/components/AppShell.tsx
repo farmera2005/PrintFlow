@@ -20,7 +20,7 @@ const NAV = [
   { to: '/', label: 'Board', end: true, Icon: BoardIcon },
   { to: '/orders', label: 'Orders', Icon: OrdersIcon },
   { to: '/products', label: 'Products', Icon: ProductsIcon },
-  { to: '/print-queue', label: 'Print Queue', Icon: PrinterIcon },
+  { to: '/printers', label: 'Printers', Icon: PrinterIcon },
   { to: '/manufacturing', label: 'Manufacturing', Icon: ManufacturingIcon },
   { to: '/sync-log', label: 'Sync Log', Icon: ActivityIcon },
   { to: '/settings', label: 'Settings', Icon: SettingsIcon },

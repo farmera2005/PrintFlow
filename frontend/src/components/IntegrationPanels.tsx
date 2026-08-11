@@ -704,7 +704,7 @@ const PATH_ROLES: {
   /** Carries {printer_id}, so it is never one of the listable collections. */
   templated?: boolean
 }[] = [
-  { key: 'printers', label: 'Printers', hint: 'Listed during setup and shown on the queue.' },
+  { key: 'printers', label: 'Printers', hint: 'The farm, as shown on the Printers screen.' },
   { key: 'archives', label: 'Archives', hint: 'Browsed when mapping a product to a print file.' },
   { key: 'queue', label: 'Queue', hint: 'Read for job status, and posted to when a plate is sent.' },
   {
@@ -726,6 +726,14 @@ const PATH_ROLES: {
     key: 'printer_files',
     label: "One printer's files",
     hint: 'Files on a single machine. {printer_id} is substituted.',
+    templated: true,
+  },
+  {
+    key: 'printer_detail',
+    label: 'One printer',
+    hint:
+      'Read only when the farm listing carries no live readings. ' +
+      '{printer_id} is substituted.',
     templated: true,
   },
 ]

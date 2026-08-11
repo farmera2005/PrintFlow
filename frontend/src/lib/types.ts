@@ -269,6 +269,44 @@ export interface BambuddyPrinter {
   online: boolean | null
 }
 
+/** One machine on the farm, with whatever this Bambuddy will say about it.
+ *
+ *  Every reading is optional — builds differ on what they report, and a null is
+ *  "not reported", which is a different thing from zero. */
+export interface FarmPrinter extends BambuddyPrinter {
+  /** What it is doing, in Bambu's own words — RUNNING, PAUSE, FINISH. */
+  state: string | null
+  /** How far through, 0–100. */
+  progress: number | null
+  remaining_minutes: number | null
+  /** The plate on it now, as the machine names it. */
+  current_file: string | null
+  layer: number | null
+  layers: number | null
+  nozzle_temp: number | null
+  nozzle_target: number | null
+  bed_temp: number | null
+  bed_target: number | null
+  chamber_temp: number | null
+  error: string | null
+  /** The plates PrintFlow sent to this machine and has not finished with. */
+  plates: QueueJob[]
+}
+
+export interface FarmOverview {
+  printers: FarmPrinter[]
+  /** Plates with no machine yet, or on a machine the farm no longer lists. */
+  unplaced: QueueJob[]
+  /** Every plate, finished ones included — the history the farm cards omit. */
+  plates: QueueJob[]
+  /** Bambuddy could not be reached. The plates below are still real. */
+  error: string | null
+  /** Whether Bambuddy said anything about what the machines are doing. */
+  live: boolean
+  /** Why one machine could not be asked, where the rest could. */
+  detail_error: string | null
+}
+
 /** One entry in Bambuddy's file manager, folder or file. */
 export interface BambuddyFile {
   name: string

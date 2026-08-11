@@ -6,7 +6,7 @@ import SetupWizard from './pages/SetupWizard'
 import Board from './pages/Board'
 import Orders from './pages/Orders'
 import Products from './pages/Products'
-import PrintQueue from './pages/PrintQueue'
+import Printers from './pages/Printers'
 import Manufacturing from './pages/Manufacturing'
 import Settings from './pages/Settings'
 import SyncLog from './pages/SyncLog'
@@ -66,7 +66,10 @@ export default function App() {
         <Route path="/" element={<Board />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/products" element={<Products />} />
-        <Route path="/print-queue" element={<PrintQueue />} />
+        <Route path="/printers" element={<Printers />} />
+        {/* The flat queue was replaced by the farm view; anything
+            bookmarked still lands somewhere useful. */}
+        <Route path="/print-queue" element={<Navigate to="/printers" replace />} />
         <Route path="/manufacturing" element={<Manufacturing />} />
         <Route path="/sync-log" element={<SyncLog />} />
         <Route path="/settings" element={<Settings onChange={refresh} />} />

@@ -1,4 +1,8 @@
-"""Print Queue — a flat view of every print job, with re-queue and cancel."""
+"""What can be done to one plate: send it again, or stop it.
+
+The plates themselves are read through /api/printers, grouped under the machine
+each went to. These are the verbs, and they are reached from the same screen.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +19,6 @@ from ..services import audit, printing
 from ..services.credentials import IntegrationNotConfigured
 
 router = APIRouter(prefix="/api/print-jobs", tags=["print-jobs"])
-
-
-@router.get("")
-async def list_print_jobs(
-    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
-) -> dict:
-    return {"jobs": await printing.open_jobs_overview(session)}
 
 
 async def _get_job(session: AsyncSession, job_id: uuid.UUID) -> PrintJob:
