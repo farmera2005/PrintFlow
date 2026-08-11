@@ -103,6 +103,31 @@ async def printer_camera(
     return Response(frame, media_type=kind, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/cameras")
+async def camera_check(
+    again: bool = False,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Why the cards have no pictures on them, according to the instance.
+
+    `again` forgets a stored "this build has no camera" and looks once more —
+    the answer to press after naming a path under Advanced, or after upgrading
+    the Bambuddy that did not have cameras last time anybody asked.
+    """
+    try:
+        client = await bambuddy_api.client_for(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Looking for cameras"):
+            report = await bambuddy_api.camera_report(session, client, again=again)
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    await session.commit()
+    return report
+
+
 @router.get("/raw")
 async def printers_raw(
     _: User = Depends(require_user), session: AsyncSession = Depends(get_session)

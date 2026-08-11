@@ -541,16 +541,49 @@ fetched out of sight and swapped in only once it has arrived so the picture
 never blinks through empty. A camera that stops answering slows the asking
 rather than stopping it, since a camera comes back when its machine wakes up.
 
-**The endpoint** is discovered like the others — `camera`, `stream`, `video`,
-`webcam`, `mjpeg`, `snapshot`, in that order of preference, since a frame can be
-taken out of a stream but a stream cannot be made out of a frame. It is editable
-under **Advanced** as *One printer's camera*.
+**The endpoint** is discovered like the others — `camera`, `cam`, `stream`,
+`video`, `webcam`, `mjpeg`, `feed`, then `snapshot`, `image`, `still`, in that
+order of preference, since a frame can be taken out of a stream but a stream
+cannot be made out of a frame. Both shapes are read, because builds disagree
+about which noun owns the other: `/printers/{id}/camera` hangs the camera off
+the machine and `/camera/{id}` hangs the machine off the camera, and they name
+the same thing. Separators are not different words, so `camera_stream`,
+`camera-feed` and `camera/stream` all read alike — but a segment has to be
+*entirely* camera-ish to count, which is why `camera-settings` is not one. It is
+editable under **Advanced** as *One printer's camera*.
 
 Whether this build has cameras at all is asked **once** and remembered beside
 the connection: the alternative is either ten broken pictures on every page
 load, or re-reading the instance's document on every page load to avoid them.
-Re-validating under Settings asks again, which is the moment an upgrade would
-have added one.
+Three things ask again — re-validating under Settings, pressing **Look again**
+below, and a PrintFlow release that widens what counts as a camera. That last
+one matters: a stored "this build has none" was an answer to the rules of the
+day, and the shop upgrading precisely to get their cameras working must not be
+the one shop the fix cannot reach.
+
+### When there are no pictures
+
+A card with nothing on it has four causes that look identical from outside: the
+build has no camera, it has one under a name PrintFlow does not recognise, it
+has one that is not in its OpenAPI document at all, or it has one that answers
+with something that is not a picture — an HTML login page comes back `200` and
+would leave the same blank card. Each has a different fix and only the instance
+can tell them apart, so when no machine is showing a picture the page offers
+**Why?**, and answers with what the instance said rather than a guess:
+
+* the endpoint PrintFlow is calling, and whether that came from the instance,
+  from Advanced, or from a default that is only a guess;
+* every endpoint the document mentions that sounds remotely like a camera —
+  looser than the matcher on purpose, because a near miss somebody recognises
+  is worth more than a short list that is certainly all cameras;
+* what came back when it actually called one, including the first bytes, which
+  is how a JPEG (`ffd8…`) is told from a web page without guessing at the
+  content type.
+
+The fix for the middle two is the same: put the path under **Settings →
+Bambuddy → Advanced** as *One printer's camera*, with `{printer_id}` where the
+machine goes, and press **Look again**. A hand-typed path is never second-
+guessed — if it is there, PrintFlow uses it and does not go looking.
 
 **A camera somewhere other than Bambuddy is not fetched.** Some builds name the
 camera as a URL on the printer row rather than serving an endpoint for it. Where

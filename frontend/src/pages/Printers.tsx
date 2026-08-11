@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { JOB_STATUS_CLASSES, formatDateTime } from '../lib/format'
-import type { FarmOverview, FarmPrinter, QueueJob } from '../lib/types'
+import type { CameraReport, FarmOverview, FarmPrinter, QueueJob } from '../lib/types'
 import { Alert, Badge, Button, Card, EmptyState, Modal, Spinner, cx } from '../components/ui'
 import RawReplies from '../components/RawReplies'
 
@@ -55,6 +55,9 @@ export default function Printers() {
   // Every farm read is also when the cards want a new picture.
   const [tick, setTick] = useState(0)
   const [watching, setWatching] = useState<string | null>(null)
+  // Machines whose camera was offered and did not answer. A farm where none of
+  // them answered is a farm with a question to ask, not ten broken cards.
+  const [blind, setBlind] = useState<string[]>([])
 
   const load = useCallback(async () => {
     try {
@@ -107,6 +110,10 @@ export default function Printers() {
 
   const watched =
     (farm?.printers ?? []).find((row) => String(row.id) === watching) ?? null
+  // Whether any machine is actually showing one.
+  const showing = (farm?.printers ?? []).some(
+    (row) => row.camera && !blind.includes(String(row.id)),
+  )
   const pending = (farm?.plates ?? []).filter((job) => job.status === 'pending')
   const finished = (farm?.plates ?? []).filter((job) => FINISHED.includes(job.status))
 
@@ -174,10 +181,19 @@ export default function Printers() {
                     renderPlate={cardPlate}
                     tick={tick}
                     onWatch={() => setWatching(String(printer.id))}
+                    onBlind={() =>
+                      setBlind((seen) =>
+                        seen.includes(String(printer.id))
+                          ? seen
+                          : [...seen, String(printer.id)],
+                      )
+                    }
                   />
                 ))}
               </div>
             )}
+
+            {farm.printers.length > 0 && !farm.error && !showing ? <WhyNoCameras /> : null}
 
             {!farm.live && farm.printers.length > 0 && !farm.error ? (
               <Card className="space-y-2 p-3">
@@ -230,12 +246,14 @@ function PrinterCard({
   renderPlate,
   tick,
   onWatch,
+  onBlind,
 }: {
   printer: FarmPrinter
   renderPlate: (job: QueueJob) => JSX.Element
   /** Bumped when the farm is re-read, which is when a new frame is wanted. */
   tick: number
   onWatch: () => void
+  onBlind: () => void
 }) {
   const state = machineState(printer)
   const nozzle = temperature(printer.nozzle_temp, printer.nozzle_target)
@@ -260,7 +278,7 @@ function PrinterCard({
         <Badge className={state.tone}>{state.label}</Badge>
       </div>
 
-      <CameraView printer={printer} tick={tick} onWatch={onWatch} />
+      <CameraView printer={printer} tick={tick} onWatch={onWatch} onBlind={onBlind} />
 
       {/* An idle machine reports 0% because there is nothing on it, and a bar
           at zero reads as a print that has not started rather than as no print
@@ -324,10 +342,12 @@ function CameraView({
   printer,
   tick,
   onWatch,
+  onBlind,
 }: {
   printer: FarmPrinter
   tick: number
   onWatch: () => void
+  onBlind: () => void
 }) {
   const [broken, setBroken] = useState(false)
 
@@ -364,9 +384,102 @@ function CameraView({
         src={`/api/printers/${printer.id}/camera?t=${tick}`}
         alt={`Camera on ${printer.name ?? 'this printer'}`}
         className="h-32 w-full object-cover"
-        onError={() => setBroken(true)}
+        onError={() => {
+          setBroken(true)
+          onBlind()
+        }}
       />
     </button>
+  )
+}
+
+/** Why the farm has no pictures on it — asked of the instance, not guessed.
+ *
+ *  Four causes look identical from a card with nothing on it: the build has no
+ *  camera, it has one under a name PrintFlow does not recognise, it has one
+ *  that is not in its OpenAPI document at all, or it has one that answers with
+ *  something that is not a picture. Each has a different fix, and only the
+ *  instance can tell them apart. */
+function WhyNoCameras() {
+  const [report, setReport] = useState<CameraReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const ask = (again: boolean) => {
+    setBusy(true)
+    api
+      .get<CameraReport>(`/api/printers/cameras${again ? '?again=true' : ''}`)
+      .then((data) => {
+        setReport(data)
+        setError(null)
+      })
+      .catch((err) => setError(errorMessage(err)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <Card className="space-y-2 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-ink-800">No cameras</h2>
+        <p className="min-w-48 flex-1 text-xs text-ink-500">
+          Nothing on these cards is showing a picture.
+        </p>
+        <Button size="sm" variant="ghost" onClick={() => ask(false)} disabled={busy}>
+          {busy ? 'Asking…' : 'Why?'}
+        </Button>
+        {report ? (
+          <Button size="sm" onClick={() => ask(true)} disabled={busy}>
+            Look again
+          </Button>
+        ) : null}
+      </div>
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+
+      {report ? (
+        <div className="space-y-2 text-xs text-ink-600">
+          <p>
+            {report.candidates.length === 0
+              ? `This Bambuddy's own document (${report.spec_path ?? 'unknown'}) mentions no
+                 camera endpoint at all. Either the build has none, or it serves one
+                 that is not in the document — in which case naming the path under
+                 Settings → Bambuddy → Advanced as "One printer's camera" is the fix,
+                 then press Look again.`
+              : `The instance serves the endpoints below. If one of them is the camera
+                 and PrintFlow picked the wrong one, put it under Settings → Bambuddy →
+                 Advanced as "One printer's camera", with {printer_id} where the machine
+                 goes, then press Look again.`}
+          </p>
+          <p>
+            Currently calling <span className="font-mono">{report.path}</span> —{' '}
+            {report.source}.
+          </p>
+
+          {report.candidates.length ? (
+            <ul className="space-y-0.5 font-mono">
+              {report.candidates.map((row) => (
+                <li key={row.path}>
+                  {row.path}{' '}
+                  <span className="text-ink-400">{row.methods.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {report.probe ? (
+            <div className="space-y-1">
+              <p>
+                Asked <span className="font-mono">{report.probe.endpoint}</span>
+                {report.probe.printer ? ` (${report.probe.printer})` : ''}:
+              </p>
+              <pre className="max-h-48 overflow-auto rounded-md bg-ink-900 p-2 text-[11px] leading-snug text-ink-100">
+                {JSON.stringify(report.probe, null, 2)}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </Card>
   )
 }
 

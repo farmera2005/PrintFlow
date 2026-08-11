@@ -300,6 +300,28 @@ export interface FarmPrinter extends BambuddyPrinter {
   plates: QueueJob[]
 }
 
+/** Why there are no pictures, according to the instance itself. */
+export interface CameraReport {
+  available: boolean
+  /** The path PrintFlow would call, and where that path came from. */
+  path: string
+  source: string
+  /** Every endpoint the instance's document mentions that sounds like a camera.
+   *  Empty means this build has none, which is not a fault to fix. */
+  candidates: { path: string; methods: string[] }[]
+  spec_path: string | null
+  printer: Record<string, unknown> | null
+  probe: {
+    endpoint: string
+    printer?: string | null
+    status?: number
+    content_type?: string | null
+    starts_with?: string
+    looks_like_a_picture?: boolean
+    error?: string
+  } | null
+}
+
 export interface FarmOverview {
   printers: FarmPrinter[]
   /** Plates with no machine yet, or on a machine the farm no longer lists. */

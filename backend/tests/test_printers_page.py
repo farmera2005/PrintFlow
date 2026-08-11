@@ -18,6 +18,7 @@ import pytest
 from app.integrations import bambuddy as bambuddy_api
 from app.integrations.bambuddy import (
     BambuddyClient,
+    camera_paths,
     discover_paths,
     parse_printer,
     read_farm,
@@ -132,7 +133,11 @@ class FarmClient(BambuddyClient):
 
     async def fetch_openapi(self):
         self.specs_read += 1
-        return {"path": "/openapi.json", "discovered": discover_paths(self.spec_paths)}
+        return {
+            "path": "/openapi.json",
+            "discovered": discover_paths(self.spec_paths),
+            "cameras": camera_paths(self.spec_paths),
+        }
 
     async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
         import re
@@ -285,6 +290,29 @@ class TestDiscoverPrinterCamera:
         )
         assert found["printer_camera"]["path"] is None
 
+    def test_the_machine_can_hang_off_the_camera_instead(self):
+        # `/printers/{id}/camera` and `/camera/{id}` name the same thing; which
+        # noun owns the other is a matter of taste, and builds differ.
+        for path in ("/api/camera/{id}", "/api/v1/cameras/{id}/stream"):
+            found = discover_paths({path: {"get": {}}})["printer_camera"]
+            assert found["path"] is not None, path
+
+    def test_a_separator_is_not_a_different_word(self):
+        for leaf in ("camera_stream", "camera-feed", "camera.snapshot"):
+            found = discover_paths({f"/api/printers/{{id}}/{leaf}": {"get": {}}})
+            assert found["printer_camera"]["path"] == (
+                f"/api/printers/{{printer_id}}/{leaf}"
+            ), leaf
+
+    def test_a_word_that_only_looks_camera_ish_is_not_one(self):
+        found = discover_paths(
+            {
+                "/api/printers/{id}/camera-settings": {"get": {}},
+                "/api/printers/{id}/stream-history": {"get": {}},
+            }
+        )["printer_camera"]
+        assert found["path"] is None
+
 
 class TestCameraTarget:
     def _client(self, **payload) -> BambuddyClient:
@@ -415,6 +443,25 @@ class TestEnsureCamera:
         # But the page is still told where it said the camera was.
         assert row["camera_url"] == "http://192.168.1.9/stream"
 
+    async def test_a_wider_rule_asks_a_build_that_was_told_no(self, db):
+        """The shop upgrading to get cameras working must not be the one it misses."""
+        await credentials.save(
+            db,
+            PROVIDER_BAMBUDDY,
+            {
+                "base_url": "http://b.local", "api_key": "k",
+                # Asked under an older, narrower set of rules.
+                "camera_checked": bambuddy_api.CAMERA_RULES - 1,
+            },
+        )
+        await db.commit()
+        client = FarmClient(
+            spec_paths={"/api/printers": {"get": {}}, "/api/camera/{id}": {"get": {}}},
+            listing=LIVE_LISTING,
+        )
+        assert await bambuddy_api.ensure_camera(db, client) is True
+        assert client.paths["printer_camera"] == "/api/camera/{printer_id}"
+
     async def test_a_camera_named_by_hand_is_not_second_guessed(self, db):
         client = FarmClient(
             spec_paths={"/api/printers": {"get": {}}},
@@ -423,6 +470,132 @@ class TestEnsureCamera:
         client.explicit_paths["printer_camera"] = "/my/cam/{printer_id}"
         assert await bambuddy_api.ensure_camera(db, client) is True
         assert client.specs_read == 0
+
+
+class CameraFarm(FarmClient):
+    """A farm whose camera answers with whatever it was handed."""
+
+    def __init__(self, *, reply: tuple[str, bytes] | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.reply = reply
+
+    @asynccontextmanager
+    async def camera(self, printer_id, *, override=None):
+        if self.reply is None:
+            raise IntegrationError("bambuddy", "HTTP 404", status_code=404)
+        content_type, body = self.reply
+
+        class Reply:
+            status_code = 200
+            headers = {"content-type": content_type}
+
+            async def aiter_bytes(self):
+                yield body
+
+        yield Reply()
+
+
+class TestCameraReport:
+    async def _saved(self, db, **extra):
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k", **extra}
+        )
+        await db.commit()
+
+    async def test_a_build_with_no_camera_says_the_document_has_none(self, db):
+        # Which is not a fault to fix — it is the answer.
+        await self._saved(db)
+        client = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}}}, listing=LIVE_LISTING
+        )
+        report = await bambuddy_api.camera_report(db, client)
+
+        assert report["available"] is False
+        assert report["candidates"] == []
+        assert "guess" in report["source"]
+
+    async def test_an_endpoint_that_was_not_recognised_is_still_shown(self, db):
+        """The one case a person can fix, and the one PrintFlow cannot see."""
+        await self._saved(db)
+        client = CameraFarm(
+            spec_paths={
+                "/api/printers": {"get": {}},
+                "/api/v1/monitor/{id}/live-view": {"get": {}},
+            },
+            listing=LIVE_LISTING,
+        )
+        report = await bambuddy_api.camera_report(db, client)
+
+        assert report["available"] is False
+        # PrintFlow does not call this a camera, but it is on the list to try.
+        assert [row["path"] for row in report["candidates"]] == [
+            "/api/v1/monitor/{id}/live-view"
+        ]
+
+    async def test_it_says_what_the_camera_actually_answered(self, db):
+        await self._saved(db)
+        client = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+            reply=("image/jpeg", JPEG),
+        )
+        report = await bambuddy_api.camera_report(db, client)
+
+        assert report["available"] is True
+        assert report["probe"]["looks_like_a_picture"] is True
+        assert report["probe"]["starts_with"].startswith("ffd8")
+
+    async def test_a_camera_that_answers_with_a_web_page_is_not_a_camera(self, db):
+        # An HTML login page comes back 200 and would leave a blank card with
+        # nothing to say for itself. The first bytes give it away.
+        await self._saved(db)
+        client = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+            reply=("text/html", b"<!doctype html><title>Sign in</title>"),
+        )
+        report = await bambuddy_api.camera_report(db, client)
+
+        assert report["probe"]["looks_like_a_picture"] is False
+        assert report["probe"]["content_type"] == "text/html"
+
+    async def test_looking_again_forgets_that_it_was_told_no(self, db):
+        """Press this after naming the path by hand, or after upgrading Bambuddy."""
+        await self._saved(db, camera_checked=bambuddy_api.CAMERA_RULES)
+        client = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+            reply=("image/jpeg", JPEG),
+        )
+
+        assert (await bambuddy_api.camera_report(db, client))["available"] is False
+
+        fresh = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+            reply=("image/jpeg", JPEG),
+        )
+        again = await bambuddy_api.camera_report(db, fresh, again=True)
+        assert again["available"] is True
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["discovered_paths"]["printer_camera"] == (
+            "/api/printers/{printer_id}/camera"
+        )
+
+    async def test_a_camera_that_will_not_answer_reports_the_failure(self, db):
+        await self._saved(db)
+        client = CameraFarm(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+            reply=None,
+        )
+        report = await bambuddy_api.camera_report(db, client)
+        assert "404" in report["probe"]["error"]
 
 
 # --------------------------------------------------------------------------

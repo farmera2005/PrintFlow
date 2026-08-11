@@ -199,6 +199,35 @@ def collection_paths(spec_paths: dict[str, Any], limit: int = 400) -> list[dict[
     return rows[:limit]
 
 
+def camera_paths(spec_paths: dict[str, Any], limit: int = 60) -> list[dict[str, Any]]:
+    """Every endpoint whose name mentions a camera, templated ones included.
+
+    Not the same question as "which one is the camera": this is what the
+    instance serves that looks remotely like one, so that a farm with no
+    pictures on it can be told apart from a farm whose camera PrintFlow failed
+    to recognise. One is a build without cameras; the other is a rule to fix.
+    """
+    # Looser than the matcher on purpose: this list is read by a person who
+    # knows their own instance, and a near miss they can recognise is worth
+    # more than a short list that is certainly all cameras.
+    words = (
+        "camera", "cam", "stream", "video", "webcam", "mjpeg", "jpeg", "feed",
+        "snapshot", "still", "image", "photo", "monitor", "live", "view",
+        "preview", "capture", "thumb",
+    )
+    rows = [
+        {
+            "path": str(path),
+            "methods": sorted(m.lower() for m in ops if isinstance(m, str)),
+        }
+        for path, ops in spec_paths.items()
+        if isinstance(ops, dict)
+        and any(word in str(path).lower() for word in words)
+    ]
+    rows.sort(key=lambda row: row["path"])
+    return rows[:limit]
+
+
 def _score_printer_files(path: str, methods: set[str]) -> int | None:
     """Rank a spec path as "one printer's file manager".
 
@@ -263,11 +292,35 @@ def discover_printer_detail(spec_paths: dict[str, Any]) -> dict[str, Any]:
 # What a camera endpoint is called, best first. The live one is wanted even
 # where a build also offers a still: a single frame can be taken out of a
 # stream, but a stream cannot be made out of a still.
-CAMERA_LEAVES = ("camera", "stream", "video", "webcam", "mjpeg", "snapshot", "image")
+CAMERA_LEAVES = (
+    "camera", "cam", "stream", "video", "webcam", "mjpeg", "feed", "snapshot",
+    "image", "still",
+)
+
+
+def _camera_rank(segment: str) -> int | None:
+    """How camera-ish one path segment is, or None if it is about something else.
+
+    Split on the separators a path uses, so `camera_stream` and `camera-feed`
+    read the same as `camera/stream` — builds disagree about which of the three
+    they use and none of them mean anything different by it.
+    """
+    words = [w.rstrip("s") if w.rstrip("s") in CAMERA_LEAVES else w
+             for w in re.split(r"[-_.]", segment.lower()) if w]
+    ranks = [CAMERA_LEAVES.index(w) for w in words if w in CAMERA_LEAVES]
+    if not ranks or len(ranks) < len(words):
+        return None
+    return min(ranks)
 
 
 def _score_printer_camera(path: str, methods: set[str]) -> int | None:
-    """Rank a spec path as "this machine's camera"."""
+    """Rank a spec path as "this machine's camera".
+
+    Two shapes, because builds disagree about which noun owns the other:
+    `/printers/{id}/camera` hangs the camera off the machine, and
+    `/camera/{id}` hangs the machine off the camera. Both name one machine's
+    camera, which is the only thing that matters here.
+    """
     if "get" not in methods:
         return None
     segments = [s for s in path.split("/") if s]
@@ -275,14 +328,28 @@ def _score_printer_camera(path: str, methods: set[str]) -> int | None:
     if len(templated) != 1:
         return None
     slot = templated[0]
-    if slot == 0 or segments[slot - 1].lower().rstrip("s") not in ("printer", "device"):
+    if slot == 0:
         return None
-    tail = [s.lower() for s in segments[slot + 1 :]]
-    if not tail or not all(s in CAMERA_LEAVES for s in tail):
+    parent = segments[slot - 1].lower().rstrip("s")
+    tail = segments[slot + 1 :]
+
+    if parent in ("printer", "device"):
+        ranks = [_camera_rank(s) for s in tail]
+        if not ranks or any(rank is None for rank in ranks):
+            return None
+        # `/printers/{id}/camera` beats `/printers/{id}/camera/snapshot`, and
+        # camera beats snapshot, so the shorter and more live path wins.
+        return 100 - ranks[0] * 10 - len(tail)
+
+    # `/camera/{id}`, or `/camera/{id}/stream`. The machine is the template, so
+    # anything after it must still be about the camera.
+    owner = _camera_rank(segments[slot - 1])
+    if owner is None:
         return None
-    # `/printers/{id}/camera` beats `/printers/{id}/camera/snapshot`, and camera
-    # beats snapshot, so a shorter and more live path wins.
-    return 100 - CAMERA_LEAVES.index(tail[0]) * 10 - len(tail)
+    ranks = [_camera_rank(s) for s in tail]
+    if any(rank is None for rank in ranks):
+        return None
+    return 90 - owner * 10 - len(tail)
 
 
 def _discover_under_printer(spec_paths: dict[str, Any], score) -> dict[str, Any]:
@@ -1061,6 +1128,7 @@ class BambuddyClient:
                     # this particular instance serves.
                     "discovered": discover_paths(spec_paths),
                     "collections": collection_paths(spec_paths),
+                    "cameras": camera_paths(spec_paths),
                 }
         raise IntegrationError(
             PROVIDER_BAMBUDDY,
@@ -1875,6 +1943,13 @@ async def with_healing(
     return await call()
 
 
+# Bumped whenever the rules for recognising a camera endpoint change. A stored
+# "this build has no camera" was an answer to the rules of the day, and a
+# release that widens them has to ask again — otherwise the shop that upgrades
+# to get their cameras working is the one shop the fix cannot reach.
+CAMERA_RULES = 2
+
+
 async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
     """Whether this instance serves printer cameras — asked once, then remembered.
 
@@ -1885,9 +1960,10 @@ async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
     ten but still one too many for a fact that does not change between releases.
 
     So the answer is stored beside the connection: the path when there is one,
-    and a flag saying "asked, and this build has none" when there is not.
-    Re-validating under Settings clears the flag, which is the moment a Bambuddy
-    upgrade would have added the endpoint.
+    and — when there is not — which version of the matching rules said so. It is
+    asked again when those rules change, when Settings is re-validated, and when
+    somebody presses Look again on the Printers screen. All three are moments
+    where the previous answer might have stopped being true.
     """
     if client.explicit_paths.get("printer_camera"):
         return True
@@ -1896,7 +1972,7 @@ async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
     payload = await credentials.load(session, PROVIDER_BAMBUDDY)
     if payload is None:
         return False
-    if payload.get("camera_checked"):
+    if payload.get("camera_checked") == CAMERA_RULES:
         return False
     spec = client.last_spec or await client.fetch_openapi()
     client.last_spec = spec
@@ -1905,9 +1981,92 @@ async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
     if adopted or (found or {}).get("path"):
         await remember_paths(session, adopted or {"printer_camera": found["path"]})
         return True
-    payload["camera_checked"] = True
+    payload["camera_checked"] = CAMERA_RULES
     await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
     return False
+
+
+async def camera_report(
+    session: AsyncSession, client: BambuddyClient, *, again: bool = False
+) -> dict[str, Any]:
+    """Why there are no pictures — with what the instance says, not a guess.
+
+    Every one of these instances is self-hosted and none of them are quite the
+    same shape. "No camera" has causes that are indistinguishable from outside:
+    the build has none, it has one under a name PrintFlow does not recognise, it
+    has one that is not in the OpenAPI document at all, or it has one that
+    answers with something that is not a picture. Each has a different fix and
+    only the instance can tell them apart, so this asks it and shows the answer.
+    """
+    if again:
+        payload = await credentials.load(session, PROVIDER_BAMBUDDY) or {}
+        if payload.pop("camera_checked", None) is not None:
+            await credentials.save(
+                session, PROVIDER_BAMBUDDY, payload, mark_connected=False
+            )
+        client.discovered_paths.pop("printer_camera", None)
+        client.paths["printer_camera"] = (
+            client.explicit_paths.get("printer_camera")
+            or DEFAULT_PATHS["printer_camera"]
+        )
+
+    available = await ensure_camera(session, client)
+    spec = client.last_spec
+    if spec is None:
+        try:
+            spec = client.last_spec = await client.fetch_openapi()
+        except IntegrationError:
+            spec = None
+
+    try:
+        printers = await with_healing(
+            session, client, ("printers",), client.list_printers
+        )
+    except IntegrationError:
+        printers = []
+    first = next((row for row in printers if row.get("id") is not None), None)
+
+    probe: dict[str, Any] | None = None
+    if first is not None:
+        target = client.camera_target(first["id"], first.get("camera_url"))
+        probe = {"endpoint": target, "printer": first.get("name")}
+        try:
+            async with client.camera(
+                first["id"], override=first.get("camera_url")
+            ) as response:
+                head = b""
+                async for chunk in response.aiter_bytes():
+                    head += chunk
+                    if len(head) >= 64:
+                        break
+                probe["status"] = response.status_code
+                probe["content_type"] = response.headers.get("content-type")
+                # The first bytes say what it really is: ffd8 is a JPEG, "<" is
+                # an error page, "{" is JSON explaining itself.
+                probe["starts_with"] = head[:24].hex()
+                probe["looks_like_a_picture"] = head[:2] == b"\xff\xd8" or str(
+                    response.headers.get("content-type") or ""
+                ).startswith(("image/", "multipart/"))
+        except IntegrationError as exc:
+            probe["error"] = str(exc)
+
+    return {
+        "available": available,
+        "path": client.paths["printer_camera"],
+        "source": (
+            "typed under Advanced"
+            if client.explicit_paths.get("printer_camera")
+            else "read off this instance"
+            if client.discovered_paths.get("printer_camera")
+            else "PrintFlow's default, which is a guess"
+        ),
+        # Everything the document mentions that sounds like a camera. Empty is
+        # the answer "this build has none", which is not a fault to fix.
+        "candidates": (spec or {}).get("cameras") or [],
+        "spec_path": (spec or {}).get("path"),
+        "printer": first,
+        "probe": probe,
+    }
 
 
 def _has_readings(printer: dict[str, Any]) -> bool:
