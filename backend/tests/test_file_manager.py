@@ -23,6 +23,7 @@ from app.integrations.bambuddy import (
     discover_paths,
     file_rows,
     parse_file_entry,
+    split_folder_detail,
 )
 from app.models import PrintJob, PrintMapping, ProductVariation
 from app.services import printing, variations
@@ -496,11 +497,110 @@ class TestAFolderListThatAnswersForOneLevel:
 
         client = Ignores()
         tree = await client.library_tree()
-        # One root call plus one per known folder, and then it has learnt
-        # nothing new and stops rather than asking the same question forever.
+        # The root call, then one probe per parameter name worth trying — and
+        # then it stops, because every one of them answered with the top level
+        # it already had. It never walks the folders one by one on the strength
+        # of an endpoint that is not filtering.
         folder_calls = [1 for path, _ in client.calls if path.endswith("folders")]
-        assert len(folder_calls) == 2
+        assert len(folder_calls) == 4
         assert tree["folders"] == 1
+
+
+class TestSplitFolderDetail:
+    """"Get Folder" returns the folder together with what it holds."""
+
+    def test_children_and_files_are_both_read(self):
+        # The bug this exists for: taking only the first list key found read
+        # the files and left every subfolder unseen, which is a library with no
+        # structure in it.
+        subs, files = split_folder_detail(
+            {"id": 3, "name": "Grain Bin", "children": [{"id": 10, "name": "Hopper"}],
+             "files": [{"id": 103, "name": "hopper.3mf"}]}
+        )
+        assert [row["name"] for row in subs] == ["Hopper"]
+        assert [row["name"] for row in files] == ["hopper.3mf"]
+
+    def test_a_children_array_is_split_on_what_each_row_is(self):
+        subs, files = split_folder_detail(
+            {"children": [
+                {"name": "Lids"},                       # no extension: a folder
+                {"name": "lid.3mf"},                    # a print file
+                {"name": "Odd", "type": "file"},        # says so itself
+                {"name": "weird.3mf", "type": "folder"},
+            ]}
+        )
+        assert [row["name"] for row in subs] == ["Lids", "weird.3mf"]
+        assert [row["name"] for row in files] == ["lid.3mf", "Odd"]
+
+    def test_named_arrays_are_believed_over_the_guess(self):
+        subs, files = split_folder_detail(
+            {"folders": [{"name": "no-dot-but-a-folder"}], "files": [{"name": "x"}]}
+        )
+        assert [row["name"] for row in subs] == ["no-dot-but-a-folder"]
+        assert [row["name"] for row in files] == ["x"]
+
+    def test_the_same_rows_under_two_names_are_not_counted_twice(self):
+        same = [{"id": 1, "name": "a.3mf"}]
+        _subs, files = split_folder_detail({"files": same, "children": same})
+        assert files == same
+
+    def test_one_wrapper_is_unwrapped(self):
+        subs, _files = split_folder_detail({"folder": {"children": [{"name": "Bins"}]}})
+        assert [row["name"] for row in subs] == ["Bins"]
+
+    def test_nothing_recognisable_is_nothing(self):
+        assert split_folder_detail({"id": 1, "name": "Empty"}) == ([], [])
+        assert split_folder_detail("nope") == ([], [])
+
+
+class TestDrillingInWithGetFolder:
+    """The instance filters nothing, and the item endpoint is the only way down.
+
+    There is no "list subfolders" in Bambuddy's library API — there is "Get
+    Folder", which is how a file manager drills in and which returns the folder
+    together with what it holds.
+    """
+
+    class DetailOnly(LibraryClient):
+        def _tree(self):
+            kids: dict = {}
+            for folder in self.folders:
+                kids.setdefault(folder.get("parent_id"), []).append(folder)
+            return kids
+
+        async def _call(self, method, path, *, retries=2, **kwargs):
+            self.calls.append((path, (kwargs.get("params") or {}).get("parent_id")))
+            item = path.rsplit("/", 1)[-1]
+            if item.isdigit():
+                fid = int(item)
+                return {
+                    "id": fid,
+                    "children": self._tree().get(fid, []),
+                    "files": [f for f in self.files if f.get("folder_id") == fid],
+                }
+            if path.endswith("folders"):
+                # Filters nothing: always the top level.
+                return {"folders": self._tree().get(None, [])}
+            return {"files": [], "total": 0}
+
+    async def test_the_whole_structure_comes_out_of_the_item_endpoint(self):
+        client = self.DetailOnly()
+        tree = await client.library_tree()
+
+        paths = [node["path"] for node in tree["files"]]
+        assert "/Production/Bins" in paths
+        assert "/Production/Dragons/Large" in paths
+        assert "/Production/Dragons/Large/dragon-egg-large.3mf" in paths
+        assert tree["folders"] == 5
+        assert "subfolders asked for" in tree["endpoint"]
+        assert "files came with the folders" in tree["endpoint"]
+
+    async def test_the_query_parameters_are_tried_before_drilling_in(self):
+        # One request each to find out, then the method that works for the rest.
+        client = self.DetailOnly()
+        await client.library_tree()
+        probes = [path for path, _ in client.calls if path.endswith("folders")]
+        assert len(probes) == 4  # the root list, then parent_id / parent / folder_id
 
 
 class TestAFilesEndpointThatWantsToBeAsked:

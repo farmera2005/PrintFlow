@@ -303,6 +303,76 @@ ENTRY_LIST_KEYS = (
 )
 
 
+def _states_its_kind(row: dict[str, Any]) -> bool:
+    """Does this row say whether it is a folder, rather than leaving it to be guessed?"""
+    return bool(
+        row.get("type")
+        or row.get("kind")
+        or row.get("node_type")
+        or row.get("entry_type")
+        or row.get("item_type")
+        or isinstance(row.get("children"), list)
+    ) or any(
+        row.get(flag) is not None
+        for flag in ("is_dir", "isDir", "is_directory", "isDirectory", "is_folder")
+    )
+
+
+def split_folder_detail(data: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """One folder's own record, split into the folders and files inside it.
+
+    "Get Folder" is how a file manager drills in, and what it returns is the
+    folder together with what it holds. A named array says what it holds; a
+    plain `children` does not, so each row there is judged on its own — an
+    explicit type where the row has one, and otherwise a name with no extension,
+    because that is what a folder's name looks like and a print file's never is.
+    """
+    if not isinstance(data, dict):
+        return [], []
+
+    subs: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    for key in FOLDER_LIST_KEYS:
+        if isinstance(data.get(key), list):
+            subs += [row for row in data[key] if isinstance(row, dict)]
+            break
+    # A folder's own record holds two different things, and they are not
+    # alternative names for one list: {"children": [...], "files": [...]} means
+    # both. Taking only the first key found read the files and left every
+    # subfolder unseen.
+    for key in ("files", "models", "prints", "projects", "documents"):
+        if isinstance(data.get(key), list):
+            files += [row for row in data[key] if isinstance(row, dict)]
+            break
+    for key in ("children", "contents", "nodes", "entries", "items"):
+        value = data.get(key)
+        if not isinstance(value, list):
+            continue
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            folderish = (
+                parse_file_entry(row)["kind"] == "folder"
+                if _states_its_kind(row)
+                else "." not in parse_file_entry(row)["name"]
+            )
+            (subs if folderish else files).append(row)
+        break
+
+    # A build that echoes the same rows under two names must not have them
+    # counted twice.
+    files = list({json.dumps(row, sort_keys=True, default=str): row for row in files}.values())
+    subs = list({json.dumps(row, sort_keys=True, default=str): row for row in subs}.values())
+
+    if subs or files:
+        return subs, files
+    # {"folder": {...}} and the like: one wrapper, nothing to choose wrongly.
+    inner = [value for value in data.values() if isinstance(value, dict)]
+    if len(inner) == 1 and len(data) <= 2:
+        return split_folder_detail(inner[0])
+    return [], []
+
+
 def _envelope_total(data: Any) -> int | None:
     """How many rows the collection says it has, when it says."""
     if not isinstance(data, dict):
@@ -1079,38 +1149,85 @@ class BambuddyClient:
             rows += batch
         return rows, truncated
 
+    async def _inside(
+        self, folder_id: Any, method: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """What one folder holds, asked the way this instance answers."""
+        if method == "detail":
+            item = f"{self.paths['library_folders'].rstrip('/')}/{folder_id}"
+            return split_folder_detail(await self._call("GET", item))
+        rows = await self._all_rows(
+            self.paths["library_folders"], params={method: folder_id}
+        )
+        return rows, []
+
+    async def _child_method(self, folder_id: Any, known: set[Any]) -> str | None:
+        """How to ask this instance what is inside a folder.
+
+        There are two shapes and no way to tell them apart but to try. A list
+        endpoint may filter on a parent, in which case one query parameter does
+        it — but instances disagree on the name, and one that does not filter
+        answers with the top level again, which is not an answer. Otherwise the
+        item endpoint, "Get Folder", is how a file manager drills in, and what
+        it returns is the folder together with what it holds.
+
+        Settled once on the first folder and then used for the rest, so this
+        costs a couple of requests rather than tripling every one of them.
+        """
+        for key in ("parent_id", "parent", "folder_id"):
+            try:
+                rows, _ = await self._inside(folder_id, key)
+            except IntegrationError:
+                continue
+            # The same top level over again is the parameter being ignored.
+            if any(parse_library_folder(row)["id"] not in known for row in rows):
+                return key
+        try:
+            subs, files = await self._inside(folder_id, "detail")
+        except IntegrationError:
+            return None
+        return "detail" if (subs or files) else None
+
     async def _descend_folders(
         self,
         folders: list[dict[str, Any]],
         *,
         max_folders: int = 400,
         max_depth: int = 8,
-    ) -> tuple[list[dict[str, Any]], bool]:
-        """Subfolders, for a folder list that only answers for one level.
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        """Subfolders — and anything they hold — for a list that gives one level.
 
         A "list folders" that returns the top level and nothing else is a
-        reasonable thing for an API to be — it is the folder list you would draw
+        reasonable thing for an API to be: it is the folder list you would draw
         on a first screen. It is indistinguishable from a complete list, though,
         right up until a folder that holds only subfolders shows as empty and
         everything filed inside it is invisible.
-
-        So each known folder is asked what is under it. An instance that ignores
-        `parent_id` answers with the same top level, which is already known, and
-        the walk stops on the first round having learnt nothing.
         """
-        found: list[dict[str, Any]] = []
         seen = {folder["id"] for folder in folders if folder["id"] is not None}
         queue = [(folder, 0) for folder in folders if folder["id"] is not None]
-        truncated = False
+        if not queue:
+            return [], [], False
 
+        method = await self._child_method(queue[0][0]["id"], seen)
+        if method is None:
+            return [], [], False
+
+        found: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+        truncated = False
         while queue:
             folder, depth = queue.pop(0)
             if depth >= max_depth or len(seen) >= max_folders:
                 truncated = truncated or bool(queue)
                 break
-            rows = await self._all_rows(
-                self.paths["library_folders"], params={"parent_id": folder["id"]}
-            )
+            try:
+                rows, inner = await self._inside(folder["id"], method)
+            except IntegrationError:
+                continue
+            for row in inner:
+                # The folder is known from the question that was asked.
+                row.setdefault("folder_id", folder["id"])
+            files += inner
             for row in rows:
                 child = parse_library_folder(row)
                 if child["id"] is None or child["id"] in seen:
@@ -1118,11 +1235,11 @@ class BambuddyClient:
                 seen.add(child["id"])
                 # The parent is known from the question, whatever the row says —
                 # and some builds say nothing, having already been asked.
-                if child["parent_id"] is None:
+                if child["parent_id"] is None and not child["path"]:
                     child["parent_id"] = folder["id"]
                 found.append(child)
                 queue.append((child, depth + 1))
-        return found, truncated
+        return found, files, truncated
 
     async def library_tree(self, *, max_nodes: int = 8000) -> dict[str, Any]:
         """The library's whole structure, from its folder and file collections.
@@ -1141,14 +1258,21 @@ class BambuddyClient:
         # Does anything in this list sit inside anything else in it? If not, the
         # list may be one level rather than all of them, and the only way to
         # find out is to ask.
-        if folders and not any(folder["parent_id"] in known for folder in folders):
-            nested, cut = await self._descend_folders(folders)
+        inner_files: list[dict[str, Any]] = []
+        if folders and not any(
+            folder["parent_id"] in known or folder["path"] for folder in folders
+        ):
+            nested, inner_files, cut = await self._descend_folders(folders)
             if nested:
                 folders += nested
                 notes.append("subfolders asked for")
             truncated = truncated or cut
 
         file_rows_raw = await self._all_rows(self.paths["library_files"])
+        if not file_rows_raw and inner_files:
+            # The drill-in brought the contents along with the structure.
+            file_rows_raw = inner_files
+            notes.append("files came with the folders")
         if not file_rows_raw and folders:
             # Folders but no files is not a library anybody keeps. Far likelier
             # is a files endpoint that only answers for a named folder.
