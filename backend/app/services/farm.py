@@ -36,6 +36,28 @@ def _key(printer_id: Any) -> str | None:
     return None if printer_id is None else str(printer_id)
 
 
+# Where each machine said its camera was, last time the farm was read.
+#
+# Some builds put a camera URL on the printer row rather than serving an
+# endpoint for it, and the frame proxy needs that URL. Taking it from the
+# browser instead would make the proxy fetch whatever it was handed, which is
+# not something an endpoint should offer however narrowly it is guarded. So the
+# page passes a printer id and nothing else, and the URL is looked up here.
+_camera_urls: dict[str, str] = {}
+
+
+def remember_cameras(printers: list[dict[str, Any]]) -> None:
+    _camera_urls.clear()
+    for row in printers:
+        key, url = _key(row.get("id")), row.get("camera_url")
+        if key is not None and url:
+            _camera_urls[key] = str(url)
+
+
+def camera_url_for(printer_id: Any) -> str:
+    return _camera_urls.get(str(printer_id), "")
+
+
 async def overview(session: AsyncSession) -> dict[str, Any]:
     """Every machine with its plates, plus the plates that have no machine.
 
@@ -56,6 +78,7 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
         printers = found["printers"]
         detailed = found["detailed"]
         detail_error = found["detail_error"]
+        remember_cameras(printers)
     except IntegrationNotConfigured as exc:
         error = str(exc)
     except IntegrationError as exc:

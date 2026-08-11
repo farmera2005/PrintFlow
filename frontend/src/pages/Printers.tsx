@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { JOB_STATUS_CLASSES, formatDateTime } from '../lib/format'
 import type { FarmOverview, FarmPrinter, QueueJob } from '../lib/types'
-import { Alert, Badge, Button, Card, EmptyState, Spinner, cx } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState, Modal, Spinner, cx } from '../components/ui'
 import RawReplies from '../components/RawReplies'
 
 /** How often the farm is re-read. A print takes hours; this is about a person
@@ -52,10 +52,14 @@ export default function Printers() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [showFinished, setShowFinished] = useState(false)
+  // Every farm read is also when the cards want a new picture.
+  const [tick, setTick] = useState(0)
+  const [watching, setWatching] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
       setFarm(await api.get<FarmOverview>('/api/printers'))
+      setTick((n) => n + 1)
       setError(null)
     } catch (err) {
       setError(errorMessage(err))
@@ -101,6 +105,8 @@ export default function Printers() {
     <Plate key={job.id} job={job} busy={busy === job.id} onAct={act} compact />
   )
 
+  const watched =
+    (farm?.printers ?? []).find((row) => String(row.id) === watching) ?? null
   const pending = (farm?.plates ?? []).filter((job) => job.status === 'pending')
   const finished = (farm?.plates ?? []).filter((job) => FINISHED.includes(job.status))
 
@@ -166,6 +172,8 @@ export default function Printers() {
                     key={String(printer.id ?? printer.name)}
                     printer={printer}
                     renderPlate={cardPlate}
+                    tick={tick}
+                    onWatch={() => setWatching(String(printer.id))}
                   />
                 ))}
               </div>
@@ -209,6 +217,10 @@ export default function Printers() {
           </>
         )}
       </div>
+
+      {watched ? (
+        <WatchPrinter printer={watched} onClose={() => setWatching(null)} />
+      ) : null}
     </div>
   )
 }
@@ -216,9 +228,14 @@ export default function Printers() {
 function PrinterCard({
   printer,
   renderPlate,
+  tick,
+  onWatch,
 }: {
   printer: FarmPrinter
   renderPlate: (job: QueueJob) => JSX.Element
+  /** Bumped when the farm is re-read, which is when a new frame is wanted. */
+  tick: number
+  onWatch: () => void
 }) {
   const state = machineState(printer)
   const nozzle = temperature(printer.nozzle_temp, printer.nozzle_target)
@@ -242,6 +259,8 @@ function PrinterCard({
         {printer.model ? <Badge>{printer.model}</Badge> : null}
         <Badge className={state.tone}>{state.label}</Badge>
       </div>
+
+      <CameraView printer={printer} tick={tick} onWatch={onWatch} />
 
       {/* An idle machine reports 0% because there is nothing on it, and a bar
           at zero reads as a print that has not started rather than as no print
@@ -288,6 +307,161 @@ function PrinterCard({
         )}
       </div>
     </Card>
+  )
+}
+
+/** The picture on a card: one frame, replaced whenever the farm is re-read.
+ *
+ *  A frame rather than a live stream. Every camera PrintFlow can reach is
+ *  behind Bambuddy's API key and on the shop LAN, so the picture is proxied;
+ *  proxying a live stream would mean one socket per card held open for as long
+ *  as the tab is, which is a lot to spend on a card the size of a stamp. The
+ *  enlarged view, where somebody is actually watching, refreshes every second.
+ *
+ *  A camera that fails is not an error worth a banner — a machine may simply
+ *  not have one. It takes the space back and says so, once. */
+function CameraView({
+  printer,
+  tick,
+  onWatch,
+}: {
+  printer: FarmPrinter
+  tick: number
+  onWatch: () => void
+}) {
+  const [broken, setBroken] = useState(false)
+
+  useEffect(() => setBroken(false), [printer.id])
+
+  if (!printer.camera) {
+    // A camera the build named but PrintFlow will not fetch: it points
+    // somewhere other than Bambuddy, and a browser on that network may still
+    // reach it even though the server here should not go looking.
+    return printer.camera_url ? (
+      <a
+        className="text-xs text-sky-700 underline"
+        href={printer.camera_url}
+        target="_blank"
+        rel="noreferrer"
+      >
+        Camera (opens on your network)
+      </a>
+    ) : null
+  }
+
+  if (broken) {
+    return <p className="text-xs text-ink-400">No camera on this machine.</p>
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onWatch}
+      className="block overflow-hidden rounded-md bg-ink-900"
+      title="Watch this machine"
+    >
+      <img
+        src={`/api/printers/${printer.id}/camera?t=${tick}`}
+        alt={`Camera on ${printer.name ?? 'this printer'}`}
+        className="h-32 w-full object-cover"
+        onError={() => setBroken(true)}
+      />
+    </button>
+  )
+}
+
+/** One machine, watched: the same frames, bigger and much more often.
+ *
+ *  Once a second, because somebody is looking at it. It is still frames rather
+ *  than a stream for the same reason as the cards, but here the cost is one
+ *  machine for as long as the panel is open rather than the whole farm for as
+ *  long as the tab is. */
+function WatchPrinter({
+  printer,
+  onClose,
+}: {
+  printer: FarmPrinter
+  onClose: () => void
+}) {
+  const [shown, setShown] = useState<string | null>(null)
+  const [broken, setBroken] = useState(false)
+  const state = machineState(printer)
+  const left = duration(printer.remaining_minutes)
+
+  // Each frame is fetched out of sight and only swapped in once it has
+  // arrived, so the picture never blinks through empty. And the next one is
+  // asked for a second after the last one landed rather than on a metronome —
+  // a slow camera should fall behind, not accumulate requests.
+  useEffect(() => {
+    let live = true
+    let timer: number | undefined
+    let frame = 0
+
+    const next = () => {
+      const url = `/api/printers/${printer.id}/camera?t=${Date.now()}.${frame++}`
+      const image = new Image()
+      image.onload = () => {
+        if (!live) return
+        setShown(url)
+        setBroken(false)
+        timer = window.setTimeout(next, 1000)
+      }
+      image.onerror = () => {
+        if (!live) return
+        setBroken(true)
+        // Keep trying, slowly: a camera comes back when its machine wakes up.
+        timer = window.setTimeout(next, 5000)
+      }
+      image.src = url
+    }
+
+    next()
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
+  }, [printer.id])
+
+  return (
+    <Modal open title={printer.name ?? `Printer ${printer.id}`} onClose={onClose} wide>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-500">
+        <Badge className={state.tone}>{state.label}</Badge>
+        {printer.model ? <Badge>{printer.model}</Badge> : null}
+        {printer.progress !== null && printer.progress > 0 ? (
+          <span>
+            {printer.progress}%{left ? ` · ${left}` : ''}
+            {printer.layers ? ` · layer ${printer.layer ?? '—'}/${printer.layers}` : ''}
+          </span>
+        ) : null}
+        {printer.current_file ? <span>{printer.current_file}</span> : null}
+      </div>
+
+      {shown ? (
+        <img
+          src={shown}
+          alt={`Camera on ${printer.name ?? 'this printer'}`}
+          className="max-h-[70vh] w-full rounded-md bg-ink-900 object-contain"
+        />
+      ) : broken ? null : (
+        <div className="flex h-64 items-center justify-center rounded-md bg-ink-900">
+          <Spinner className="h-6 w-6" />
+        </div>
+      )}
+
+      {broken ? (
+        <div className="mt-2">
+          <Alert tone="warning">
+            The camera is not answering{shown ? ' any more' : ''}. It may be off,
+            or this machine may not have one — PrintFlow keeps asking.
+          </Alert>
+        </div>
+      ) : null}
+
+      <p className="mt-2 text-xs text-ink-500">
+        A new picture every second, taken through PrintFlow — the camera itself
+        is on the shop network and behind Bambuddy's key.
+      </p>
+    </Modal>
   )
 }
 

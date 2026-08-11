@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_user
@@ -26,6 +26,81 @@ async def list_printers(
     # read_farm may have adopted a corrected endpoint on the way.
     await session.commit()
     return overview
+
+
+# A frame is tens of kilobytes; anything past this is not a picture, and
+# holding it in memory to find out would be the fault rather than the check.
+MAX_FRAME_BYTES = 8 * 1024 * 1024
+
+
+async def _still_frame(response) -> tuple[bytes, str]:
+    """One picture, whether the camera sends pictures or a film of them.
+
+    Every build's stream is JPEG frames, so a frame is the bytes between the
+    start and end markers — which needs no agreement about how the parts are
+    separated, and no build has ever disagreed about those two bytes.
+    """
+    kind = str(response.headers.get("content-type") or "").split(";")[0].strip()
+    if not kind.startswith("multipart/"):
+        body = b""
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > MAX_FRAME_BYTES:
+                raise HTTPException(
+                    status.HTTP_502_BAD_GATEWAY,
+                    "The camera sent more than one frame's worth of data.",
+                )
+        return body, kind or "image/jpeg"
+
+    buffer = b""
+    async for chunk in response.aiter_bytes():
+        buffer += chunk
+        start = buffer.find(b"\xff\xd8")
+        if start >= 0:
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end >= 0:
+                return buffer[start : end + 2], "image/jpeg"
+        if len(buffer) > MAX_FRAME_BYTES:
+            break
+    raise HTTPException(
+        status.HTTP_502_BAD_GATEWAY,
+        "The camera is streaming something PrintFlow could not read a frame out of.",
+    )
+
+
+@router.get("/{printer_id}/camera")
+async def printer_camera(
+    printer_id: str,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """One picture from this machine's camera, proxied.
+
+    Proxied rather than linked because neither thing the browser would need is
+    true of it: the API key lives here, and Bambuddy is on the shop LAN while
+    the person looking at PrintFlow may be on a phone through a tunnel.
+
+    A picture rather than a stream, deliberately. Passing a live multipart
+    stream through would hold one socket per card open for as long as the tab
+    exists — ten of them, through a tunnel, on a page people leave up all day —
+    and it would only work on the builds whose camera is multipart in the first
+    place. Asking for a frame works on both kinds, and the page asks again as
+    often as it wants a new one.
+    """
+    try:
+        client = await bambuddy_api.client_for(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    try:
+        async with client.camera(
+            printer_id, override=farm.camera_url_for(printer_id)
+        ) as response:
+            frame, kind = await _still_frame(response)
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    # The page asks again for every new frame, so this must not come back out
+    # of a cache: a frozen picture of a working printer is worse than none.
+    return Response(frame, media_type=kind, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/raw")

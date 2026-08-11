@@ -11,8 +11,11 @@ and a Bambuddy that is down altogether while the shop still needs its queue.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 
+from app.integrations import bambuddy as bambuddy_api
 from app.integrations.bambuddy import (
     BambuddyClient,
     discover_paths,
@@ -219,6 +222,207 @@ class TestReadFarm:
         assert [row["name"] for row in found["printers"]] == ["A", "B"]
         assert found["detailed"] is False
         assert "500" in found["detail_error"]
+
+
+# --------------------------------------------------------------------------
+# Cameras
+# --------------------------------------------------------------------------
+
+
+# A real 1x1 JPEG. Small, but it starts and ends where a JPEG does.
+JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000") + b"\x00" * 8 + b"\xff\xd9"
+
+
+def _serve(monkeypatch, content_type: str, chunks: list[bytes], status: int = 200):
+    """Stand a camera up behind the proxy, sending exactly these bytes."""
+
+    class Reply:
+        headers = {"content-type": content_type}
+
+        async def aiter_bytes(self):
+            for chunk in chunks:
+                yield chunk
+
+    class Camera:
+        @asynccontextmanager
+        async def camera(self, printer_id, *, override=None):
+            if status >= 400:
+                raise IntegrationError(
+                    "bambuddy", f"HTTP {status}", status_code=status
+                )
+            yield Reply()
+
+    async def client_for(_session):
+        return Camera()
+
+    monkeypatch.setattr(
+        "app.routers.printers_router.bambuddy_api.client_for", client_for
+    )
+
+
+class TestDiscoverPrinterCamera:
+    def test_the_live_one_beats_the_still(self):
+        # A frame can be taken out of a stream; a stream cannot be made from a
+        # frame, so the camera itself is the better address of the two.
+        found = discover_paths(
+            {
+                "/api/v1/printers/{id}/camera": {"get": {}},
+                "/api/v1/printers/{id}/snapshot": {"get": {}},
+            }
+        )["printer_camera"]
+        assert found["path"] == "/api/v1/printers/{printer_id}/camera"
+
+    def test_the_other_names_a_build_might_use(self):
+        for leaf in ("stream", "video", "webcam", "mjpeg", "snapshot"):
+            found = discover_paths({f"/api/printers/{{id}}/{leaf}": {"get": {}}})
+            assert found["printer_camera"]["path"] == (
+                f"/api/printers/{{printer_id}}/{leaf}"
+            )
+
+    def test_a_build_with_no_camera_has_none_found(self):
+        found = discover_paths(
+            {"/api/printers": {"get": {}}, "/api/printers/{id}/files": {"get": {}}}
+        )
+        assert found["printer_camera"]["path"] is None
+
+
+class TestCameraTarget:
+    def _client(self, **payload) -> BambuddyClient:
+        return BambuddyClient({"base_url": "http://bambu.local:8000", **payload})
+
+    def test_the_configured_path_by_default(self):
+        client = self._client(paths={"printer_camera": "/api/v1/printers/{printer_id}/camera"})
+        assert client.camera_target(4) == "http://bambu.local:8000/api/v1/printers/4/camera"
+
+    def test_a_url_the_instance_named_for_itself_is_followed(self):
+        client = self._client()
+        assert client.camera_target(4, "http://bambu.local:8000/cam/4") == (
+            "http://bambu.local:8000/cam/4"
+        )
+        assert client.camera_is_ours("http://bambu.local:8000/cam/4") is True
+
+    def test_a_url_somewhere_else_on_the_network_is_not(self):
+        """PrintFlow would be fetching it on behalf of whoever opened the page."""
+        client = self._client()
+        elsewhere = "http://192.168.10.30:8080/stream"
+        assert client.camera_is_ours(elsewhere) is False
+        # And it falls back to the configured path rather than going there.
+        assert client.camera_target(4, elsewhere).startswith("http://bambu.local:8000/")
+
+    def test_a_path_with_no_host_is_this_host(self):
+        client = self._client()
+        assert client.camera_target(4, "/cam/4.jpg") == "http://bambu.local:8000/cam/4.jpg"
+
+
+class TestStillFrame:
+    async def test_a_still_camera_is_passed_straight_through(self, signed_in, monkeypatch):
+        _serve(monkeypatch, "image/jpeg", [JPEG])
+        response = await signed_in.get("/api/printers/4/camera")
+        assert response.status_code == 200
+        assert response.content == JPEG
+        assert response.headers["content-type"] == "image/jpeg"
+        # A card asks again for every frame; a cached one is a frozen printer.
+        assert response.headers["cache-control"] == "no-store"
+
+    async def test_one_frame_is_taken_out_of_a_stream(self, signed_in, monkeypatch):
+        # Split across chunks, with multipart preamble and trailer around it —
+        # a frame is what lies between the markers, whatever separates the parts.
+        chunks = [
+            b"--pfframe\r\nContent-Type: image/jpeg\r\n\r\n" + JPEG[:10],
+            JPEG[10:] + b"\r\n--pfframe\r\n" + JPEG,
+        ]
+        _serve(monkeypatch, "multipart/x-mixed-replace; boundary=pfframe", chunks)
+        response = await signed_in.get("/api/printers/4/camera")
+        assert response.status_code == 200
+        assert response.content == JPEG
+        assert response.headers["content-type"] == "image/jpeg"
+
+    async def test_a_stream_with_no_picture_in_it_says_so(self, signed_in, monkeypatch):
+        _serve(monkeypatch, "multipart/x-mixed-replace; boundary=x", [b"not a picture"])
+        response = await signed_in.get("/api/printers/4/camera")
+        assert response.status_code == 502
+        assert "could not read a frame" in response.json()["detail"]
+
+    async def test_a_machine_with_no_camera_is_a_plain_failure(
+        self, signed_in, monkeypatch
+    ):
+        # The card takes its own space back on this; it is not a page error.
+        _serve(monkeypatch, "application/json", [b'{"detail":"Not found"}'], status=404)
+        assert (await signed_in.get("/api/printers/4/camera")).status_code == 502
+
+
+class TestEnsureCamera:
+    async def test_a_build_with_a_camera_is_found_and_kept(self, db):
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k"}
+        )
+        await db.commit()
+        client = FarmClient(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/v1/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+        )
+        assert await bambuddy_api.ensure_camera(db, client) is True
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["discovered_paths"]["printer_camera"] == (
+            "/api/v1/printers/{printer_id}/camera"
+        )
+
+    async def test_a_build_without_one_is_asked_exactly_once(self, db):
+        """Ten broken pictures per page load, or one question. This is the question."""
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k"}
+        )
+        await db.commit()
+        client = FarmClient(spec_paths={"/api/printers": {"get": {}}}, listing=LIVE_LISTING)
+
+        assert await bambuddy_api.ensure_camera(db, client) is False
+        assert client.specs_read == 1
+        await db.commit()
+
+        # A fresh client, as the next page load would build.
+        again = FarmClient(spec_paths={"/api/printers": {"get": {}}}, listing=LIVE_LISTING)
+        assert await bambuddy_api.ensure_camera(db, again) is False
+        assert again.specs_read == 0
+
+    async def test_the_cards_are_told_whether_there_is_a_picture(self, db):
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k"}
+        )
+        await db.commit()
+        client = FarmClient(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=LIVE_LISTING,
+        )
+        assert [row["camera"] for row in (await read_farm(db, client))["printers"]] == [
+            True
+        ]
+
+    async def test_a_camera_on_another_machine_is_not_ours_to_fetch(self, db):
+        """It is on the shop network; a browser there may reach it, PrintFlow won't."""
+        await credentials.save(
+            db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k"}
+        )
+        await db.commit()
+        client = FarmClient(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/camera": {"get": {}}},
+            listing=[{**LIVE_LISTING[0], "camera_url": "http://192.168.1.9/stream"}],
+        )
+        row = (await read_farm(db, client))["printers"][0]
+        assert row["camera"] is False
+        # But the page is still told where it said the camera was.
+        assert row["camera_url"] == "http://192.168.1.9/stream"
+
+    async def test_a_camera_named_by_hand_is_not_second_guessed(self, db):
+        client = FarmClient(
+            spec_paths={"/api/printers": {"get": {}}},
+            listing=LIVE_LISTING,
+        )
+        client.explicit_paths["printer_camera"] = "/my/cam/{printer_id}"
+        assert await bambuddy_api.ensure_camera(db, client) is True
+        assert client.specs_read == 0
 
 
 # --------------------------------------------------------------------------

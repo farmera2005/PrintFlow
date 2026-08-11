@@ -834,6 +834,10 @@ async def bambuddy_config(
     # same endpoints the validation just proved. Kept separate from the operator's
     # own `paths` so a later re-validation can move them.
     payload["discovered_paths"] = client.discovered_paths
+    # "This build has no camera" was remembered so the farm screen would stop
+    # asking. Re-validating is exactly the moment an upgrade would have added
+    # one, so the question is allowed to be asked again.
+    payload.pop("camera_checked", None)
     payload["api_version"] = spec.get("version")
     payload["openapi"] = spec
     payload["printers"] = printers

@@ -729,6 +729,14 @@ const PATH_ROLES: {
     templated: true,
   },
   {
+    key: 'printer_camera',
+    label: "One printer's camera",
+    hint:
+      'Proxied onto the Printers screen as a still picture. ' +
+      '{printer_id} is substituted.',
+    templated: true,
+  },
+  {
     key: 'printer_detail',
     label: 'One printer',
     hint:

@@ -476,6 +476,11 @@ are different things to act on. A machine reporting a fault says so in red; a
 Bambu machine reports "no fault" as the number 0, which is read as no fault
 rather than printed as one.
 
+Above the readings, the **camera**, where the machine has one. Click it and the
+picture fills a panel with the machine's state beside it, refreshing every
+second. A machine with no camera takes the space back and says so; it is not an
+error worth a banner.
+
 Underneath, the plates. This is the half Bambuddy cannot answer: it knows a
 machine is at 37%, not that the plate belongs to order #1042. **Cancel** and
 **Re-queue** are on each plate, where the Print Queue had them.
@@ -515,6 +520,46 @@ listing left blank, so a thin reply cannot blank out a name that did arrive. A
 machine that will not answer keeps its row and the farm says which one refused —
 a printer PrintFlow cannot reach is still a printer, and a farm screen that
 quietly drops one is worse than useless.
+
+### The cameras
+
+**Proxied, not linked.** Neither thing a browser would need to fetch a camera
+directly is true of it: the API key lives on the server, and Bambuddy is on the
+shop LAN while the person looking at PrintFlow may be on a phone through the
+tunnel. So the picture comes through PrintFlow, under the same login as the rest
+of the screen.
+
+**Pictures, not a stream — deliberately.** Passing a live multipart stream
+through would hold one socket per card open for as long as the tab is: ten of
+them, through a tunnel, on a screen people leave up all day. And it would only
+work on the builds whose camera is multipart to begin with. Asking for a *frame*
+works on both kinds — where the camera is a stream, one frame is read out of it
+and the rest dropped — so the page decides how often it wants a new picture
+rather than the camera deciding for it. The cards take one on each farm read;
+the enlarged view, where somebody is actually watching, takes one a second, each
+fetched out of sight and swapped in only once it has arrived so the picture
+never blinks through empty. A camera that stops answering slows the asking
+rather than stopping it, since a camera comes back when its machine wakes up.
+
+**The endpoint** is discovered like the others — `camera`, `stream`, `video`,
+`webcam`, `mjpeg`, `snapshot`, in that order of preference, since a frame can be
+taken out of a stream but a stream cannot be made out of a frame. It is editable
+under **Advanced** as *One printer's camera*.
+
+Whether this build has cameras at all is asked **once** and remembered beside
+the connection: the alternative is either ten broken pictures on every page
+load, or re-reading the instance's document on every page load to avoid them.
+Re-validating under Settings asks again, which is the moment an upgrade would
+have added one.
+
+**A camera somewhere other than Bambuddy is not fetched.** Some builds name the
+camera as a URL on the printer row rather than serving an endpoint for it. Where
+that URL points back at the Bambuddy this connection already talks to, it is
+followed. Where it points elsewhere on the network — the printer's own address,
+say — PrintFlow does not go there: the URL arrives from outside and would be
+fetched by the server on behalf of whoever opened the page, which is not
+something an endpoint should offer however narrowly it is guarded. The card
+shows it as a link instead, which a browser on that network can still follow.
 
 If the cards come back with no readings on them at all, the page says so and
 offers **Show what Bambuddy sent** — the printer listing and one machine's

@@ -289,6 +289,13 @@ export interface FarmPrinter extends BambuddyPrinter {
   bed_target: number | null
   chamber_temp: number | null
   error: string | null
+  /** Whether PrintFlow can fetch a picture from this machine. False when the
+   *  build has no camera, or keeps it somewhere PrintFlow will not follow. */
+  camera: boolean
+  /** A camera the build named itself. Shown as a link when it points off the
+   *  Bambuddy host, since PrintFlow will not proxy it but a browser on the
+   *  same network still can. */
+  camera_url: string | null
   /** The plates PrintFlow sent to this machine and has not finished with. */
   plates: QueueJob[]
 }

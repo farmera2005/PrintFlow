@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +35,13 @@ from .base import (
     deadline,
     new_client,
     request,
+    transport_reason,
 )
+
+# A camera connects as quickly as any other endpoint but then goes quiet
+# between frames, and a machine that is idle may send nothing for a while. The
+# read budget is generous for that reason; the connect budget is not.
+CAMERA_TIMEOUT = httpx.Timeout(connect=4.0, read=30.0, write=10.0, pool=4.0)
 
 DEFAULT_PATHS: dict[str, str] = {
     "openapi": "/openapi.json",
@@ -58,6 +65,10 @@ DEFAULT_PATHS: dict[str, str] = {
     # One machine, in as much detail as the build keeps — read only where the
     # farm listing turns out to be a bare inventory with no live readings on it.
     "printer_detail": "/api/printers/{printer_id}",
+    # The machine's camera. Proxied rather than linked: Bambuddy is on the shop
+    # LAN and needs an API key, and neither is true of the browser looking at
+    # PrintFlow through a tunnel.
+    "printer_camera": "/api/printers/{printer_id}/camera",
 }
 
 DEFAULT_FIELDS: dict[str, str] = {
@@ -246,17 +257,51 @@ def _score_printer_detail(path: str, methods: set[str]) -> int | None:
 
 def discover_printer_detail(spec_paths: dict[str, Any]) -> dict[str, Any]:
     """The per-printer endpoint, with its parameter renamed to ours."""
+    return _discover_under_printer(spec_paths, _score_printer_detail)
+
+
+# What a camera endpoint is called, best first. The live one is wanted even
+# where a build also offers a still: a single frame can be taken out of a
+# stream, but a stream cannot be made out of a still.
+CAMERA_LEAVES = ("camera", "stream", "video", "webcam", "mjpeg", "snapshot", "image")
+
+
+def _score_printer_camera(path: str, methods: set[str]) -> int | None:
+    """Rank a spec path as "this machine's camera"."""
+    if "get" not in methods:
+        return None
+    segments = [s for s in path.split("/") if s]
+    templated = [i for i, s in enumerate(segments) if s.startswith("{")]
+    if len(templated) != 1:
+        return None
+    slot = templated[0]
+    if slot == 0 or segments[slot - 1].lower().rstrip("s") not in ("printer", "device"):
+        return None
+    tail = [s.lower() for s in segments[slot + 1 :]]
+    if not tail or not all(s in CAMERA_LEAVES for s in tail):
+        return None
+    # `/printers/{id}/camera` beats `/printers/{id}/camera/snapshot`, and camera
+    # beats snapshot, so a shorter and more live path wins.
+    return 100 - CAMERA_LEAVES.index(tail[0]) * 10 - len(tail)
+
+
+def _discover_under_printer(spec_paths: dict[str, Any], score) -> dict[str, Any]:
+    """Best templated per-printer path for a role, parameter renamed to ours."""
     scored: list[tuple[int, str]] = []
     for path, operations in spec_paths.items():
         if not isinstance(operations, dict):
             continue
         methods = {m.lower() for m in operations if isinstance(m, str)}
-        score = _score_printer_detail(str(path), methods)
-        if score is not None:
-            scored.append((score, str(path)))
+        rank = score(str(path), methods)
+        if rank is not None:
+            scored.append((rank, str(path)))
     scored.sort(key=lambda pair: (-pair[0], pair[1]))
     normalized = [re.sub(r"\{[^}]+\}", "{printer_id}", path) for _, path in scored]
     return {"path": normalized[0] if normalized else None, "alternatives": normalized[1:6]}
+
+
+def discover_printer_camera(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    return _discover_under_printer(spec_paths, _score_printer_camera)
 
 
 def discover_printer_files(spec_paths: dict[str, Any]) -> dict[str, Any]:
@@ -291,6 +336,7 @@ def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = {
         "printer_files": discover_printer_files(spec_paths),
         "printer_detail": discover_printer_detail(spec_paths),
+        "printer_camera": discover_printer_camera(spec_paths),
     }
     for name, role in PATH_ROLES.items():
         scored: list[tuple[int, str]] = []
@@ -590,6 +636,12 @@ def parse_printer(row: dict[str, Any]) -> dict[str, Any]:
         # "error: 0" in red would be worse than one saying nothing.
         "error": _fault(
             _first_scalar(look, "error", "print_error", "error_message", "last_error")
+        ),
+        # Some builds hand the camera over as a URL on the row instead of
+        # serving an endpoint for it. Kept as sent; whether it can be proxied
+        # is a question about where it points, answered at the proxy.
+        "camera_url": _first_scalar(
+            look, "camera_url", "cameraUrl", "stream_url", "webcam_url", "mjpeg_url"
         ),
     }
 
@@ -1076,7 +1128,10 @@ class BambuddyClient:
         So a 404 re-reads the document instead. Roles the operator set by hand
         are left alone, because adopt_discovered will not overwrite them.
         """
-        spec = await self.fetch_openapi()
+        # A client lives exactly as long as one request, so a document already
+        # read during it is the same document — and a request that needs two
+        # roles corrected should not fetch it twice to learn both.
+        spec = self.last_spec or await self.fetch_openapi()
         # Kept so that explaining a failure afterwards does not re-fetch a
         # document that was read moments ago, on a request already failing.
         self.last_spec = spec
@@ -1114,6 +1169,73 @@ class BambuddyClient:
 
     def printer_detail_path(self, printer_id: Any) -> str:
         return self.paths["printer_detail"].replace("{printer_id}", str(printer_id))
+
+    def camera_target(self, printer_id: Any, override: str | None = None) -> str:
+        """The absolute URL of a machine's camera, refusing to leave this host.
+
+        A build may hand the camera over as a URL on the printer row rather than
+        as an endpoint of its own. That URL arrives from outside, and PrintFlow
+        would be fetching it on behalf of whoever opened the page — so it is
+        followed only where it points back at the Bambuddy this connection is
+        already talking to. Anywhere else and the configured path is used
+        instead; the UI offers the original as a link the browser can try
+        itself, which is the honest version of "PrintFlow cannot reach that".
+        """
+        path = self.paths["printer_camera"].replace("{printer_id}", str(printer_id))
+        if not override:
+            return self.url_for(path)
+        candidate = httpx.URL(str(override))
+        if not candidate.is_absolute_url:
+            return self.url_for(str(override))
+        base = httpx.URL(self.base_url)
+        if (candidate.scheme, candidate.host, candidate.port) == (
+            base.scheme, base.host, base.port
+        ):
+            return str(candidate)
+        return self.url_for(path)
+
+    def camera_is_ours(self, override: str | None) -> bool:
+        """Whether that camera URL is one this instance would serve."""
+        if not override:
+            return True
+        candidate = httpx.URL(str(override))
+        if not candidate.is_absolute_url:
+            return True
+        base = httpx.URL(self.base_url)
+        return (candidate.scheme, candidate.host, candidate.port) == (
+            base.scheme, base.host, base.port
+        )
+
+    @asynccontextmanager
+    async def camera(
+        self, printer_id: Any, *, override: str | None = None
+    ) -> AsyncIterator[httpx.Response]:
+        """The camera's response, still open — an image, or a stream of them.
+
+        Kept as a context manager rather than read into memory: a live camera is
+        multipart and never ends, so the only sane thing to do with it is hand
+        the bytes on as they arrive.
+        """
+        target = self.camera_target(printer_id, override)
+        client = new_client(timeout=CAMERA_TIMEOUT)
+        try:
+            async with client.stream("GET", target, headers=self._headers()) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread())[:400].decode("utf-8", "replace")
+                    raise IntegrationError(
+                        PROVIDER_BAMBUDDY,
+                        f"Unexpected response from bambuddy at {target} "
+                        f"(HTTP {response.status_code})",
+                        status_code=response.status_code,
+                        body=body,
+                    )
+                yield response
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise TransportFailed(
+                PROVIDER_BAMBUDDY, transport_reason(exc, client, target)
+            ) from exc
+        finally:
+            await client.aclose()
 
     async def read_printer(self, printer_id: Any) -> dict[str, Any]:
         """One machine, asked about directly."""
@@ -1753,6 +1875,41 @@ async def with_healing(
     return await call()
 
 
+async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
+    """Whether this instance serves printer cameras — asked once, then remembered.
+
+    The alternative is drawing a camera on every card and letting each one fail,
+    which on a farm of ten is ten broken pictures and ten pointless requests
+    every time the page loads. The alternative to *that* is re-reading the
+    instance's document on every load, which is one pointless request instead of
+    ten but still one too many for a fact that does not change between releases.
+
+    So the answer is stored beside the connection: the path when there is one,
+    and a flag saying "asked, and this build has none" when there is not.
+    Re-validating under Settings clears the flag, which is the moment a Bambuddy
+    upgrade would have added the endpoint.
+    """
+    if client.explicit_paths.get("printer_camera"):
+        return True
+    if client.discovered_paths.get("printer_camera"):
+        return True
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY)
+    if payload is None:
+        return False
+    if payload.get("camera_checked"):
+        return False
+    spec = client.last_spec or await client.fetch_openapi()
+    client.last_spec = spec
+    found = (spec.get("discovered") or {}).get("printer_camera")
+    adopted = client.adopt_discovered({"printer_camera": found})
+    if adopted or (found or {}).get("path"):
+        await remember_paths(session, adopted or {"printer_camera": found["path"]})
+        return True
+    payload["camera_checked"] = True
+    await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
+    return False
+
+
 def _has_readings(printer: dict[str, Any]) -> bool:
     """Whether this row says anything about what the machine is doing now."""
     return any(
@@ -1780,9 +1937,20 @@ async def read_farm(
     farm screen that quietly drops one is worse than useless.
     """
     printers = await with_healing(session, client, ("printers",), client.list_printers)
+    cameras = bool(printers) and await ensure_camera(session, client)
+
+    def with_cameras(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Whether PrintFlow can put a picture on this card. A camera URL
+        # pointing somewhere else on the network is not one it will fetch.
+        for row in rows:
+            row["camera"] = cameras and client.camera_is_ours(row.get("camera_url"))
+        return rows
+
     live = any(_has_readings(row) for row in printers)
     if not printers or live:
-        return {"printers": printers, "detailed": live, "detail_error": None}
+        return {
+            "printers": with_cameras(printers), "detailed": live, "detail_error": None
+        }
 
     detailed: list[dict[str, Any]] = []
     failure: str | None = None
@@ -1815,7 +1983,7 @@ async def read_farm(
         detailed.append({**row, **{k: v for k, v in extra.items() if v is not None}})
     detailed.extend(printers[max_detail:])
     return {
-        "printers": detailed,
+        "printers": with_cameras(detailed),
         "detailed": any(_has_readings(row) for row in detailed),
         "detail_error": failure,
     }
