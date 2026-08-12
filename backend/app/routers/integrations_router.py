@@ -1072,27 +1072,80 @@ async def shipstation_tracking_key(
             status.HTTP_409_CONFLICT, "Connect ShipStation before adding a tracking key."
         )
     key = body.tracking_api_key.strip()
+
+    # The key is stored either way, and the check only reports. An earlier
+    # version refused to save a key its own probe disliked, which is the wrong
+    # way round: the operator is holding the key and PrintFlow is guessing at
+    # what a refusal means. The cost of storing a key that turns out not to
+    # work is that deliveries are not detected — which is exactly what happens
+    # if it is not stored, except now the reason is visible on this screen.
+    checked: dict[str, Any] = {"ok": None, "detail": None, "carriers": []}
     if key:
         client = ss_api.ShipStationClient({**payload, "tracking_api_key": key})
         try:
-            # A tracking number that cannot exist: a working key answers with a
-            # "no such parcel", a wrong one answers with "who are you". Both are
-            # errors to the client; only the second is one to report, and they
-            # are told apart by the status code rather than the wording.
-            await client.track(carrier_code="stamps_com", tracking_number="0" * 20)
+            carriers = await client.tracking_carriers()
+            checked["ok"] = True
+            checked["carriers"] = [
+                {
+                    "code": row.get("carrier_code") or row.get("carrierCode"),
+                    "name": row.get("friendly_name")
+                    or row.get("nickname")
+                    or row.get("carrier_code"),
+                }
+                for row in carriers
+            ]
+            checked["detail"] = (
+                f"ShipStation accepted it — {len(carriers)} carrier"
+                f"{'' if len(carriers) == 1 else 's'} visible."
+            )
         except IntegrationError as exc:
-            if exc.status_code in (401, 403):
-                await session.rollback()
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "ShipStation would not accept that tracking key. It is the V2 "
-                    "API key from Settings → Account → API Settings, not the API "
-                    "key and secret above.",
-                ) from exc
+            checked["ok"] = False
+            # Verbatim, including the status and whatever ShipStation wrote.
+            # Every guess PrintFlow makes about what a refusal means is a guess
+            # that can be wrong, and this one already was.
+            checked["detail"] = str(exc)
+
     payload["tracking_api_key"] = key
     await credentials.save(session, PROVIDER_SHIPSTATION, payload, mark_connected=False)
     await session.commit()
-    return {"tracking": bool(key)}
+    return {"tracking": bool(key), "checked": checked}
+
+
+@router.post("/shipstation/tracking-key/check")
+async def shipstation_tracking_check(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Ask ShipStation about the key already stored, and say what it answered.
+
+    Separate from saving because the two questions arrive at different moments:
+    the key was accepted months ago and deliveries have stopped, and the first
+    thing worth knowing is whether the key still works.
+    """
+    payload = await credentials.load(session, PROVIDER_SHIPSTATION)
+    if not (payload or {}).get("tracking_api_key"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "No tracking key is stored.")
+    client = ss_api.ShipStationClient(payload)
+    try:
+        carriers = await client.tracking_carriers()
+    except IntegrationError as exc:
+        return {"tracking": True, "checked": {"ok": False, "detail": str(exc), "carriers": []}}
+    return {
+        "tracking": True,
+        "checked": {
+            "ok": True,
+            "detail": (
+                f"ShipStation accepted it — {len(carriers)} carrier"
+                f"{'' if len(carriers) == 1 else 's'} visible."
+            ),
+            "carriers": [
+                {
+                    "code": row.get("carrier_code") or row.get("carrierCode"),
+                    "name": row.get("friendly_name") or row.get("nickname"),
+                }
+                for row in carriers
+            ],
+        },
+    }
 
 
 @router.get("/shipstation/stores")

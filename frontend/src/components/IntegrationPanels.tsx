@@ -24,6 +24,14 @@ interface Diagnosis {
   working: string[]
 }
 
+/** What ShipStation said when asked about a tracking key. `ok` is null when
+ *  nobody has asked yet. */
+interface TrackingCheck {
+  ok: boolean | null
+  detail: string | null
+  carriers: { code: string | null; name: string | null }[]
+}
+
 interface PanelProps {
   status: IntegrationStatus
   redirectUri?: string
@@ -993,6 +1001,7 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
   const [apiSecret, setApiSecret] = useState('')
   const [trackingKey, setTrackingKey] = useState('')
   const [trackingBusy, setTrackingBusy] = useState(false)
+  const [checked, setChecked] = useState<TrackingCheck | null>(null)
   const tracking = Boolean(status.detail.tracking)
   const [stores, setStores] = useState<any[]>([])
   const [selectedStore, setSelectedStore] = useState<number | null>(
@@ -1135,10 +1144,12 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
                 setTrackingBusy(true)
                 setError(null)
                 try {
-                  await api.post('/api/integrations/shipstation/tracking-key', {
-                    tracking_api_key: trackingKey.trim(),
-                  })
+                  const saved = await api.post<{ checked: TrackingCheck }>(
+                    '/api/integrations/shipstation/tracking-key',
+                    { tracking_api_key: trackingKey.trim() },
+                  )
                   setTrackingKey('')
+                  setChecked(saved.checked)
                   await onChange()
                 } catch (err) {
                   setError(errorMessage(err))
@@ -1153,11 +1164,57 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
           </div>
         </Field>
       ) : null}
+
+      {/* What ShipStation said, rather than what PrintFlow guessed it meant.
+          The key is stored either way — refusing to save a key on the strength
+          of a probe is how a correct key ends up rejected. */}
+      {checked?.ok === false ? (
+        <Alert tone="warning">
+          The key is saved, but ShipStation would not answer with it:
+          <code className="mt-1 block break-all rounded bg-white/70 px-2 py-1 text-xs">
+            {checked.detail}
+          </code>
+          <span className="mt-1 block text-xs">
+            It should be the V2 API key from ShipStation → Settings → Account →
+            API Settings. If that is what this is, the V2 API may not be enabled
+            on your plan — delivery detection stays off and nothing else changes.
+          </span>
+        </Alert>
+      ) : null}
+      {checked?.ok ? <Alert tone="success">{checked.detail}</Alert> : null}
+
       {status.connected && tracking ? (
-        <p className="text-xs text-emerald-800">
-          Delivery detection is on. Shipped parcels are checked periodically and
-          move to Complete when the carrier says they arrived.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-emerald-800">
+            Delivery detection is on. Shipped parcels are checked periodically
+            and move to Complete when the carrier says they arrived.
+          </p>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            disabled={trackingBusy}
+            onClick={async () => {
+              setTrackingBusy(true)
+              setError(null)
+              try {
+                // Re-checks the stored key: sending nothing new keeps it and
+                // asks ShipStation about it again.
+                const again = await api.post<{ checked: TrackingCheck }>(
+                  '/api/integrations/shipstation/tracking-key/check',
+                  {},
+                )
+                setChecked(again.checked)
+              } catch (err) {
+                setError(errorMessage(err))
+              } finally {
+                setTrackingBusy(false)
+              }
+            }}
+          >
+            {trackingBusy ? 'Checking…' : 'Check it now'}
+          </Button>
+        </div>
       ) : null}
       {error ? <Alert tone="error">{error}</Alert> : null}
     </div>

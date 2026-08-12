@@ -24,10 +24,11 @@ from app.integrations.shipstation import parse_tracking
 from app.models import (
     ORDER_COMPLETE,
     ORDER_SHIPPED,
+    PROVIDER_SHIPSTATION,
     AuditLog,
     Order,
 )
-from app.services import board, tracking
+from app.services import board, credentials, tracking
 
 from test_intake_pipeline import FakeQbo, seed_catalog  # noqa: F401
 
@@ -538,3 +539,142 @@ class TestRollupKnowsAboutComplete:
 
         detail = await board.load_order_detail(db, order.id)
         assert {line["state"] for line in detail["lines"]} == {"shipped"}
+
+
+class TestTrackingKeySetup:
+    """Storing the key that switches delivery detection on.
+
+    An earlier version refused to save a key its own probe disliked — and the
+    probe was wrong: it asked about a parcel, which needs a carrier code and a
+    tracking number to be right as well as the key, so "that carrier is not on
+    your account" came back as "your key is bad". A credential check must ask
+    the key about itself, and must not overrule the person holding it.
+    """
+
+    async def test_a_key_shipstation_likes_is_stored_and_confirmed(
+        self, signed_in, db, monkeypatch
+    ):
+        await _connect_shipstation(db)
+
+        async def carriers(self):
+            return [{"carrier_code": "usps", "friendly_name": "USPS"}]
+
+        monkeypatch.setattr(
+            "app.integrations.shipstation.ShipStationClient.tracking_carriers", carriers
+        )
+        response = await signed_in.post(
+            "/api/integrations/shipstation/tracking-key",
+            json={"tracking_api_key": "TEST-V2-KEY"},
+        )
+        body = response.json()
+        assert response.status_code == 200
+        assert body["tracking"] is True and body["checked"]["ok"] is True
+        assert body["checked"]["carriers"] == [{"code": "usps", "name": "USPS"}]
+
+    async def test_a_key_shipstation_refuses_is_still_stored(
+        self, signed_in, db, monkeypatch
+    ):
+        # The operator is holding the key; PrintFlow is guessing at what a
+        # refusal means. Refusing to save is how a correct key gets rejected.
+        await _connect_shipstation(db)
+
+        async def refuse(self):
+            raise IntegrationError(
+                "shipstation", "Forbidden", status_code=403, body="carrier not connected"
+            )
+
+        monkeypatch.setattr(
+            "app.integrations.shipstation.ShipStationClient.tracking_carriers", refuse
+        )
+        response = await signed_in.post(
+            "/api/integrations/shipstation/tracking-key",
+            json={"tracking_api_key": "MAYBE-FINE"},
+        )
+        body = response.json()
+        assert response.status_code == 200
+        assert body["tracking"] is True
+        assert body["checked"]["ok"] is False
+        # Verbatim, so the operator sees what ShipStation said rather than what
+        # PrintFlow decided it meant.
+        assert "403" in body["checked"]["detail"]
+        assert "carrier not connected" in body["checked"]["detail"]
+
+        stored = await credentials.load(db, PROVIDER_SHIPSTATION)
+        assert stored["tracking_api_key"] == "MAYBE-FINE"
+
+    async def test_the_check_asks_the_key_about_itself(self, signed_in, db, monkeypatch):
+        # Not about a parcel: that needs a carrier code and a tracking number to
+        # be right as well, and a refusal cannot say which one was wrong.
+        await _connect_shipstation(db)
+        asked: list[str] = []
+
+        async def spy(self, path, **params):
+            asked.append(path)
+            return []
+
+        monkeypatch.setattr(
+            "app.integrations.shipstation.ShipStationClient._tracking_call", spy
+        )
+        await signed_in.post(
+            "/api/integrations/shipstation/tracking-key",
+            json={"tracking_api_key": "K"},
+        )
+        assert asked == ["/v2/carriers"]
+
+    async def test_an_empty_key_switches_detection_back_off(self, signed_in, db):
+        await _connect_shipstation(db, tracking="OLD")
+        response = await signed_in.post(
+            "/api/integrations/shipstation/tracking-key", json={"tracking_api_key": ""}
+        )
+        assert response.json()["tracking"] is False
+        stored = await credentials.load(db, PROVIDER_SHIPSTATION)
+        assert stored["tracking_api_key"] == ""
+
+    async def test_a_stored_key_can_be_re_checked_later(
+        self, signed_in, db, monkeypatch
+    ):
+        # "It worked in March and deliveries stopped in June" is a real
+        # question, and the answer is not in the saving screen.
+        await _connect_shipstation(db, tracking="STORED")
+
+        async def gone(self):
+            raise IntegrationError("shipstation", "Unauthorized", status_code=401)
+
+        monkeypatch.setattr(
+            "app.integrations.shipstation.ShipStationClient.tracking_carriers", gone
+        )
+        body = (
+            await signed_in.post("/api/integrations/shipstation/tracking-key/check")
+        ).json()
+        assert body["checked"]["ok"] is False and "401" in body["checked"]["detail"]
+
+    async def test_re_checking_nothing_says_so(self, signed_in, db):
+        await _connect_shipstation(db)
+        response = await signed_in.post("/api/integrations/shipstation/tracking-key/check")
+        assert response.status_code == 409
+
+    async def test_saving_the_key_and_secret_does_not_wipe_the_tracking_key(
+        self, signed_in, db, monkeypatch
+    ):
+        await _connect_shipstation(db, tracking="KEEP-ME")
+
+        async def stores(self):
+            return []
+
+        monkeypatch.setattr(
+            "app.integrations.shipstation.ShipStationClient.list_stores", stores
+        )
+        await signed_in.post(
+            "/api/integrations/shipstation/config",
+            json={"api_key": "aaaa", "api_secret": "bbbb"},
+        )
+        stored = await credentials.load(db, PROVIDER_SHIPSTATION)
+        assert stored["tracking_api_key"] == "KEEP-ME"
+
+
+async def _connect_shipstation(db, tracking: str | None = None) -> None:
+    payload = {"api_key": "key", "api_secret": "secret"}
+    if tracking is not None:
+        payload["tracking_api_key"] = tracking
+    await credentials.save(db, PROVIDER_SHIPSTATION, payload)
+    await db.commit()

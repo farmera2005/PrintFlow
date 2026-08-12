@@ -256,10 +256,24 @@ optional.
 
 Without it nothing else changes: the tracking numbers are still links, Complete
 is still a column, and the 48-hour rule still applies — cards simply reach
-Complete by being dragged rather than on their own. The key is checked against
-ShipStation before it is stored, because a key that is quietly wrong looks
-exactly like a shop where nothing ever gets delivered, and that is a fault
-nobody would think to go looking for.
+Complete by being dragged rather than on their own.
+
+**The key is always stored, and the check only reports.** Pasting it asks
+ShipStation which carriers the key can see, and the panel says what came back —
+in ShipStation's own words, including the status code, if it came back badly.
+It does not refuse to save.
+
+That is deliberate, and it is a correction. The first version probed with a
+made-up parcel and refused any key that probe disliked, which is the wrong way
+round twice over. Asking about a parcel needs a carrier code and a tracking
+number to be right *as well as* the key, so a refusal could equally mean "that
+carrier is not on your account" — and it did: a perfectly good key was rejected
+with a confident message about being the wrong key. A credential check should
+ask the key about itself, and it should not overrule the person holding it. The
+cost of storing a key that turns out not to work is that deliveries are not
+detected, which is exactly what happens if it is not stored, except now the
+reason is on the screen. **Check it now** re-asks at any time, for when it
+worked in March and deliveries stopped in June.
 
 ### What the label costs, and what it cost
 

@@ -194,23 +194,28 @@ function IntervalsCard({
     }
   }
 
-  const rows: [string, string][] = [
-    ['etsy_minutes', 'Etsy receipt poll'],
-    ['bambuddy_minutes', 'Bambuddy status reconcile'],
-    ['shipstation_minutes', 'ShipStation order match'],
+  // Each row is [key, label, lowest, highest]. Parcels get their own bounds:
+  // a five-minute delivery poll is ten thousand requests a week for an answer
+  // that changes twice, and the per-parcel backoff would ignore most of them
+  // anyway.
+  const rows: [string, string, number, number][] = [
+    ['etsy_minutes', 'Etsy receipt poll', 1, 240],
+    ['bambuddy_minutes', 'Bambuddy status reconcile', 1, 240],
+    ['shipstation_minutes', 'ShipStation order match', 1, 240],
+    ['tracking_minutes', 'Delivery check', 5, 1440],
   ]
 
   return (
     <Card className="p-4">
       <h2 className="text-sm font-semibold text-ink-900">Poll intervals</h2>
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        {rows.map(([key, label]) => (
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {rows.map(([key, label, low, high]) => (
           <Field key={key} label={`${label} (min)`}>
             <input
               className={inputClass}
               type="number"
-              min={1}
-              max={240}
+              min={low}
+              max={high}
               value={values[key] ?? ''}
               onChange={(e) => setValues({ ...values, [key]: Number(e.target.value) })}
             />

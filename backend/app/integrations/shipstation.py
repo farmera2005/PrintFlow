@@ -55,8 +55,7 @@ class ShipStationClient:
     def can_track(self) -> bool:
         return bool(self.tracking_key)
 
-    async def track(self, *, carrier_code: str, tracking_number: str) -> dict[str, Any]:
-        """What the carrier says about one parcel, as ShipStation relays it."""
+    async def _tracking_call(self, path: str, **params: Any) -> Any:
         if not self.can_track:
             raise IntegrationError(
                 PROVIDER_SHIPSTATION,
@@ -67,20 +66,37 @@ class ShipStationClient:
             response = await request(
                 client,
                 "GET",
-                "/v2/tracking",
+                path,
                 provider=PROVIDER_SHIPSTATION,
                 headers={"API-Key": self.tracking_key, "Accept": "application/json"},
-                params={
-                    "carrier_code": carrier_code,
-                    "tracking_number": tracking_number,
-                },
+                params={k: v for k, v in params.items() if v is not None} or None,
             )
         try:
             return response.json() if response.content else {}
         except ValueError as exc:
             raise IntegrationError(
-                PROVIDER_SHIPSTATION, "ShipStation returned non-JSON from /v2/tracking"
+                PROVIDER_SHIPSTATION, f"ShipStation returned non-JSON from {path}"
             ) from exc
+
+    async def track(self, *, carrier_code: str, tracking_number: str) -> dict[str, Any]:
+        """What the carrier says about one parcel, as ShipStation relays it."""
+        found = await self._tracking_call(
+            "/v2/tracking", carrier_code=carrier_code, tracking_number=tracking_number
+        )
+        return found if isinstance(found, dict) else {}
+
+    async def tracking_carriers(self) -> list[dict[str, Any]]:
+        """The carriers this key can see — and, incidentally, whether it works.
+
+        The right question to ask a credential is one that needs nothing else
+        to be true. Asking about a *parcel* needs a carrier code and a tracking
+        number, so a refusal could mean the key is wrong, or that this account
+        has no such carrier, or that no such parcel exists. This asks the key
+        about itself.
+        """
+        data = await self._tracking_call("/v2/carriers")
+        rows = data if isinstance(data, list) else (data or {}).get("carriers") or []
+        return [row for row in rows if isinstance(row, dict)]
 
     def _headers(self) -> dict[str, str]:
         token = base64.b64encode(

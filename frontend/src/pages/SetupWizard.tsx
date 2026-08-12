@@ -295,6 +295,12 @@ function IntervalsStep({
       'ShipStation order match',
       'Only runs for orders not yet matched.',
     ],
+    [
+      'tracking_minutes',
+      'Delivery check',
+      'How often shipped parcels are asked about. Each parcel is asked less '
+        + 'often than this as its journey goes on.',
+    ],
   ]
 
   return (
