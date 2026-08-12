@@ -788,21 +788,87 @@ def _flatten(
     return out
 
 
+# The colours filament is actually sold in, for the builds that send a word
+# instead of a code. Not a general colour table — anything not here keeps its
+# word and simply goes without a swatch, which is better than guessing wrong
+# about a spool somebody is about to match a print to.
+COLOUR_WORDS = {
+    "black": "#1a1a1a", "white": "#f5f5f5", "grey": "#9a9a9a", "gray": "#9a9a9a",
+    "silver": "#c8c8c8", "red": "#d32f2f", "orange": "#f57c00", "yellow": "#fbc02d",
+    "green": "#388e3c", "blue": "#1976d2", "purple": "#7b1fa2", "pink": "#e91e63",
+    "brown": "#795548", "gold": "#c9a227", "beige": "#e8dcc4", "natural": "#efe6d5",
+    "clear": "#dfe7ea", "transparent": "#dfe7ea", "cream": "#f2e8d5",
+}
+
+
+def _colour_hex(value: Any) -> str | None:
+    """A spool's colour as something that can be drawn, or nothing.
+
+    Bambu sends eight hex digits — the colour then its opacity — and other
+    builds send six, three, a comma-separated triple, or the name of a colour.
+    Anything else is left alone: a swatch is only useful if it is the colour
+    that is actually on the machine, so a value that cannot be read confidently
+    is shown as the word the instance sent rather than as an approximation.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().lower().lstrip("#")
+    if not text:
+        return None
+    if text in COLOUR_WORDS:
+        return COLOUR_WORDS[text]
+    # An eight-digit code is RGBA and the alpha is the last pair, not the first:
+    # taking the wrong end turns every opaque spool into a shade of nothing.
+    if re.fullmatch(r"[0-9a-f]{6}([0-9a-f]{2})?", text):
+        return f"#{text[:6]}"
+    if re.fullmatch(r"[0-9a-f]{3}", text):
+        return "#" + "".join(digit * 2 for digit in text)
+    triple = re.fullmatch(r"(?:rgba?\()?\s*(\d{1,3})\D+(\d{1,3})\D+(\d{1,3})[\s,)0-9.]*", text)
+    if triple and all(int(part) <= 255 for part in triple.groups()):
+        return "#" + "".join(f"{int(part):02x}" for part in triple.groups())
+    return None
+
+
+def _colour_label(value: Any) -> str | None:
+    """What to write beside the swatch — the word, never the code.
+
+    A code next to the colour it describes is noise: the square already said
+    it. A word is not, because "Matte Charcoal" is what is written on the reel
+    the operator is hunting for, and because a swatch on its own is no use to
+    anyone reading the screen rather than looking at it.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    code = re.fullmatch(r"#?[0-9a-fA-F]{3,8}", text) or re.fullmatch(
+        r"rgba?\(.*\)|[\d\s,.]+", text
+    )
+    return None if code else text
+
+
 def _trays(rows: Any) -> list[dict[str, Any]]:
     """A list of spool rows, however this build spells a spool's columns."""
     trays = []
     for index, row in enumerate(rows if isinstance(rows, list) else []):
         if not isinstance(row, dict):
             continue
+        colour = _first_scalar(row, "colour", "color", "tray_color", "hex", "rgb")
         trays.append(
             {
                 "slot": _first_scalar(row, "slot", "id", "tray_id") or index + 1,
                 "type": _first_scalar(
                     row, "type", "filament_type", "tray_type", "material"
                 ),
-                "colour": _first_scalar(
-                    row, "colour", "color", "tray_color", "hex", "rgb"
+                # Which PLA, where the build says. "PLA Matte" and "PLA Basic"
+                # print differently and the operator is choosing between reels.
+                "brand": _first_scalar(
+                    row, "brand", "sub_brand", "tray_sub_brands", "filament_brand",
+                    "vendor",
                 ),
+                "colour": _colour_label(colour),
+                "colour_hex": _colour_hex(colour),
                 "remaining": _rounded(
                     _first_scalar(row, "remaining", "remain", "percent")
                 ),
@@ -864,14 +930,20 @@ def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
             return trays
     single = _first_scalar(look, "filament_type", "material", "loaded_filament")
     if single:
-        return [
-            {
-                "slot": 1,
-                "type": single,
-                "colour": _first_scalar(look, "filament_colour", "filament_color"),
-                "remaining": None,
-            }
-        ]
+        # The same row, read as one spool — so it goes through the same reader
+        # and comes back with the same colour handling as any tray.
+        return _trays(
+            [
+                {
+                    "slot": 1,
+                    "type": single,
+                    "colour": _first_scalar(
+                        look, "filament_colour", "filament_color"
+                    ),
+                    "brand": _first_scalar(look, "filament_brand", "brand"),
+                }
+            ]
+        )
     return []
 
 

@@ -6,6 +6,7 @@ import type {
   FarmOverview,
   FarmPrinter,
   FarmSummary,
+  FilamentSpool,
   QueueJob,
 } from '../lib/types'
 import {
@@ -65,6 +66,39 @@ function temperature(now: number | null, target: number | null): string | null {
  *  low; it is silent, which is a different thing and must not be coloured. */
 function lowSpool(remaining: number | null): boolean {
   return remaining !== null && remaining <= 10
+}
+
+/** How a spool reads in one line: "PLA Matte black 82%".
+ *
+ *  Everything the build actually said and nothing invented — a machine that
+ *  reports a type and no colour says the type, and one that reports neither
+ *  is not described as an unknown spool, because it may be an empty slot. */
+function spoolText(spool: FilamentSpool): string {
+  return [
+    spool.brand || spool.type,
+    spool.colour,
+    spool.remaining === null ? null : `${spool.remaining}%`,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+/** The colour as a square, where the machine gave one that can be drawn.
+ *
+ *  A ring rather than a bare block, because white and natural filament are
+ *  real and would otherwise be an invisible square on a white card. */
+function Swatch({ spool, size = 'sm' }: { spool: FilamentSpool; size?: 'sm' | 'md' }) {
+  if (!spool.colour_hex) return null
+  return (
+    <span
+      aria-hidden
+      className={cx(
+        'inline-block shrink-0 rounded-full ring-1 ring-inset ring-ink-900/20',
+        size === 'md' ? 'h-3.5 w-3.5' : 'h-2.5 w-2.5',
+      )}
+      style={{ backgroundColor: spool.colour_hex }}
+    />
+  )
 }
 
 function duration(minutes: number | null): string | null {
@@ -373,16 +407,19 @@ function PrinterCard({
             <span
               key={String(spool.slot)}
               className={cx(
-                'rounded px-1.5 py-0.5',
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5',
                 lowSpool(spool.remaining)
                   ? 'bg-amber-100 text-amber-900'
                   : 'bg-ink-100 text-ink-600',
               )}
-              title={`Slot ${spool.slot}${spool.colour ? ` · ${spool.colour}` : ''}${
-                spool.remaining === null ? '' : ` · ${spool.remaining}%`
-              }${lowSpool(spool.remaining) ? ' — nearly empty' : ''}`}
+              title={`Slot ${spool.slot} · ${spoolText(spool) || 'nothing reported'}${
+                lowSpool(spool.remaining) ? ' — nearly empty' : ''
+              }`}
             >
-              {spool.type ?? '—'}
+              <Swatch spool={spool} />
+              {/* The colour word only when there is no square to show it: four
+                  chips of "PLA black 82%" is a card nobody reads. */}
+              {spool.type ?? spool.colour ?? '—'}
               {spool.remaining === null ? '' : ` ${spool.remaining}%`}
             </span>
           ))}
@@ -827,10 +864,28 @@ function PrinterDetail({
                       lowSpool(spool.remaining) ? 'bg-amber-50' : 'bg-ink-50',
                     )}
                   >
-                    <span className="font-medium text-ink-700">{spool.slot}</span>
-                    <span className="text-ink-900">{spool.type ?? 'unknown'}</span>
+                    <span className="w-3 shrink-0 font-medium text-ink-700">
+                      {spool.slot}
+                    </span>
+                    <Swatch spool={spool} size="md" />
+                    {/* Empty rather than "unknown": a slot that reports nothing
+                        may simply have nothing in it, and calling that an
+                        unknown filament sends somebody to check a spool that
+                        is not there. */}
+                    <span className="min-w-0 truncate text-ink-900">
+                      {spool.brand ?? spool.type ?? (
+                        <span className="text-ink-400">empty</span>
+                      )}
+                    </span>
+                    {/* The type as well as the brand, since "PLA Matte" is the
+                        reel and "PLA" is what the slicer needs to agree with. */}
+                    {spool.brand && spool.type && !spool.brand.includes(spool.type) ? (
+                      <span className="shrink-0 text-ink-500">{spool.type}</span>
+                    ) : null}
                     {spool.colour ? (
-                      <span className="text-ink-500">{spool.colour}</span>
+                      <span className="min-w-0 truncate text-ink-500">
+                        {spool.colour}
+                      </span>
                     ) : null}
                     {spool.remaining === null ? null : (
                       <span

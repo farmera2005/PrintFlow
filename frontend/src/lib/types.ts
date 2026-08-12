@@ -310,6 +310,21 @@ export interface BambuddyPrinter {
   online: boolean | null
 }
 
+/** One loaded spool — an AMS tray, or the only spool on a machine without one. */
+export interface FilamentSpool {
+  slot: number | string
+  /** PLA, PETG, ABS… as the machine spells it. */
+  type: string | null
+  /** Which PLA — "PLA Matte", "PLA Basic" — where the build says. */
+  brand: string | null
+  /** The colour as a word, when the build sent one. Null when it sent a code,
+   *  because the swatch already says what the code said. */
+  colour: string | null
+  /** The colour as something drawable, when it could be read confidently. */
+  colour_hex: string | null
+  remaining: number | null
+}
+
 /** One machine on the farm, with whatever this Bambuddy will say about it.
  *
  *  Every reading is optional — builds differ on what they report, and a null is
@@ -346,7 +361,7 @@ export interface FarmPrinter extends BambuddyPrinter {
   total_print_time: number | null
   prints_completed: number | null
   /** What is loaded — one entry per AMS tray, or one for a lone spool. */
-  filament: { slot: number | string; type: string | null; colour: string | null; remaining: number | null }[]
+  filament: FilamentSpool[]
   /** Every field the instance sent, flattened and untouched. This is what
    *  "all available metrics" has to mean: PrintFlow cannot know what a given
    *  build reports, so the machine's own page shows the lot. */

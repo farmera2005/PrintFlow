@@ -21,6 +21,7 @@ from app.integrations.bambuddy import (
     BambuddyClient,
     camera_paths,
     discover_paths,
+    _trays,
     filament_rows,
     parse_printer,
     read_farm,
@@ -1033,7 +1034,10 @@ class TestFilament:
             {"id": 1, "filament_type": "PLA", "filament_color": "orange"}
         )
         assert row["filament"] == [
-            {"slot": 1, "type": "PLA", "colour": "orange", "remaining": None}
+            {
+                "slot": 1, "type": "PLA", "brand": None, "colour": "orange",
+                "colour_hex": "#f57c00", "remaining": None,
+            }
         ]
 
     def test_a_machine_that_says_nothing_about_filament(self):
@@ -1464,3 +1468,64 @@ class TestFillFilament:
         # Only the first read had a document to look at; after that the stored
         # "this build has none" answers it.
         assert client.specs_read == 0
+
+
+class TestSpoolColour:
+    """Builds send a colour as a code, a triple, or a word, and the operator
+    wants to see the colour rather than read the code for it."""
+
+    def test_bambus_eight_digit_code_is_rgb_then_opacity(self):
+        # The alpha is the last pair. Reading the wrong end turns every opaque
+        # spool into a shade of nothing.
+        [tray] = _trays([{"type": "PLA", "tray_color": "F55C1AFF"}])
+        assert tray["colour_hex"] == "#f55c1a"
+
+    def test_six_and_three_digit_codes(self):
+        assert _trays([{"color": "#00AE42"}])[0]["colour_hex"] == "#00ae42"
+        assert _trays([{"color": "fff"}])[0]["colour_hex"] == "#ffffff"
+
+    def test_a_triple_however_it_is_written(self):
+        for raw in ("204,0,0", "rgb(204, 0, 0)", "rgba(204,0,0,1)"):
+            assert _trays([{"color": raw}])[0]["colour_hex"] == "#cc0000", raw
+
+    def test_a_colour_filament_is_actually_sold_in(self):
+        assert _trays([{"color": "Black"}])[0]["colour_hex"] == "#1a1a1a"
+
+    def test_a_word_nobody_can_draw_keeps_the_word_and_gets_no_swatch(self):
+        # Better an honest name than a square in roughly the wrong colour —
+        # somebody is about to match a print to this reel.
+        [tray] = _trays([{"color": "Galaxy Purple"}])
+        assert (tray["colour"], tray["colour_hex"]) == ("Galaxy Purple", None)
+
+    def test_a_code_is_not_repeated_as_a_label(self):
+        # The square already said it.
+        for raw in ("F55C1AFF", "#00AE42", "204,0,0", "rgb(1,2,3)"):
+            assert _trays([{"color": raw}])[0]["colour"] is None, raw
+
+    def test_a_word_is_kept_beside_its_swatch(self):
+        # A swatch alone is no use to somebody reading the screen.
+        [tray] = _trays([{"color": "black"}])
+        assert (tray["colour"], tray["colour_hex"]) == ("black", "#1a1a1a")
+
+    def test_nonsense_is_neither_a_swatch_nor_a_crash(self):
+        for raw in ("", "   ", None, True, "1234567890", []):
+            [tray] = _trays([{"type": "PLA", "color": raw}])
+            assert tray["colour_hex"] is None, raw
+
+    def test_which_pla_it_is(self):
+        # "PLA Matte" and "PLA Basic" print differently and the operator is
+        # choosing between reels, not between materials.
+        [tray] = _trays([{"tray_type": "PLA", "tray_sub_brands": "PLA Matte"}])
+        assert (tray["brand"], tray["type"]) == ("PLA Matte", "PLA")
+
+    def test_a_lone_spool_gets_the_same_treatment_as_a_tray(self):
+        [tray] = parse_printer(
+            {"id": 1, "filament_type": "PLA", "filament_color": "00AE42FF"}
+        )["filament"]
+        assert (tray["type"], tray["colour_hex"]) == ("PLA", "#00ae42")
+
+    def test_the_colour_survives_the_whole_farm_read(self):
+        row = parse_printer(
+            {"id": 1, "ams": [{"tray_type": "PLA", "tray_color": "000000FF"}]}
+        )
+        assert row["filament"][0]["colour_hex"] == "#000000"

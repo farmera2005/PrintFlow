@@ -613,12 +613,30 @@ questions are different:
 
 ### What is loaded
 
-Filament shows as a chip per tray on the card — material and remaining
-percentage — and in full on the machine's own page, with the colour and slot
-number. A tray at a tenth of a reel or less is tinted amber and labelled
-*nearly empty*, because that is the level at which starting a long print stops
-being a safe thing to do. A machine that reports no level at all is left plain:
-silent is not the same as low, and colouring it would invent a reading.
+Filament shows as a chip per tray on the card — a dot in the spool's own
+colour, the material, and how much is left — and in full on the machine's own
+page, with the slot number and which PLA it is: "PLA Matte" and "PLA Basic"
+print differently, and the operator is choosing between reels rather than
+between materials.
+
+The colour is drawn rather than spelled out, because a cell reading `F55C1AFF`
+is a code for a colour rather than the colour. Bambu sends eight hex digits —
+the colour then its opacity, and the opacity is the *last* pair, so reading the
+wrong end turns every opaque spool into a shade of nothing. Six digits, three,
+a comma-separated triple and the names of the colours filament is actually sold
+in all work too. Anything else keeps the word the instance sent and goes
+without a swatch: "Galaxy Purple" is what is written on the reel somebody is
+hunting for, and a square in roughly the wrong colour is worse than no square.
+Where there is a word it is kept beside the swatch as well, since a colour on
+its own is no use to anyone reading the screen rather than looking at it.
+
+A tray at a tenth of a reel or less is tinted amber and labelled *nearly
+empty*, because that is the level at which starting a long print stops being a
+safe thing to do. A machine that reports no level at all is left plain: silent
+is not the same as low, and colouring it would invent a reading. A slot that
+reports nothing at all reads as *empty* rather than as an unknown filament — it
+may simply have nothing in it, and calling that unknown sends somebody to check
+a spool that is not there.
 
 Where that comes from depends on the build, and PrintFlow handles both without
 being told which it has. Most instances put the AMS on the printer row itself,
