@@ -1013,6 +1013,11 @@ async def _bambuddy_client(session: AsyncSession) -> bambuddy_api.BambuddyClient
 class ShipStationConfigRequest(BaseModel):
     api_key: str = Field(min_length=4)
     api_secret: str = Field(min_length=4)
+    # ShipStation's newer API, on its own host with its own credential. The
+    # only thing that will say whether a parcel arrived — the key/secret above
+    # cannot — and entirely optional: without it PrintFlow simply never moves a
+    # card to Complete on its own. Empty string clears a stored one.
+    tracking_api_key: str | None = None
 
 
 @router.post("/shipstation/config")
@@ -1027,6 +1032,10 @@ async def shipstation_config(
         "api_key": body.api_key.strip(),
         "api_secret": body.api_secret.strip(),
     }
+    # None means "leave whatever is stored alone", so saving the key/secret
+    # from a form that never shows the tracking key cannot wipe it.
+    if body.tracking_api_key is not None:
+        payload["tracking_api_key"] = body.tracking_api_key.strip()
     client = ss_api.ShipStationClient(payload)
     try:
         stores = await client.list_stores()
@@ -1037,7 +1046,53 @@ async def shipstation_config(
     payload["stores"] = stores
     await credentials.save(session, PROVIDER_SHIPSTATION, payload)
     await session.commit()
-    return {"stores": stores}
+    return {"stores": stores, "tracking": bool(payload.get("tracking_api_key"))}
+
+
+class TrackingKeyRequest(BaseModel):
+    # Empty clears it, which is how delivery detection is switched back off.
+    tracking_api_key: str = Field(default="")
+
+
+@router.post("/shipstation/tracking-key")
+async def shipstation_tracking_key(
+    body: TrackingKeyRequest,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Turn delivery detection on, by pasting the key that can answer.
+
+    Checked against the instance before it is stored, because a key that is
+    quietly wrong looks exactly like a shop where nothing ever gets delivered —
+    and that is a fault nobody would think to go looking for.
+    """
+    payload = await credentials.load(session, PROVIDER_SHIPSTATION)
+    if payload is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Connect ShipStation before adding a tracking key."
+        )
+    key = body.tracking_api_key.strip()
+    if key:
+        client = ss_api.ShipStationClient({**payload, "tracking_api_key": key})
+        try:
+            # A tracking number that cannot exist: a working key answers with a
+            # "no such parcel", a wrong one answers with "who are you". Both are
+            # errors to the client; only the second is one to report, and they
+            # are told apart by the status code rather than the wording.
+            await client.track(carrier_code="stamps_com", tracking_number="0" * 20)
+        except IntegrationError as exc:
+            if exc.status_code in (401, 403):
+                await session.rollback()
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "ShipStation would not accept that tracking key. It is the V2 "
+                    "API key from Settings → Account → API Settings, not the API "
+                    "key and secret above.",
+                ) from exc
+    payload["tracking_api_key"] = key
+    await credentials.save(session, PROVIDER_SHIPSTATION, payload, mark_connected=False)
+    await session.commit()
+    return {"tracking": bool(key)}
 
 
 @router.get("/shipstation/stores")

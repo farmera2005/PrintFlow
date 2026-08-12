@@ -35,6 +35,8 @@ class TestSetupAndAuth:
             "etsy_minutes": 5,
             "bambuddy_minutes": 2,
             "shipstation_minutes": 10,
+            # Parcels do not move on a ten-minute timer.
+            "tracking_minutes": 30,
         }
 
     async def test_creating_the_admin_signs_you_in(self, client):
@@ -85,6 +87,8 @@ class TestSetupAndAuth:
             "etsy_minutes": 240,
             "bambuddy_minutes": 1,
             "shipstation_minutes": 15,
+            # Untouched by this request, so it keeps its default.
+            "tracking_minutes": 30,
         }
 
     async def test_finishing_setup_flips_the_flag(self, signed_in):
@@ -362,6 +366,7 @@ class TestBoardAndOverrides:
             "assembly",
             "ready_to_ship",
             "shipped",
+            "complete",
             "cancelled",
         ]
         new_column = body["columns"][0]

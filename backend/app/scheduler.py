@@ -22,9 +22,18 @@ from .models import (
     PROVIDER_ETSY,
     PROVIDER_QBO,
     PROVIDER_SHIPSTATION,
+    ORDER_SHIPPED,
     Order,
 )
-from .services import credentials, finance, intake, printing, shipping, sync_log
+from .services import (
+    credentials,
+    finance,
+    intake,
+    printing,
+    shipping,
+    sync_log,
+    tracking,
+)
 from .services.credentials import IntegrationNotConfigured
 from .services.settings_store import get_poll_intervals, is_setup_complete
 
@@ -33,6 +42,7 @@ log = logging.getLogger("printflow.scheduler")
 JOB_ETSY = "etsy_receipt_poll"
 JOB_BAMBUDDY = "bambuddy_status_reconcile"
 JOB_SHIPSTATION = "shipstation_order_match"
+JOB_TRACKING = "shipment_delivery_poll"
 JOB_QBO = "qbo_token_refresh"
 
 # The QBO refresh job is cheap and has no configurable interval; it only acts
@@ -185,6 +195,54 @@ async def match_shipstation() -> dict[str, Any]:
             return stats
 
 
+async def poll_tracking() -> dict[str, Any]:
+    """Ask the carrier about every parcel that is due a check.
+
+    Separate from the order-matching job on purpose. That one runs every ten
+    minutes because a ShipStation import lags by an hour; this one is about
+    parcels crossing a country, and the two have nothing to say to each other.
+    A shop with no tracking key skips it entirely and silently — not having
+    turned delivery detection on is not a fault to report every half hour.
+    """
+    async with session_scope() as session:
+        if not await is_setup_complete(session):
+            return {"skipped": "setup incomplete"}
+        waiting = (
+            await session.execute(
+                select(Order.id)
+                .where(
+                    Order.status == ORDER_SHIPPED,
+                    Order.tracking_number.isnot(None),
+                )
+                .limit(1)
+            )
+        ).first()
+        if not waiting:
+            return {"skipped": "nothing in the post"}
+        async with sync_log.run(session, JOB_TRACKING) as record:
+            await session.commit()
+            try:
+                stats = await tracking.poll_deliveries(session)
+            except IntegrationNotConfigured:
+                record.note("ShipStation not connected")
+                await session.commit()
+                return {"skipped": "not connected"}
+            except IntegrationError as exc:
+                await credentials.mark_error(session, PROVIDER_SHIPSTATION, str(exc))
+                await session.commit()
+                raise
+            if stats.get("skipped"):
+                record.note(str(stats["skipped"]))
+            else:
+                record.note(
+                    f"checked {stats['checked']}, delivered {stats['delivered']}, "
+                    f"still moving {stats['moving']}"
+                    + (f", {stats['failed']} would not answer" if stats["failed"] else "")
+                )
+            await session.commit()
+            return stats
+
+
 async def refresh_qbo_token() -> dict[str, Any]:
     """Refresh proactively at <10 minutes remaining (§6)."""
     async with session_scope() as session:
@@ -213,6 +271,7 @@ JOBS: dict[str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]] = {
     JOB_ETSY: poll_etsy,
     JOB_BAMBUDDY: reconcile_bambuddy,
     JOB_SHIPSTATION: match_shipstation,
+    JOB_TRACKING: poll_tracking,
     JOB_QBO: refresh_qbo_token,
 }
 
@@ -258,6 +317,7 @@ async def configure_jobs() -> None:
         JOB_ETSY: intervals["etsy_minutes"],
         JOB_BAMBUDDY: intervals["bambuddy_minutes"],
         JOB_SHIPSTATION: intervals["shipstation_minutes"],
+        JOB_TRACKING: intervals["tracking_minutes"],
         JOB_QBO: QBO_CHECK_MINUTES,
     }
     for job_id, minutes in plan.items():

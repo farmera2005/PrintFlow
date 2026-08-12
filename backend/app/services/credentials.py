@@ -157,6 +157,12 @@ def _public_detail(provider: str, payload: dict[str, Any]) -> dict[str, Any]:
             "store_id": payload.get("store_id"),
             "store_name": payload.get("store_name"),
             "api_key_hint": _hint(payload.get("api_key")),
+            # Whether delivery detection is switched on — not the key itself.
+            # The board needs to be able to say why nothing ever reaches
+            # Complete on its own, and "you have not pasted the tracking key"
+            # is a far better answer than silence.
+            "tracking": bool(payload.get("tracking_api_key")),
+            "tracking_key_hint": _hint(payload.get("tracking_api_key")),
         }
     return {}
 

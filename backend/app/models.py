@@ -101,6 +101,9 @@ ORDER_IN_PRODUCTION = "in_production"
 ORDER_ASSEMBLY = "assembly"
 ORDER_READY_TO_SHIP = "ready_to_ship"
 ORDER_SHIPPED = "shipped"
+# Delivered, and done with. The one column an order reaches on its own — the
+# carrier says so — and the only one a card leaves the board from.
+ORDER_COMPLETE = "complete"
 ORDER_CANCELLED = "cancelled"
 
 ORDER_STATUSES = (
@@ -109,12 +112,36 @@ ORDER_STATUSES = (
     ORDER_ASSEMBLY,
     ORDER_READY_TO_SHIP,
     ORDER_SHIPPED,
+    ORDER_COMPLETE,
     ORDER_CANCELLED,
 )
 
 # Every column the board draws, Cancelled included: a card has to be draggable
 # to any status, and one you cannot drag to is not a status the board offers.
 BOARD_COLUMNS = ORDER_STATUSES
+
+# How long a delivered order stays on the board before the board stops drawing
+# it. The order is untouched — it is in the Orders tab with all of its history,
+# and nothing is ever deleted. This is about a board that would otherwise only
+# ever grow.
+COMPLETE_BOARD_HOURS = 48
+
+# What a carrier is saying about a parcel, in our words. Carriers each have
+# their own vocabulary and their own codes; these are the five states that
+# change what anybody would do.
+TRACK_UNKNOWN = "unknown"
+TRACK_ACCEPTED = "accepted"
+TRACK_IN_TRANSIT = "in_transit"
+TRACK_DELIVERED = "delivered"
+TRACK_EXCEPTION = "exception"
+
+TRACKING_STATUSES = (
+    TRACK_UNKNOWN,
+    TRACK_ACCEPTED,
+    TRACK_IN_TRANSIT,
+    TRACK_DELIVERED,
+    TRACK_EXCEPTION,
+)
 
 JOB_PENDING = "pending"
 JOB_QUEUED = "queued"
@@ -577,6 +604,29 @@ class Order(Base):
     label_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     label_currency: Mapped[str | None] = mapped_column(Text)
 
+    # What the carrier last said about the parcel, and when it said it. Kept on
+    # the order rather than fetched for the screen: the board would otherwise
+    # make one carrier request per card per refresh, and the answer changes a
+    # few times over several days rather than every fifteen seconds.
+    tracking_status: Mapped[str | None] = mapped_column(Text)
+    # The carrier's own sentence — "Left with an individual at 2:03pm". Worth
+    # keeping verbatim: it is the part that answers "delivered where?".
+    tracking_detail: Mapped[str | None] = mapped_column(Text)
+    # Where a person can go and read it themselves. Stored because the carrier
+    # gives a better link than one assembled from a code and a number.
+    tracking_url: Mapped[str | None] = mapped_column(Text)
+    tracking_status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tracking_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    tracking_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # When the carrier said it arrived. The fact; `completed_at` is the board's
+    # bookkeeping about it, and they differ when somebody moves a card by hand.
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When this order entered the Complete column, however it got there. The
+    # 48-hour clock runs from here, so dragging a card out and back restarts it.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Where it is going, as Etsy sent it. Kept apart from `raw` because a
     # despatch note is read far more often than a receipt payload is, and
     # because this is the one part of an order somebody reads out loud.
@@ -609,7 +659,8 @@ class Order(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status in ('new','in_production','assembly','ready_to_ship','shipped','cancelled')",
+            "status in ('new','in_production','assembly','ready_to_ship','shipped',"
+            "'complete','cancelled')",
             name="ck_orders_status",
         ),
         CheckConstraint("label_cost >= 0", name="ck_orders_label_cost_not_negative"),

@@ -7,9 +7,11 @@ import { Alert, Badge, Card, EmptyState, Spinner, cx, inputClass } from '../comp
 
 /** Every order, including the ones the board does not draw.
  *
- * The board has five live columns, so a cancelled order vanishes from it
- * entirely and a shipped one scrolls away. This is the way back to any of
- * them — the same drawer, reachable by number or buyer.
+ * A cancelled order never appears on the board, a shipped one scrolls away,
+ * and a delivered one is taken off it two days after it arrives. None of them
+ * are deleted — deleting an order would delete what it earned and what it
+ * cost — so this is the way back to any of them, the same drawer, reachable
+ * by number or buyer.
  */
 
 const STATUS_CLASSES: Record<OrderStatus, string> = {
@@ -18,6 +20,7 @@ const STATUS_CLASSES: Record<OrderStatus, string> = {
   assembly: 'bg-violet-100 text-violet-800 ring-violet-300',
   ready_to_ship: 'bg-indigo-100 text-indigo-800 ring-indigo-300',
   shipped: 'bg-emerald-100 text-emerald-800 ring-emerald-300',
+  complete: 'bg-emerald-100 text-emerald-900 ring-emerald-400',
   cancelled: 'bg-red-100 text-red-800 ring-red-300',
 }
 
@@ -28,6 +31,7 @@ const FILTERS: { key: OrderStatus | 'all'; label: string }[] = [
   { key: 'assembly', label: COLUMN_LABELS.assembly },
   { key: 'ready_to_ship', label: COLUMN_LABELS.ready_to_ship },
   { key: 'shipped', label: COLUMN_LABELS.shipped },
+  { key: 'complete', label: COLUMN_LABELS.complete },
   { key: 'cancelled', label: 'Cancelled' },
 ]
 

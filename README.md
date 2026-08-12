@@ -174,10 +174,13 @@ because old orders still point at them.
 
 ## The board, and who moves the cards
 
-**Nothing moves a card except you.** Not intake, not a finished plate, not
-buying a label. Drag a card to any column, Cancelled included; the drawer also
-has a **Move** button, which is the way to do it on a phone, since dragging
-needs a mouse.
+**Nothing moves a card except you, and the carrier.** Not intake, not a
+finished plate, not buying a label. Drag a card to any column, Cancelled
+included; the drawer also has a **Move** button, which is the way to do it on a
+phone, since dragging needs a mouse. The single exception is delivery: when the
+carrier says the parcel arrived, the card moves itself to **Complete** — see
+[Delivery](#delivery-and-the-complete-column). That is the one thing on this
+board nobody in the shop can observe, and the one status nobody has to set.
 
 This is a deliberate change from how it used to work. The rules can see that
 four plates came off the printers; they cannot see that the parcel is still on
@@ -206,6 +209,57 @@ and that includes the rules: they never suggest Cancelled, because cancelling is
 decided rather than observed.
 
 Every move is written to the audit log with the note you gave it.
+
+### Delivery, and the Complete column
+
+Shipped is not finished — the parcel is in a van. The column used to hold the
+order posted this morning and the one that arrived last Tuesday with nothing to
+tell them apart, and it only ever grew.
+
+**The tracking number is a link.** It goes to that carrier's own tracking page:
+USPS, UPS, FedEx, DHL, OnTrac, Canada Post, Royal Mail, Australia Post and a
+few others, plus the resellers — a label bought through Stamps.com or Endicia
+is a USPS parcel, and USPS is who can say where it is. A carrier PrintFlow does
+not recognise gets a number you can copy and no link, because a link to the
+wrong carrier's "not found" page looks like an answer.
+
+**Parcels are checked on their own.** Every shipped order with a tracking
+number is asked about periodically, and when the carrier says delivered the
+card moves to **Complete** with the carrier's own sentence as its note —
+"Left with an individual at 2:03pm" is the part that answers *delivered where?*.
+The check backs off as a journey goes on: hours apart at first, half a day in
+the middle, and after about a month of a parcel that never arrives it stops
+asking and leaves the card in Shipped where somebody will see it. An attempted
+delivery is not a delivery, and a carrier that says "not delivered" does not
+move anything — the standardised status code decides, never the wording beside
+it. One parcel the carrier will not discuss is logged and skipped rather than
+stopping the rest.
+
+**Two days later the board stops drawing it.** The clock runs from when the
+card entered Complete, however it got there, so dragging one out and back gives
+it two fresh days. Each Complete card says how long it has left rather than
+just disappearing one morning.
+
+**Nothing is ever deleted.** A card leaving the board is a card the board
+stops drawing — the order is in the Orders tab with its lines, its money, its
+label and its whole history, filterable to Complete. Deleting an order would
+delete what it earned and what it cost.
+
+#### Switching it on
+
+Delivery detection needs a credential PrintFlow does not otherwise have.
+ShipStation's original API — the key and secret that import orders and buy
+labels — has no opinion about whether anything arrived; only their newer API
+answers that, on a different host with a different key from the same account.
+So there is a **Tracking API key** box under Settings → ShipStation, and it is
+optional.
+
+Without it nothing else changes: the tracking numbers are still links, Complete
+is still a column, and the 48-hour rule still applies — cards simply reach
+Complete by being dragged rather than on their own. The key is checked against
+ShipStation before it is stored, because a key that is quietly wrong looks
+exactly like a shop where nothing ever gets delivered, and that is a fault
+nobody would think to go looking for.
 
 ### What the label costs, and what it cost
 
@@ -1213,12 +1267,13 @@ be decrypted — back it up alongside the database.
 
 ## The board
 
-`New → In Production → Assembly → Ready to Ship → Shipped`
+`New → In Production → Assembly → Ready to Ship → Shipped → Complete`
 
-Cards move because the data moved — dragging is deliberately disabled. Manual
-overrides live in the card menu (mark a line printed for an off-Bambuddy
-print, skip stock and print anyway, cancel a line) and **every override writes
-an audit row**.
+Cards are moved by whoever is working the board, by dragging or from the
+drawer — see [The board, and who moves the cards](#the-board-and-who-moves-the-cards)
+for why, and for the one exception. Manual overrides live in the card menu
+(mark a line printed for an off-Bambuddy print, skip stock and print anyway,
+cancel a line) and **every override writes an audit row**.
 
 - **New** — ingested, decisions made, nothing dispatched yet. Orders with an
   no product stay here with a red badge so the fix path stays visible; the
@@ -1229,7 +1284,13 @@ an audit row**.
 - **Assembly** — production finished but the order contains a bundle, which
   needs a manual check-off per bundle. Orders without bundles skip this column.
 - **Ready to Ship** — every line ready. The Create Label button goes live.
-- **Shipped** — label bought, tracking and what it cost shown.
+- **Shipped** — label bought; the tracking number is a link to the carrier, and
+  what the label cost is shown beside it. Parcels are checked periodically and
+  the card says what the carrier last reported.
+- **Complete** — the carrier said it arrived. The one column a card reaches on
+  its own, and the only one it leaves the board from: two days after it lands
+  here the board stops drawing it. The order itself stays in the Orders tab
+  with everything it ever had.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
 printer models, BOM editor), [**Printers**](#printers) (the farm, live, with

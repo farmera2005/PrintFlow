@@ -18,7 +18,16 @@ export type OrderStatus =
   | 'assembly'
   | 'ready_to_ship'
   | 'shipped'
+  | 'complete'
   | 'cancelled'
+
+/** What the carrier last said about a parcel, in PrintFlow's words. */
+export type TrackingStatus =
+  | 'unknown'
+  | 'accepted'
+  | 'in_transit'
+  | 'delivered'
+  | 'exception'
 
 export type JobStatus = 'pending' | 'queued' | 'printing' | 'done' | 'failed' | 'cancelled'
 
@@ -92,6 +101,18 @@ export interface Order {
    *  are all cancelled: cancelling is decided, not observed. */
   suggested_status: OrderStatus | null
   tracking_number: string | null
+  /** Where clicking the tracking number goes. Null when PrintFlow does not
+   *  know that carrier's page — a link to the wrong one looks like an answer. */
+  tracking_url: string | null
+  tracking_status: TrackingStatus | null
+  /** The carrier's own sentence — "Left with an individual at 2:03pm". */
+  tracking_detail: string | null
+  tracking_checked_at: string | null
+  /** When the carrier said it arrived. */
+  delivered_at: string | null
+  /** When the card entered Complete, however it got there. The 48-hour clock
+   *  that takes it off the board runs from here. */
+  completed_at: string | null
   label_created_at: string | null
   /** What the label cost, postage and insurance together — a decimal string,
    *  because this is money and JSON's only number cannot hold 7.41 exactly.
@@ -156,6 +177,10 @@ export interface IntegrationStatus {
 
 export interface BoardResponse {
   columns: { key: OrderStatus; orders: Order[]; count: number }[]
+  /** Delivered orders the board has stopped drawing. They are still in the
+   *  Orders tab with everything they ever had — nothing is deleted. */
+  retired_from_board: number
+  complete_board_hours: number
   integrations: IntegrationStatus[]
 }
 

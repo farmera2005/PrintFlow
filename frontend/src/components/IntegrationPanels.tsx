@@ -991,6 +991,9 @@ export function BambuddyPanel({ status, onChange }: PanelProps) {
 export function ShipStationPanel({ status, onChange }: PanelProps) {
   const [apiKey, setApiKey] = useState('')
   const [apiSecret, setApiSecret] = useState('')
+  const [trackingKey, setTrackingKey] = useState('')
+  const [trackingBusy, setTrackingBusy] = useState(false)
+  const tracking = Boolean(status.detail.tracking)
   const [stores, setStores] = useState<any[]>([])
   const [selectedStore, setSelectedStore] = useState<number | null>(
     status.detail.store_id ?? null,
@@ -1019,6 +1022,9 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
       const data = await api.post<{ stores: any[] }>('/api/integrations/shipstation/config', {
         api_key: apiKey,
         api_secret: apiSecret,
+        // Omitted rather than sent empty, so saving the key/secret from this
+        // form never wipes a tracking key somebody pasted earlier.
+        ...(trackingKey ? { tracking_api_key: trackingKey.trim() } : {}),
       })
       setStores(data.stores)
       await onChange()
@@ -1096,6 +1102,62 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
       ) : null}
       {status.connected && !selectedStore ? (
         <Alert tone="warning">Pick the ShipStation store that receives your Etsy orders.</Alert>
+      ) : null}
+
+      {/* Delivery detection. A second credential from the same ShipStation
+          account, because the key above buys labels and cannot say whether
+          anything arrived — only the newer API answers that. Optional on
+          purpose: without it the Complete column still works, cards just
+          reach it by being dragged rather than on their own. */}
+      {status.connected ? (
+        <Field
+          label="Tracking API key"
+          hint={
+            tracking
+              ? 'Delivered parcels move themselves to Complete. From ShipStation → Settings → Account → API Settings (the V2 key).'
+              : 'Optional. Without it PrintFlow never moves a card to Complete on its own — you drag it. From ShipStation → Settings → Account → API Settings (the V2 key), which is not the key/secret above.'
+          }
+        >
+          <div className="flex gap-2">
+            <input
+              className={inputClass}
+              type="password"
+              placeholder={
+                tracking
+                  ? `Stored ${status.detail.tracking_key_hint ?? ''} — paste to replace`
+                  : 'Paste to switch delivery detection on'
+              }
+              value={trackingKey}
+              onChange={(e) => setTrackingKey(e.target.value)}
+            />
+            <Button
+              onClick={async () => {
+                setTrackingBusy(true)
+                setError(null)
+                try {
+                  await api.post('/api/integrations/shipstation/tracking-key', {
+                    tracking_api_key: trackingKey.trim(),
+                  })
+                  setTrackingKey('')
+                  await onChange()
+                } catch (err) {
+                  setError(errorMessage(err))
+                } finally {
+                  setTrackingBusy(false)
+                }
+              }}
+              disabled={trackingBusy || !trackingKey.trim()}
+            >
+              {trackingBusy ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </Field>
+      ) : null}
+      {status.connected && tracking ? (
+        <p className="text-xs text-emerald-800">
+          Delivery detection is on. Shipped parcels are checked periodically and
+          move to Complete when the carrier says they arrived.
+        </p>
       ) : null}
       {error ? <Alert tone="error">{error}</Alert> : null}
     </div>

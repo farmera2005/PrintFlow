@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from ..integrations import bambuddy as bambuddy_api
 from ..models import (
     BOARD_COLUMNS,
+    COMPLETE_BOARD_HOURS,
     JOB_CANCELLED,
     JOB_FAILED,
     LINE_CANCELLED,
@@ -20,7 +21,7 @@ from ..models import (
     OrderLine,
     PrintJob,
 )
-from ..services import credentials, finance
+from ..services import credentials, finance, tracking
 from ..services.manufacturing import money
 from ..services.state import suggested_status
 
@@ -154,6 +155,17 @@ def order_card(order: Order) -> dict[str, Any]:
         # it only when it disagrees with where the card actually is.
         "suggested_status": suggested_status(order, list(order.lines)),
         "tracking_number": order.tracking_number,
+        # A number nobody can click is a number somebody retypes into a
+        # carrier's website. None where PrintFlow does not know that carrier's
+        # page — a link to the wrong one looks like an answer.
+        "tracking_url": tracking.tracking_url(
+            order.carrier_code, order.tracking_number, order.tracking_url
+        ),
+        "tracking_status": order.tracking_status,
+        "tracking_detail": order.tracking_detail,
+        "tracking_checked_at": order.tracking_checked_at,
+        "delivered_at": order.delivered_at,
+        "completed_at": order.completed_at,
         "label_created_at": order.label_created_at,
         # A string, not a float: this is money on its way to a screen, and
         # JSON's only number is the one that cannot hold 7.41 exactly. Rounded
@@ -184,7 +196,14 @@ async def build_board(
 ) -> dict[str, Any]:
     orders = await _load_orders(session, BOARD_COLUMNS, limit_per_column * len(BOARD_COLUMNS))
     columns: dict[str, list[dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
+    retired = 0
     for order in orders:
+        # A delivered card stops being drawn two days later. The order is not
+        # touched — it is in the Orders tab with everything it ever had — but a
+        # board that only grows is a board nobody scrolls to the bottom of.
+        if not tracking.still_on_board(order):
+            retired += 1
+            continue
         bucket = columns.get(order.status)
         if bucket is not None and len(bucket) < limit_per_column:
             bucket.append(order_card(order))
@@ -193,6 +212,11 @@ async def build_board(
             {"key": name, "orders": columns[name], "count": len(columns[name])}
             for name in BOARD_COLUMNS
         ],
+        # Said out loud, because a card that silently stopped being drawn is
+        # indistinguishable from one that was deleted — and nothing here is
+        # ever deleted.
+        "retired_from_board": retired,
+        "complete_board_hours": COMPLETE_BOARD_HOURS,
         "integrations": await credentials.status_summary(session),
     }
 

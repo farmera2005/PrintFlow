@@ -1,4 +1,4 @@
-import type { JobStatus, LineState, OrderStatus } from './types'
+import type { JobStatus, LineState, OrderStatus, TrackingStatus } from './types'
 
 /** Every column an order can be in, in the order the board shows them. */
 export const ORDER_STATUSES: OrderStatus[] = [
@@ -7,6 +7,7 @@ export const ORDER_STATUSES: OrderStatus[] = [
   'assembly',
   'ready_to_ship',
   'shipped',
+  'complete',
   'cancelled',
 ]
 
@@ -34,7 +35,27 @@ export const COLUMN_LABELS: Record<OrderStatus, string> = {
   assembly: 'Assembly',
   ready_to_ship: 'Ready to Ship',
   shipped: 'Shipped',
+  complete: 'Complete',
   cancelled: 'Cancelled',
+}
+
+/** What the carrier is saying, for a badge. "Unknown" is deliberately absent:
+ *  a parcel the carrier has not scanned yet is the normal state of a parcel
+ *  posted an hour ago, and a badge saying so on every fresh card is noise. */
+export const TRACKING_LABELS: Record<TrackingStatus, string> = {
+  unknown: 'Not scanned yet',
+  accepted: 'Accepted',
+  in_transit: 'In transit',
+  delivered: 'Delivered',
+  exception: 'Carrier problem',
+}
+
+export const TRACKING_CLASSES: Record<TrackingStatus, string> = {
+  unknown: 'bg-slate-100 text-slate-600 ring-slate-300',
+  accepted: 'bg-sky-100 text-sky-800 ring-sky-300',
+  in_transit: 'bg-sky-100 text-sky-800 ring-sky-300',
+  delivered: 'bg-emerald-100 text-emerald-800 ring-emerald-300',
+  exception: 'bg-red-100 text-red-800 ring-red-300',
 }
 
 export const LINE_STATE_LABELS: Record<LineState, string> = {

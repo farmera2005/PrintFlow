@@ -54,12 +54,17 @@ DEFAULT_POLL_INTERVALS: dict[str, int] = {
     "etsy_minutes": 5,
     "bambuddy_minutes": 2,
     "shipstation_minutes": 10,
+    # Parcels do not move on a five-minute timer. This is how often the poll
+    # wakes up at all; how often any one parcel is actually asked about is
+    # decided per parcel, and widens as its journey goes on.
+    "tracking_minutes": 30,
 }
 
 POLL_INTERVAL_BOUNDS: dict[str, tuple[int, int]] = {
     "etsy_minutes": (1, 240),
     "bambuddy_minutes": (1, 240),
     "shipstation_minutes": (1, 240),
+    "tracking_minutes": (5, 1440),
 }
 
 _DEFAULTS: dict[str, Any] = {

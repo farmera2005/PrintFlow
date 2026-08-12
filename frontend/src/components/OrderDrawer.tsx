@@ -6,6 +6,8 @@ import {
   JOB_STATUS_CLASSES,
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
+  TRACKING_CLASSES,
+  TRACKING_LABELS,
   formatDateTime,
   formatMoney,
 } from '../lib/format'
@@ -660,7 +662,19 @@ export default function OrderDrawer({
                   {order.tracking_number ? (
                     <div className="mt-2 space-y-1 text-sm">
                       <p className="text-ink-800">
-                        Tracking <span className="font-mono">{order.tracking_number}</span>
+                        Tracking{' '}
+                        {order.tracking_url ? (
+                          <a
+                            className="font-mono underline decoration-ink-300 underline-offset-2 hover:decoration-ink-800"
+                            href={order.tracking_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {order.tracking_number}
+                          </a>
+                        ) : (
+                          <span className="font-mono">{order.tracking_number}</span>
+                        )}
                       </p>
                       <p className="text-xs text-ink-500">
                         Label created {formatDateTime(order.label_created_at)} ·{' '}
@@ -669,6 +683,32 @@ export default function OrderDrawer({
                           ? ` · ${formatMoney(order.label_cost, order.label_currency)}`
                           : ''}
                       </p>
+
+                      {/* Where the parcel is, as of the last time anybody
+                          asked. The carrier's own sentence is kept because it
+                          is the part that answers "delivered where?" — a left
+                          parcel and a handed-over one are the same word here
+                          and different things on a doorstep. */}
+                      {order.tracking_status ? (
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <Badge className={TRACKING_CLASSES[order.tracking_status]}>
+                            {TRACKING_LABELS[order.tracking_status]}
+                          </Badge>
+                          <span className="text-xs text-ink-500">
+                            checked {formatDateTime(order.tracking_checked_at)}
+                          </span>
+                        </div>
+                      ) : null}
+                      {order.tracking_detail ? (
+                        <p className="text-xs text-ink-600">{order.tracking_detail}</p>
+                      ) : null}
+                      {order.delivered_at ? (
+                        <p className="text-xs text-emerald-800">
+                          Delivered {formatDateTime(order.delivered_at)} — moved to
+                          Complete.
+                        </p>
+                      ) : null}
+
                       <p className="text-xs text-ink-500">
                         ShipStation pushes this tracking number back to Etsy.
                       </p>

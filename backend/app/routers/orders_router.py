@@ -19,6 +19,7 @@ from ..integrations.base import IntegrationError
 from ..models import (
     LINE_CANCELLED,
     ORDER_CANCELLED,
+    ORDER_COMPLETE,
     ORDER_STATUSES,
     LINE_PRINTED,
     LINE_READY,
@@ -189,6 +190,15 @@ async def set_order_status(
     was = order.status
     order.status = body.status
     order.status_note = (body.note or "").strip() or None
+
+    # The 48-hour clock that takes a finished card off the board runs from when
+    # it entered the column, so entering it starts the clock and leaving it
+    # throws the clock away. Dragging a card out and back gives it two fresh
+    # days, which is the point: somebody put it back for a reason.
+    if body.status == ORDER_COMPLETE and was != ORDER_COMPLETE:
+        order.completed_at = datetime.now(timezone.utc)
+    elif body.status != ORDER_COMPLETE:
+        order.completed_at = None
 
     # Coming back out of Cancelled, the lines have to come with it. A line
     # cancelled by hand keeps its own override otherwise, so the order would sit

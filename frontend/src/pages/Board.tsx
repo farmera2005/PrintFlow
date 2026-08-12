@@ -4,6 +4,8 @@ import {
   COLUMN_LABELS,
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
+  TRACKING_CLASSES,
+  TRACKING_LABELS,
   formatAge,
   formatMoney,
 } from '../lib/format'
@@ -41,18 +43,35 @@ function summariseOptions(options: OrderLine['variations']): string {
   return options.map((option) => `${option.name}: ${option.value}`).join(' · ')
 }
 
+/** How long a finished card has left on the board, in words.
+ *
+ *  Said out loud because the alternative is a card that is simply gone one
+ *  morning, which looks exactly like a card that was deleted — and nothing
+ *  here is ever deleted. */
+function leavesBoardIn(completedAt: string, hours: number): string {
+  const goes = new Date(completedAt).getTime() + hours * 3600_000
+  const left = goes - Date.now()
+  if (!Number.isFinite(left)) return 'Done'
+  if (left <= 0) return 'Leaving the board'
+  const h = Math.round(left / 3600_000)
+  return h < 1 ? 'Off the board within the hour' : `Off the board in ${h}h`
+}
+
 function OrderCard({
   order,
   onOpen,
   onDragStart,
   onDragEnd,
   dragging,
+  completeHours,
 }: {
   order: Order
   onOpen: () => void
   onDragStart: () => void
   onDragEnd: () => void
   dragging: boolean
+  /** How long a delivered card stays drawn, as the server sets it. */
+  completeHours: number
 }) {
   const rows = leaves(order.lines).filter(
     (leaf) => !leaf.line.is_bundle && leaf.line.state !== 'cancelled',
@@ -61,8 +80,14 @@ function OrderCard({
   const attention = order.summary.needs_attention
 
   return (
-    <button
-      type="button"
+    // A div with a button's manners rather than a <button>, because the
+    // tracking number inside it is a real link and a link inside a button is
+    // not something a browser is obliged to make sense of. Everything a button
+    // gave us is kept: focusable, activated by Enter and Space, announced as a
+    // button. Only the tag changed.
+    <div
+      role="button"
+      tabIndex={0}
       draggable
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = 'move'
@@ -72,6 +97,13 @@ function OrderCard({
       }}
       onDragEnd={onDragEnd}
       onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
       className={cx(
         'w-full cursor-grab rounded-lg bg-white p-3 text-left shadow-sm ring-1 transition hover:shadow-md active:cursor-grabbing',
         attention ? 'ring-red-300' : 'ring-ink-200',
@@ -102,9 +134,41 @@ function OrderCard({
             {order.summary.pending_assembly.length} to assemble
           </Badge>
         ) : null}
-        {order.tracking_number ? (
+        {/* The tracking number, and where it goes. A number nobody can click
+            is a number somebody retypes into a carrier's website with the card
+            open in another window. stopPropagation because the whole card
+            opens the drawer, and following a link is not opening the drawer. */}
+        {order.tracking_number && order.tracking_url ? (
+          <a
+            href={order.tracking_url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800 underline decoration-indigo-400 underline-offset-2 ring-1 ring-indigo-300 hover:decoration-indigo-800"
+            title={`Track this parcel${order.carrier_code ? ` with ${order.carrier_code}` : ''}`}
+          >
+            {order.tracking_number}
+          </a>
+        ) : order.tracking_number ? (
           <Badge className="bg-indigo-100 text-indigo-800 ring-indigo-300">
             {order.tracking_number}
+          </Badge>
+        ) : null}
+        {/* What the carrier last said. Only once it has said something: every
+            parcel is "not scanned yet" for its first few hours, and a badge
+            saying so on every fresh card is noise. */}
+        {order.tracking_status && order.tracking_status !== 'unknown' ? (
+          <Badge className={TRACKING_CLASSES[order.tracking_status]}>
+            {TRACKING_LABELS[order.tracking_status]}
+          </Badge>
+        ) : null}
+        {/* A finished card says when it goes. Nothing is deleted — it stays in
+            the Orders tab — but a card that vanished with no warning reads as
+            one that was thrown away. */}
+        {order.status === 'complete' && order.completed_at ? (
+          <Badge className="bg-ink-100 text-ink-600 ring-ink-300">
+            {leavesBoardIn(order.completed_at, completeHours)}
           </Badge>
         ) : null}
         {/* What the label cost. Labels are the one thing PrintFlow spends
@@ -154,7 +218,7 @@ function OrderCard({
           print
         </p>
       ) : null}
-    </button>
+    </div>
   )
 }
 
@@ -318,6 +382,7 @@ export default function Board() {
                         setOver(null)
                       }}
                       onOpen={() => setOpenOrderId(order.id)}
+                      completeHours={board.complete_board_hours}
                     />
                   ))
                 )}

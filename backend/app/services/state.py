@@ -53,6 +53,7 @@ from ..models import (
     LINE_UNMATCHED,
     ORDER_ASSEMBLY,
     ORDER_CANCELLED,
+    ORDER_COMPLETE,
     ORDER_IN_PRODUCTION,
     ORDER_NEW,
     ORDER_READY_TO_SHIP,
@@ -265,7 +266,10 @@ async def recompute_order(session: AsyncSession, order: Order) -> str:
     # about the shipment rather than a column, so it still comes from the label
     # itself — but only while the operator has not moved the card past it.
     order_cancelled = order.status == ORDER_CANCELLED
-    order_shipped = order.status == ORDER_SHIPPED
+    # Complete is past Shipped, not beside it: a delivered order's lines are
+    # certainly shipped. Without this a card moving to Complete would drop its
+    # lines back to "labeled", which is a parcel that has not been posted.
+    order_shipped = order.status in (ORDER_SHIPPED, ORDER_COMPLETE)
     order_labeled = (
         not order_shipped
         and not order_cancelled
@@ -335,7 +339,15 @@ def suggested_status(order: Order, lines: list[OrderLine]) -> str | None:
         ],
         label_created=order.label_created_at is not None,
     )
-    return None if guess == ORDER_CANCELLED else guess
+    if guess == ORDER_CANCELLED:
+        return None
+    # Nor about one the carrier has closed out. The rules can only ever see as
+    # far as "shipped", so on a delivered card they would forever offer to move
+    # it back out of Complete — undoing the one thing PrintFlow got right on
+    # its own.
+    if order.status == ORDER_COMPLETE:
+        return None
+    return guess
 
 
 async def recompute_order_by_id(session: AsyncSession, order_id) -> str | None:
