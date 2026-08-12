@@ -751,6 +751,14 @@ const PATH_ROLES: {
       '{printer_id} is substituted.',
     templated: true,
   },
+  {
+    key: 'printer_filament',
+    label: "One printer's filament",
+    hint:
+      'Only used by builds that keep the AMS off the printer row. Read for a ' +
+      'machine that reported no spools. {printer_id} is substituted.',
+    templated: true,
+  },
 ]
 
 export function BambuddyPanel({ status, onChange }: PanelProps) {

@@ -21,6 +21,7 @@ from app.integrations.bambuddy import (
     BambuddyClient,
     camera_paths,
     discover_paths,
+    filament_rows,
     parse_printer,
     read_farm,
 )
@@ -1242,3 +1243,224 @@ class TestPrintNow:
             "/api/printers/1/print", json={"bambuddy_archive_id": 5}
         )
         assert response.status_code == 409
+
+
+# --------------------------------------------------------------------------
+# What is loaded
+# --------------------------------------------------------------------------
+
+
+class TestFilamentRows:
+    """A build with its own filament endpoint answers in whatever shape it
+    likes, and every one of them is the same short list on the card."""
+
+    def test_a_bare_list_of_spools(self):
+        assert [t["type"] for t in filament_rows([{"type": "PLA"}, {"type": "ABS"}])] == [
+            "PLA", "ABS",
+        ]
+
+    def test_spools_wrapped_one_layer_deep(self):
+        for key in ("trays", "ams", "filaments", "slots", "spools", "items", "data"):
+            found = filament_rows({key: [{"filament_type": "PETG", "remain": 55}]})
+            assert [(t["type"], t["remaining"]) for t in found] == [("PETG", 55)], key
+
+    def test_an_ams_reported_as_units_is_flattened(self):
+        # The operator loads a slot, not a unit.
+        found = filament_rows(
+            {
+                "units": [
+                    {"id": 1, "trays": [{"slot": 1, "type": "PLA"}]},
+                    {"id": 2, "trays": [{"slot": 5, "type": "TPU"}]},
+                ]
+            }
+        )
+        assert [(t["slot"], t["type"]) for t in found] == [(1, "PLA"), (5, "TPU")]
+
+    def test_a_machine_with_one_spool_answers_with_the_spool_itself(self):
+        found = filament_rows({"filament_type": "PLA", "color": "black", "remain": 90})
+        assert [(t["type"], t["colour"], t["remaining"]) for t in found] == [
+            ("PLA", "black", 90),
+        ]
+
+    def test_an_empty_or_unreadable_reply_is_no_spools_not_a_blank_one(self):
+        # A single row with nothing in it would draw a tray labelled "unknown",
+        # which reads as a loaded spool nobody can identify.
+        for reply in ([], {}, {"trays": []}, {"status": "ok"}, None, "nope"):
+            assert filament_rows(reply) == [], reply
+
+
+class TestDiscoverFilament:
+    def test_the_leaves_a_build_might_use(self):
+        for leaf in ("filament", "filaments", "ams", "spools", "trays", "materials"):
+            found = discover_paths({f"/api/printers/{{id}}/{leaf}": {"get": {}}})
+            assert found["printer_filament"]["path"] == (
+                f"/api/printers/{{printer_id}}/{leaf}"
+            ), leaf
+
+    def test_the_template_has_to_be_the_printer(self):
+        # /filaments/{id} reads one spool, which is a different endpoint.
+        found = discover_paths({"/api/filaments/{id}": {"get": {}}})
+        assert found["printer_filament"]["path"] is None
+
+    def test_a_build_with_no_such_endpoint_offers_nothing(self):
+        found = discover_paths({"/api/printers": {"get": {}},
+                                "/api/printers/{id}": {"get": {}}})
+        assert found["printer_filament"]["path"] is None
+
+    def test_the_whole_ams_beats_one_view_of_it(self):
+        found = discover_paths(
+            {
+                "/api/printers/{id}/trays": {"get": {}},
+                "/api/printers/{id}/filament": {"get": {}},
+            }
+        )
+        assert found["printer_filament"]["path"] == "/api/printers/{printer_id}/filament"
+        assert found["printer_filament"]["alternatives"] == [
+            "/api/printers/{printer_id}/trays"
+        ]
+
+
+class FilamentClient(FarmClient):
+    """A build that keeps what is loaded on an endpoint of its own."""
+
+    def __init__(self, *, spools=None, **kwargs):
+        super().__init__(**kwargs)
+        self.spools = spools
+
+    async def _call(self, method: str, path: str, *, retries: int = 2, **kwargs):
+        if "filament" in path or path.endswith("/ams"):
+            self.asked.append(path)
+            if self.spools is None:
+                raise IntegrationError("bambuddy", "HTTP 503", status_code=503)
+            return self.spools
+        return await super()._call(method, path, retries=retries, **kwargs)
+
+
+async def _connected(db) -> None:
+    await credentials.save(
+        db, PROVIDER_BAMBUDDY, {"base_url": "http://b.local", "api_key": "k"}
+    )
+    await db.commit()
+
+
+FILAMENT_SPEC = {
+    "/api/printers": {"get": {}},
+    "/api/printers/{printer_id}": {"get": {}},
+    "/api/printers/{printer_id}/filament": {"get": {}},
+}
+
+
+class TestFillFilament:
+    async def test_a_build_that_keeps_the_ams_apart_is_asked_for_it(self, db):
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths=FILAMENT_SPEC,
+            listing=LIVE_LISTING,
+            spools=[{"slot": 1, "type": "PLA", "remain": 70}],
+        )
+        found = await read_farm(db, client)
+
+        assert [t["type"] for t in found["printers"][0]["filament"]] == ["PLA"]
+        assert "/api/printers/1/filament" in client.asked
+
+    async def test_a_machine_that_already_said_is_not_asked_again(self, db):
+        """The common build puts the AMS on the printer row. That must cost nothing."""
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths=FILAMENT_SPEC,
+            listing=[{**LIVE_LISTING[0], "ams": [{"id": 1, "type": "PETG"}]}],
+            spools=[{"slot": 1, "type": "PLA"}],
+        )
+        found = await read_farm(db, client)
+
+        assert [t["type"] for t in found["printers"][0]["filament"]] == ["PETG"]
+        assert not any("filament" in path for path in client.asked)
+
+    async def test_a_build_with_no_such_endpoint_is_never_asked(self, db):
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}": {"get": {}}},
+            listing=LIVE_LISTING,
+            spools=[{"type": "PLA"}],
+        )
+        found = await read_farm(db, client)
+
+        assert found["printers"][0]["filament"] == []
+        assert not any("filament" in path for path in client.asked)
+        # And it is remembered, so the next farm read costs nothing at all.
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["filament_checked"] == bambuddy_api.FILAMENT_RULES
+
+    async def test_the_endpoint_is_remembered_for_next_time(self, db):
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths=FILAMENT_SPEC, listing=LIVE_LISTING, spools=[{"type": "PLA"}]
+        )
+        await read_farm(db, client)
+
+        payload = await credentials.load(db, PROVIDER_BAMBUDDY)
+        assert payload["discovered_paths"]["printer_filament"] == (
+            "/api/printers/{printer_id}/filament"
+        )
+
+    async def test_the_document_is_read_once_for_the_whole_farm(self, db):
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths=FILAMENT_SPEC, listing=THIN_LISTING, detail=DETAIL,
+            spools=[{"type": "PLA"}],
+        )
+        await read_farm(db, client)
+
+        assert client.specs_read == 1
+
+    async def test_a_machine_that_will_not_say_keeps_its_card(self, db):
+        # What is loaded is the least important thing on a card, and the card
+        # is worth more than the trays.
+        await _connected(db)
+        client = FilamentClient(
+            spec_paths=FILAMENT_SPEC, listing=LIVE_LISTING, spools=None
+        )
+        found = await read_farm(db, client)
+
+        assert [row["name"] for row in found["printers"]] == ["A"]
+        assert found["printers"][0]["filament"] == []
+        assert "503" in found["detail_error"]
+
+    async def test_an_operator_named_path_is_used_without_asking_the_document(self, db):
+        await credentials.save(
+            db,
+            PROVIDER_BAMBUDDY,
+            {
+                "base_url": "http://b.local",
+                "api_key": "k",
+                "paths": {"printer_filament": "/api/printers/{printer_id}/ams"},
+            },
+        )
+        await db.commit()
+        client = FilamentClient(
+            spec_paths={"/api/printers": {"get": {}},
+                        "/api/printers/{printer_id}/ams": {"get": {}}},
+            listing=LIVE_LISTING,
+            spools={"trays": [{"type": "ASA"}]},
+        )
+        client.explicit_paths = {"printer_filament": "/api/printers/{printer_id}/ams"}
+        client.paths["printer_filament"] = "/api/printers/{printer_id}/ams"
+        found = await read_farm(db, client)
+
+        assert [t["type"] for t in found["printers"][0]["filament"]] == ["ASA"]
+
+    async def test_a_farm_read_costs_nothing_once_the_answer_is_stored(self, db):
+        """The check is per connection, not per page load."""
+        await _connected(db)
+        for _ in range(3):
+            client = FilamentClient(
+                spec_paths={"/api/printers": {"get": {}},
+                            "/api/printers/{printer_id}": {"get": {}}},
+                listing=LIVE_LISTING,
+                spools=[{"type": "PLA"}],
+            )
+            await read_farm(db, client)
+        # Only the first read had a document to look at; after that the stored
+        # "this build has none" answers it.
+        assert client.specs_read == 0

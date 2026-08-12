@@ -293,6 +293,52 @@ def discover_printer_detail(spec_paths: dict[str, Any]) -> dict[str, Any]:
     return _discover_under_printer(spec_paths, _score_printer_detail)
 
 
+# What a build calls the spools in a machine. Order is preference: `filament`
+# and `ams` are the whole story where they exist, and the rest are usually a
+# view of one part of it.
+FILAMENT_LEAVES = ("filament", "ams", "spool", "tray", "material", "slot")
+
+
+def _score_printer_filament(path: str, methods: set[str]) -> int | None:
+    """Rank a spec path as "what is loaded in one machine".
+
+    Same shape as the detail endpoint and scored the same way, one segment
+    further down: `/printers/{id}/filaments` counts, `/filaments/{id}` does not,
+    because there the template is the spool rather than the printer.
+    """
+    if "get" not in methods:
+        return None
+    segments = [s for s in path.split("/") if s]
+    templated = [i for i, s in enumerate(segments) if s.startswith("{")]
+    if len(templated) != 1:
+        return None
+    slot = templated[0]
+    if slot == 0 or segments[slot - 1].lower().rstrip("s") not in ("printer", "device"):
+        return None
+    tail = segments[slot + 1 :]
+    if len(tail) != 1:
+        return None
+    # Both spellings, because "ams" is already singular and stripping its s
+    # leaves a word no build has ever used.
+    leaf = tail[0].lower()
+    rank = next(
+        (
+            FILAMENT_LEAVES.index(word)
+            for word in (leaf, leaf.rstrip("s"))
+            if word in FILAMENT_LEAVES
+        ),
+        None,
+    )
+    if rank is None:
+        return None
+    return 100 - rank * 10 - len(segments)
+
+
+def discover_printer_filament(spec_paths: dict[str, Any]) -> dict[str, Any]:
+    """Where this build keeps what is loaded, if it keeps it separately."""
+    return _discover_under_printer(spec_paths, _score_printer_filament)
+
+
 # What a camera endpoint is called. Order is preference, and it is deliberately
 # the least specific first: `camera` alone is the whole camera, where the rest
 # are things a build offers *of* it.
@@ -477,6 +523,7 @@ def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = {
         "printer_files": discover_printer_files(spec_paths),
         "printer_detail": discover_printer_detail(spec_paths),
+        "printer_filament": discover_printer_filament(spec_paths),
         "printer_camera": discover_printer_camera(spec_paths),
         "camera_token": discover_camera_token(spec_paths),
     }
@@ -741,6 +788,66 @@ def _flatten(
     return out
 
 
+def _trays(rows: Any) -> list[dict[str, Any]]:
+    """A list of spool rows, however this build spells a spool's columns."""
+    trays = []
+    for index, row in enumerate(rows if isinstance(rows, list) else []):
+        if not isinstance(row, dict):
+            continue
+        trays.append(
+            {
+                "slot": _first_scalar(row, "slot", "id", "tray_id") or index + 1,
+                "type": _first_scalar(
+                    row, "type", "filament_type", "tray_type", "material"
+                ),
+                "colour": _first_scalar(
+                    row, "colour", "color", "tray_color", "hex", "rgb"
+                ),
+                "remaining": _rounded(
+                    _first_scalar(row, "remaining", "remain", "percent")
+                ),
+            }
+        )
+    return trays
+
+
+# Where a reply about filament keeps the spools, when it is not simply a list.
+TRAY_KEYS = ("trays", "tray", "ams", "filaments", "slots", "spools", "items", "data")
+
+
+def filament_rows(payload: Any) -> list[dict[str, Any]]:
+    """What is loaded, from a reply that is only ever about that.
+
+    A build with its own filament endpoint answers with the spools as a bare
+    list, or wrapped one layer deep under any of half a dozen names, or — for a
+    machine with no AMS — as the single spool itself. All three are the one
+    short list the page draws.
+    """
+    if isinstance(payload, list):
+        return _trays(payload)
+    if not isinstance(payload, dict):
+        return []
+    for key in TRAY_KEYS:
+        found = _trays(payload.get(key))
+        if found:
+            return found
+    # An AMS reported as units, each with its own trays: flatten, because the
+    # operator loads a slot, not a unit.
+    for key in ("units", "ams_units", "modules"):
+        units = payload.get(key)
+        if isinstance(units, list):
+            flat = [
+                tray
+                for unit in units
+                if isinstance(unit, dict)
+                for tray in _trays(unit.get("trays") or unit.get("tray"))
+            ]
+            if flat:
+                return flat
+    lone = _trays([payload])
+    return lone if lone and lone[0]["type"] else []
+
+
 def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
     """What is loaded, as trays.
 
@@ -752,27 +859,9 @@ def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
         rows = look.get(key)
         if isinstance(rows, dict):
             rows = rows.get("trays") or rows.get("tray") or []
-        if isinstance(rows, list) and rows:
-            trays = []
-            for index, row in enumerate(rows):
-                if not isinstance(row, dict):
-                    continue
-                trays.append(
-                    {
-                        "slot": _first_scalar(row, "slot", "id", "tray_id") or index + 1,
-                        "type": _first_scalar(
-                            row, "type", "filament_type", "tray_type", "material"
-                        ),
-                        "colour": _first_scalar(
-                            row, "colour", "color", "tray_color", "hex", "rgb"
-                        ),
-                        "remaining": _rounded(
-                            _first_scalar(row, "remaining", "remain", "percent")
-                        ),
-                    }
-                )
-            if trays:
-                return trays
+        trays = _trays(rows)
+        if trays:
+            return trays
     single = _first_scalar(look, "filament_type", "material", "loaded_filament")
     if single:
         return [
@@ -1520,6 +1609,23 @@ class BambuddyClient:
         """One machine, asked about directly."""
         data = await self._call("GET", self.printer_detail_path(printer_id))
         return parse_printer(_as_item(data))
+
+    def filament_path(self, printer_id: Any) -> str:
+        return str(self.paths.get("printer_filament") or "").replace(
+            "{printer_id}", str(printer_id)
+        )
+
+    async def read_filament(self, printer_id: Any) -> list[dict[str, Any]]:
+        """What is loaded in one machine, where the build keeps that apart.
+
+        There is no default for this role, deliberately: unlike the others there
+        is no path worth guessing, and a guess would be a 404 per machine per
+        refresh on every build that keeps the AMS on the printer row.
+        """
+        path = self.filament_path(printer_id)
+        if not path:
+            return []
+        return filament_rows(await self._call("GET", path))
 
     async def list_archives(
         self, *, search: str = "", limit: int = 50, offset: int = 0
@@ -2360,6 +2466,43 @@ async def ensure_camera(session: AsyncSession, client: BambuddyClient) -> bool:
     return False
 
 
+# The same idea for filament: a stored "this build keeps no separate list of
+# what is loaded" was an answer to the rules of the day, and widening them has
+# to ask again.
+FILAMENT_RULES = 1
+
+
+async def ensure_filament(session: AsyncSession, client: BambuddyClient) -> bool:
+    """Whether this instance has an endpoint for what is loaded — asked once.
+
+    Most builds put the AMS on the printer row and there is nothing to ask;
+    some keep it apart. Both are ordinary, so a build with no such endpoint must
+    cost nothing rather than a 404 per machine per refresh — the answer is
+    stored beside the connection, the same way the camera's is.
+    """
+    if client.explicit_paths.get("printer_filament"):
+        return True
+    if client.discovered_paths.get("printer_filament"):
+        return True
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY)
+    if payload is None:
+        return False
+    if payload.get("filament_checked") == FILAMENT_RULES:
+        return False
+    spec = client.last_spec or await client.fetch_openapi()
+    client.last_spec = spec
+    found = (spec.get("discovered") or {}).get("printer_filament")
+    adopted = client.adopt_discovered({"printer_filament": found})
+    if adopted or (found or {}).get("path"):
+        await remember_paths(
+            session, adopted or {"printer_filament": found["path"]}
+        )
+        return True
+    payload["filament_checked"] = FILAMENT_RULES
+    await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
+    return False
+
+
 async def camera_report(
     session: AsyncSession, client: BambuddyClient, *, again: bool = False
 ) -> dict[str, Any]:
@@ -2454,6 +2597,49 @@ def _has_readings(printer: dict[str, Any]) -> bool:
     )
 
 
+async def fill_filament(
+    session: AsyncSession,
+    client: BambuddyClient,
+    rows: list[dict[str, Any]],
+    *,
+    limit: int = 32,
+) -> str | None:
+    """Ask each machine what is loaded, where the build keeps that apart.
+
+    Only where it does, and only for the machines that did not already say.
+    Most builds put the AMS on the printer row and this costs nothing at all;
+    the ones that do not would otherwise show a farm of machines loaded with
+    nothing, which is both wrong and the kind of wrong an operator acts on.
+
+    A machine that will not answer keeps its empty list rather than taking the
+    farm read down with it — what is loaded is the least important thing on the
+    card, and the card is worth more than the trays.
+    """
+    wanted = [row for row in rows[:limit] if row.get("id") is not None
+              and not row.get("filament")]
+    if not wanted or not await ensure_filament(session, client):
+        return None
+
+    failure: str | None = None
+    healed = False
+    for row in wanted:
+        try:
+            # Heal once for the farm, not once per machine: re-reading the
+            # document ten times would be ten fetches to learn one thing.
+            first_ask, healed = not healed, True
+            row["filament"] = await (
+                with_healing(
+                    session, client, ("printer_filament",),
+                    lambda: client.read_filament(row["id"]),
+                )
+                if first_ask
+                else client.read_filament(row["id"])
+            )
+        except IntegrationError as exc:
+            failure = failure or str(exc)
+    return failure
+
+
 async def read_farm(
     session: AsyncSession, client: BambuddyClient, *, max_detail: int = 32
 ) -> dict[str, Any]:
@@ -2479,11 +2665,19 @@ async def read_farm(
             row["camera"] = cameras and client.camera_is_ours(row.get("camera_url"))
         return rows
 
+    async def finish(
+        rows: list[dict[str, Any]], detailed: bool, failure: str | None
+    ) -> dict[str, Any]:
+        spools = await fill_filament(session, client, rows, limit=max_detail)
+        return {
+            "printers": with_cameras(rows),
+            "detailed": detailed,
+            "detail_error": failure or spools,
+        }
+
     live = any(_has_readings(row) for row in printers)
     if not printers or live:
-        return {
-            "printers": with_cameras(printers), "detailed": live, "detail_error": None
-        }
+        return await finish(printers, live, None)
 
     detailed: list[dict[str, Any]] = []
     failure: str | None = None
@@ -2515,11 +2709,9 @@ async def read_farm(
         # so a thin detail reply cannot blank out a name the list did have.
         detailed.append({**row, **{k: v for k, v in extra.items() if v is not None}})
     detailed.extend(printers[max_detail:])
-    return {
-        "printers": with_cameras(detailed),
-        "detailed": any(_has_readings(row) for row in detailed),
-        "detail_error": failure,
-    }
+    return await finish(
+        detailed, any(_has_readings(row) for row in detailed), failure
+    )
 
 
 async def read_file_manager(

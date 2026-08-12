@@ -604,12 +604,38 @@ questions are different:
   temperatures, fan, speed, light and door, and the PrintFlow plates on it.
 * **Machine** — what it *is* rather than what it is doing: model, serial,
   firmware, address, nozzle size and type, Wi-Fi signal, prints completed, and
-  every filament tray with its material, colour and remaining percentage.
+  every filament tray (see below).
 * **Everything** — literally every field this Bambuddy sent for this machine,
   flattened to `parent.child` and unedited. PrintFlow cannot know what a given
   build reports, so "all available metrics" is only honest if it means all of
   them, including the ones nothing here has a name for. Underneath it, the raw
   replies, for a machine whose card came back blank.
+
+### What is loaded
+
+Filament shows as a chip per tray on the card — material and remaining
+percentage — and in full on the machine's own page, with the colour and slot
+number. A tray at a tenth of a reel or less is tinted amber and labelled
+*nearly empty*, because that is the level at which starting a long print stops
+being a safe thing to do. A machine that reports no level at all is left plain:
+silent is not the same as low, and colouring it would invent a reading.
+
+Where that comes from depends on the build, and PrintFlow handles both without
+being told which it has. Most instances put the AMS on the printer row itself,
+in any of a dozen spellings — `ams`, `trays`, `filaments`, `slots`, a list or an
+object wrapping one — and it is read straight off. Some keep it on an endpoint
+of its own, and for those the endpoint is found in the instance's OpenAPI
+document (`/printers/{id}/filament`, `/ams`, `/spools`, `/trays`…) and asked
+once per machine that reported nothing.
+
+That second call has to be free on the builds that do not need it, so the
+answer is stored beside the connection the same way the camera's is: a build
+with no such endpoint is asked once, ever, and never pays a 404 per machine per
+refresh afterwards. A machine that will not answer keeps its card and its
+readings — what is loaded is the least important thing on a card, and the card
+is worth more than the trays. If the endpoint is somewhere the matching rules
+do not recognise, it can be named under Settings → Bambuddy → Advanced as *One
+printer's filament*, with `{printer_id}` where the machine goes.
 
 ### Printing something nobody ordered
 

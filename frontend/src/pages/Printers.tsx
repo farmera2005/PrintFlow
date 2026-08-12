@@ -57,6 +57,16 @@ function temperature(now: number | null, target: number | null): string | null {
   return target ? `${reading}/${Math.round(target)}°` : reading
 }
 
+/** Whether a spool is close enough to the end to lose a plate on.
+ *
+ *  Not a warning and not a threshold anyone tuned — a tenth of a reel is
+ *  roughly where a long print stops being a safe thing to start, and a shop
+ *  that wants to ignore it can. A machine that reports no level at all is not
+ *  low; it is silent, which is a different thing and must not be coloured. */
+function lowSpool(remaining: number | null): boolean {
+  return remaining !== null && remaining <= 10
+}
+
 function duration(minutes: number | null): string | null {
   if (minutes === null || minutes <= 0) return null
   if (minutes < 60) return `${minutes} min left`
@@ -362,10 +372,15 @@ function PrinterCard({
           {printer.filament.slice(0, 4).map((spool) => (
             <span
               key={String(spool.slot)}
-              className="rounded bg-ink-100 px-1.5 py-0.5 text-ink-600"
+              className={cx(
+                'rounded px-1.5 py-0.5',
+                lowSpool(spool.remaining)
+                  ? 'bg-amber-100 text-amber-900'
+                  : 'bg-ink-100 text-ink-600',
+              )}
               title={`Slot ${spool.slot}${spool.colour ? ` · ${spool.colour}` : ''}${
                 spool.remaining === null ? '' : ` · ${spool.remaining}%`
-              }`}
+              }${lowSpool(spool.remaining) ? ' — nearly empty' : ''}`}
             >
               {spool.type ?? '—'}
               {spool.remaining === null ? '' : ` ${spool.remaining}%`}
@@ -807,7 +822,10 @@ function PrinterDetail({
                 {printer.filament.map((spool) => (
                   <div
                     key={String(spool.slot)}
-                    className="flex items-center gap-2 rounded-md bg-ink-50 px-2 py-1.5 text-xs"
+                    className={cx(
+                      'flex items-center gap-2 rounded-md px-2 py-1.5 text-xs',
+                      lowSpool(spool.remaining) ? 'bg-amber-50' : 'bg-ink-50',
+                    )}
                   >
                     <span className="font-medium text-ink-700">{spool.slot}</span>
                     <span className="text-ink-900">{spool.type ?? 'unknown'}</span>
@@ -815,7 +833,17 @@ function PrinterDetail({
                       <span className="text-ink-500">{spool.colour}</span>
                     ) : null}
                     {spool.remaining === null ? null : (
-                      <span className="ml-auto text-ink-500">{spool.remaining}%</span>
+                      <span
+                        className={cx(
+                          'ml-auto',
+                          lowSpool(spool.remaining)
+                            ? 'font-medium text-amber-800'
+                            : 'text-ink-500',
+                        )}
+                      >
+                        {spool.remaining}%
+                        {lowSpool(spool.remaining) ? ' · nearly empty' : ''}
+                      </span>
                     )}
                   </div>
                 ))}
