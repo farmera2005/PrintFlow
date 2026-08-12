@@ -251,7 +251,16 @@ the number was never kept.
 
 ## Where it goes, and what it made
 
-The drawer carries two blocks that come from Etsy rather than from PrintFlow.
+Clicking a card opens the order in three tabs — **Lines**, **Shipping**,
+**Money**. It used to be one scroll holding all of it, and those are three
+questions asked at three different moments by people doing three different
+jobs: what has to be made, where it goes, what it earned. Splitting them costs
+one click and stops the delivery address sitting somewhere below the print
+queue. The order's own actions — Re-run intake, Reset matching, View raw Etsy
+payload — stay put whichever tab is open, since they belong to the order rather
+than to any one view of it.
+
+Lines opens first, because that is the tab somebody working the board wants.
 
 **Ship to** is the delivery address off the receipt, with a **Copy** button. The
 address shown is Etsy's own `formatted_address` where there is one — already
@@ -272,9 +281,13 @@ so "everything going to Illinois" remains a question a field can answer.
 * **Net** — revenue less all of it. This is the figure none of Etsy,
   QuickBooks or ShipStation can produce on its own.
 
-Every fee line behind those totals folds out underneath, straight from the
-ledger and in its own words, so a number nobody expected can be read rather than
-argued with.
+**Fee breakdown from Etsy** sits under the totals: every charge grouped the way
+the totals group it, each line copied from the shop's payment ledger in Etsy's
+own wording, with the date the ledger was last read. The totals answer *how
+much*; this answers *for what*, which is the question that actually gets asked —
+a marketing fee nobody expected is a decision to revisit, and it cannot be
+revisited from a single number. A figure that looks wrong can be taken back to
+Etsy as their own sentence rather than as our arithmetic.
 
 ### Why the fees arrive late
 

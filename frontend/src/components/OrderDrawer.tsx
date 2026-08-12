@@ -13,6 +13,20 @@ import type { Order, OrderLine, OrderStatus, Product } from '../lib/types'
 import LabelDialog from './LabelDialog'
 import { Alert, Badge, Button, Modal, Spinner, cx, inputClass } from './ui'
 
+/** The drawer's three views of one order.
+ *
+ *  It had grown into a single scroll holding what is made, where it goes and
+ *  what it earned — three questions asked at three different moments, by
+ *  people doing three different jobs. Splitting them costs one click and stops
+ *  the address being somewhere below the print queue. */
+const TABS = [
+  { key: 'lines', label: 'Lines' },
+  { key: 'shipping', label: 'Shipping' },
+  { key: 'money', label: 'Money' },
+] as const
+
+type Tab = (typeof TABS)[number]['key']
+
 /** What to remember about the Etsy listing when a product is picked. */
 export interface RememberChoice {
   remember: boolean
@@ -436,6 +450,7 @@ export default function OrderDrawer({
   const [order, setOrder] = useState<Order | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [tab, setTab] = useState<Tab>('lines')
   const [pickerLine, setPickerLine] = useState<OrderLine | null>(null)
   const [labelOpen, setLabelOpen] = useState(false)
   const [matching, setMatching] = useState(false)
@@ -582,6 +597,31 @@ export default function OrderDrawer({
             </Button>
           </header>
 
+          {order ? (
+            <nav className="flex gap-1 border-b border-ink-200 bg-white px-3">
+              {TABS.map(({ key, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setTab(key)}
+                  className={cx(
+                    'border-b-2 px-3 py-2 text-sm',
+                    tab === key
+                      ? 'border-ink-900 font-medium text-ink-900'
+                      : 'border-transparent text-ink-500 hover:text-ink-800',
+                  )}
+                >
+                  {label}
+                  {key === 'lines' ? (
+                    <span className="ml-1.5 text-xs text-ink-400">
+                      {order.summary.line_count}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+          ) : null}
+
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
             {error ? <Alert tone="error">{error}</Alert> : null}
             {notice ? <Alert tone="info">{notice}</Alert> : null}
@@ -591,7 +631,7 @@ export default function OrderDrawer({
               </div>
             ) : (
               <>
-                <section>
+                <section className={tab === 'lines' ? undefined : 'hidden'}>
                   <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
                     Lines
                   </h3>
@@ -608,7 +648,12 @@ export default function OrderDrawer({
                   </ul>
                 </section>
 
-                <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+                <section
+                  className={cx(
+                    'rounded-lg bg-white p-3 ring-1 ring-ink-200',
+                    tab !== 'shipping' && 'hidden',
+                  )}
+                >
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
                     Shipping
                   </h3>
@@ -670,8 +715,8 @@ export default function OrderDrawer({
                   )}
                 </section>
 
-                <ShipTo order={order} />
-                <Money order={order} onRefreshed={load} />
+                {tab === 'shipping' ? <ShipTo order={order} /> : null}
+                {tab === 'money' ? <Money order={order} onRefreshed={load} /> : null}
 
                 <section className="flex flex-wrap gap-2">
                   <Button
@@ -939,25 +984,65 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
         </p>
       ) : null}
 
-      {order.fee_lines?.length ? (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-xs text-ink-500">
-            {order.fee_lines.length} fee line
-            {order.fee_lines.length === 1 ? '' : 's'} from Etsy's ledger
-          </summary>
-          <ul className="mt-1 space-y-0.5">
-            {order.fee_lines.map((line, index) => (
-              <li
-                key={`${line.ledger_entry_id ?? index}`}
-                className="flex justify-between gap-2 text-xs text-ink-500"
-              >
-                <span className="min-w-0 truncate">{line.description ?? line.kind}</span>
-                <span>{formatMoney(line.amount, currency)}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
+      {order.fee_lines?.length ? <FeeBreakdown order={order} /> : null}
+
     </section>
+  )
+}
+
+/** Etsy's fees, in Etsy's own words, grouped the way the totals above group them.
+ *
+ *  The totals answer "how much"; this answers "for what", which is the question
+ *  that actually gets asked — a marketing fee nobody expected is a decision to
+ *  revisit, and it cannot be revisited from a single number. Each line is
+ *  copied from the shop's payment ledger verbatim, so a figure that looks wrong
+ *  can be taken back to Etsy as their own sentence rather than as our arithmetic. */
+function FeeBreakdown({ order }: { order: Order }) {
+  const currency = order.currency ?? order.label_currency
+  const groups: { kind: string; label: string; total: string | null }[] = [
+    { kind: 'etsy', label: 'Etsy fees', total: order.etsy_fees },
+    { kind: 'marketing', label: 'Marketing fees', total: order.marketing_fees },
+    { kind: 'processing', label: 'Processing fees', total: order.processing_fees },
+  ]
+
+  return (
+    <div className="mt-3 border-t border-ink-200 pt-3">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+        Fee breakdown from Etsy
+      </h4>
+      <div className="mt-2 space-y-3">
+        {groups.map((group) => {
+          const lines = (order.fee_lines ?? []).filter((row) => row.kind === group.kind)
+          if (!lines.length) return null
+          return (
+            <div key={group.kind}>
+              <div className="flex justify-between text-sm font-medium text-ink-800">
+                <span>{group.label}</span>
+                <span>{formatMoney(group.total, currency)}</span>
+              </div>
+              <ul className="mt-0.5 space-y-0.5">
+                {lines.map((line, index) => (
+                  <li
+                    key={`${line.ledger_entry_id ?? index}`}
+                    className="flex justify-between gap-3 pl-3 text-xs text-ink-500"
+                  >
+                    <span className="min-w-0 flex-1 truncate" title={line.description ?? ''}>
+                      {line.description ?? '(no description)'}
+                    </span>
+                    <span className="shrink-0">{formatMoney(line.amount, currency)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        })}
+      </div>
+      <p className="mt-2 text-xs text-ink-400">
+        Straight from the shop's payment ledger, in Etsy's own wording.
+        {order.finance_synced_at
+          ? ` Last read ${formatDateTime(order.finance_synced_at)}.`
+          : ''}
+      </p>
+    </div>
   )
 }
