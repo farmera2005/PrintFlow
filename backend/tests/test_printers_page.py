@@ -1529,3 +1529,166 @@ class TestSpoolColour:
             {"id": 1, "ams": [{"tray_type": "PLA", "tray_color": "000000FF"}]}
         )
         assert row["filament"][0]["colour_hex"] == "#000000"
+
+
+class TestRealAmsShapes:
+    """The shape Bambu actually sends, and the ones builds send instead.
+
+    This is the case that was wrong in the first cut: `ams.ams[].tray[]` is a
+    list of AMS *units*, each holding its trays, and a reader that looks one
+    level down finds a list of units and calls it a list of spools. Nothing
+    showed, and the flattened "Everything" table hid it too, because that drops
+    lists of objects — so there was no way to see the thing that was missing.
+    """
+
+    def test_bambus_own_shape_units_of_trays(self):
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "0", "humidity": "4", "temp": "26.4",
+                            "tray": [
+                                {"id": "0", "tray_type": "PLA", "remain": 82},
+                                {"id": "1", "tray_type": "PETG", "remain": 41},
+                            ],
+                        }
+                    ],
+                    "tray_now": "0",
+                },
+            }
+        )
+        assert [(t["type"], t["remaining"]) for t in row["filament"]] == [
+            ("PLA", 82),
+            ("PETG", 41),
+        ]
+
+    def test_an_ams_unit_is_not_a_spool(self):
+        # A unit carries an id, a humidity and a temperature. Read as a spool
+        # it draws a tray of unknown filament that is not in the machine.
+        row = parse_printer(
+            {"id": 1, "ams": {"ams": [{"id": "0", "humidity": "4", "temp": "26.4"}]}}
+        )
+        assert row["filament"] == []
+
+    def test_two_units_are_one_list_of_slots(self):
+        # The operator loads a slot, not a unit.
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": {
+                    "ams": [
+                        {"id": "0", "tray": [{"id": "0", "tray_type": "PLA"}]},
+                        {"id": "1", "tray": [{"id": "0", "tray_type": "ABS"}]},
+                    ]
+                },
+            }
+        )
+        assert [t["type"] for t in row["filament"]] == ["PLA", "ABS"]
+        # Bambu numbers trays inside each unit, so both are its slot 0. Two
+        # rows labelled the same are worse than a straight count.
+        assert [t["slot"] for t in row["filament"]] == [1, 2]
+
+    def test_one_units_own_numbering_is_kept(self):
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "0",
+                            "tray": [
+                                {"id": "0", "tray_type": "PLA"},
+                                {"id": "2", "tray_type": "ABS"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        )
+        # It matches the machine's own screen, so it is left alone.
+        assert [t["slot"] for t in row["filament"]] == ["0", "2"]
+
+    def test_an_empty_slot_is_not_a_spool_of_unknown_filament(self):
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": {
+                    "ams": [
+                        {
+                            "id": "0",
+                            "tray": [
+                                {"id": "0", "tray_type": "PLA", "remain": 50},
+                                {"id": "1"},
+                                {"id": "2"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        )
+        assert [t["type"] for t in row["filament"]] == ["PLA"]
+
+    def test_the_external_spool_counts_too(self):
+        # It feeds past the AMS and is the one somebody threaded by hand.
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": {"ams": [{"id": "0", "tray": [{"id": "0", "tray_type": "PLA"}]}]},
+                "vt_tray": {"id": "254", "tray_type": "TPU", "tray_color": "F55C1AFF"},
+            }
+        )
+        assert [t["type"] for t in row["filament"]] == ["PLA", "TPU"]
+
+    def test_an_external_spool_on_its_own(self):
+        row = parse_printer(
+            {"id": 1, "vt_tray": {"tray_type": "PLA", "tray_color": "00AE42FF"}}
+        )
+        assert [(t["type"], t["colour_hex"]) for t in row["filament"]] == [
+            ("PLA", "#00ae42")
+        ]
+
+    def test_an_empty_external_spool_is_not_a_spool(self):
+        row = parse_printer({"id": 1, "vt_tray": {"id": "254"}})
+        assert row["filament"] == []
+
+    def test_the_shapes_that_already_worked_still_do(self):
+        # A flat list on the row, and a wrapper with trays in it.
+        assert [
+            t["type"]
+            for t in parse_printer(
+                {"id": 1, "ams": [{"type": "PLA"}, {"type": "ABS"}]}
+            )["filament"]
+        ] == ["PLA", "ABS"]
+        assert [
+            t["type"]
+            for t in parse_printer({"id": 1, "ams": {"trays": [{"tray_type": "PETG"}]}})[
+                "filament"
+            ]
+        ] == ["PETG"]
+
+    def test_a_build_that_buries_it_deeper_is_still_found(self):
+        row = parse_printer(
+            {"id": 1, "ams": {"units": [{"modules": [{"tray": [{"type": "PLA"}]}]}]}}
+        )
+        assert [t["type"] for t in row["filament"]] == ["PLA"]
+
+    def test_the_search_does_not_run_away_on_a_deep_reply(self):
+        deep: dict = {"type": "PLA"}
+        for _ in range(20):
+            deep = {"tray": deep}
+        assert parse_printer({"id": 1, "ams": deep})["filament"] == []
+
+    def test_a_filament_endpoint_gets_the_same_reader(self):
+        # Whatever the shape, it goes through one reader.
+        found = filament_rows({"ams": [{"id": "0", "tray": [{"tray_type": "PLA"}]}]})
+        assert [t["type"] for t in found] == ["PLA"]
+
+    def test_the_external_spool_is_labelled_not_numbered(self):
+        # Bambu calls it tray 254, which is an internal id rather than
+        # anything written on the machine.
+        row = parse_printer(
+            {"id": 1, "vt_tray": {"id": "254", "tray_type": "PLA", "remain": 30}}
+        )
+        assert [t["slot"] for t in row["filament"]] == ["Ext"]

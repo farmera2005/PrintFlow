@@ -707,12 +707,35 @@ may simply have nothing in it, and calling that unknown sends somebody to check
 a spool that is not there.
 
 Where that comes from depends on the build, and PrintFlow handles both without
-being told which it has. Most instances put the AMS on the printer row itself,
-in any of a dozen spellings — `ams`, `trays`, `filaments`, `slots`, a list or an
-object wrapping one — and it is read straight off. Some keep it on an endpoint
-of its own, and for those the endpoint is found in the instance's OpenAPI
-document (`/printers/{id}/filament`, `/ams`, `/spools`, `/trays`…) and asked
-once per machine that reported nothing.
+being told which it has. Most instances put the AMS on the printer row itself;
+some keep it on an endpoint of its own, and for those the endpoint is found in
+the instance's OpenAPI document (`/printers/{id}/filament`, `/ams`, `/spools`,
+`/trays`…) and asked once per machine that reported nothing.
+
+Either way the spools are **searched for rather than read from a fixed place**,
+because the shapes differ by more than a key name. Bambu's own is
+`ams.ams[].tray[]` — a list of AMS *units*, each holding its trays — which no
+amount of looking one level down will find; others send a bare list, a wrapper
+with `trays` in it, units inside modules, or a single spool. The one thing they
+all agree on is what a spool looks like once you are standing on it, so that is
+what the search looks for: a dictionary carrying a filament type, a colour or a
+remaining figure. An AMS *unit* carries an id, a humidity and a temperature and
+is therefore not a spool — reading it as one would draw four trays of unknown
+filament that are not in the machine.
+
+The external spool that feeds past the AMS is included as well, labelled *Ext*
+rather than by its number: Bambu calls it tray 254, which is an internal id and
+not anything written on the front of the machine. An empty slot is left out
+entirely. Where the machine's own tray numbers are unique they are kept, so the
+screen matches the printer; where they are not — two AMS units both number
+their trays from zero — they are replaced by a straight count, because two rows
+labelled the same is worse.
+
+**A machine that reports no spools says so, and shows its reply.** Empty is two
+different things: a machine with nothing loaded, and an AMS in a shape PrintFlow
+has not been pointed at. Only the instance can tell them apart, so the Filament
+section prints what the machine actually sent rather than leaving a blank —
+the same move as the camera panel, and for the same reason.
 
 That second call has to be free on the builds that do not need it, so the
 answer is stored beside the connection the same way the camera's is: a build

@@ -848,8 +848,57 @@ def _colour_label(value: Any) -> str | None:
     return None if code else text
 
 
+# What makes a dictionary a spool rather than the box a spool sits in. At
+# least one of these has to be present: an AMS *unit* carries an id, a humidity
+# and a temperature, and reading it as a spool would draw four empty trays.
+TRAY_FIELDS = (
+    "type", "filament_type", "tray_type", "material",
+    "colour", "color", "tray_color",
+    "remain", "remaining", "percent",
+    "tray_sub_brands", "tray_info_idx",
+)
+
+# The names a build might put spools under, at any depth.
+TRAY_KEYS = (
+    "tray", "trays", "ams", "ams_units", "units", "modules", "slots",
+    "filaments", "spools", "items", "data",
+)
+
+
+def _is_tray(row: Any) -> bool:
+    return isinstance(row, dict) and any(field in row for field in TRAY_FIELDS)
+
+
+def _spools(node: Any, depth: int = 0) -> list[dict[str, Any]]:
+    """Every spool under here, wherever this build decided to put them.
+
+    Searched rather than read from a fixed place, because the shapes genuinely
+    differ by more than a key name. Bambu's own is `ams.ams[].tray[]` — a list
+    of AMS *units*, each holding its trays — which no amount of looking one
+    level down will find; others send a bare list, or a single spool, or trays
+    under `slots`. The one thing they agree on is what a spool looks like once
+    you are standing on it, so that is what this looks for.
+    """
+    # Deep enough for a build that nests units inside modules inside a
+    # wrapper, and shallow enough that a reply which is somehow circular stops
+    # rather than being walked forever.
+    if depth > 8:
+        return []
+    if isinstance(node, list):
+        return [spool for item in node for spool in _spools(item, depth + 1)]
+    if not isinstance(node, dict):
+        return []
+    if _is_tray(node):
+        return [node]
+    found: list[dict[str, Any]] = []
+    for key in TRAY_KEYS:
+        if key in node:
+            found.extend(_spools(node[key], depth + 1))
+    return found
+
+
 def _trays(rows: Any) -> list[dict[str, Any]]:
-    """A list of spool rows, however this build spells a spool's columns."""
+    """Spool dictionaries, read into the one shape the page draws."""
     trays = []
     for index, row in enumerate(rows if isinstance(rows, list) else []):
         if not isinstance(row, dict):
@@ -857,7 +906,7 @@ def _trays(rows: Any) -> list[dict[str, Any]]:
         colour = _first_scalar(row, "colour", "color", "tray_color", "hex", "rgb")
         trays.append(
             {
-                "slot": _first_scalar(row, "slot", "id", "tray_id") or index + 1,
+                "slot": _first_scalar(row, "slot", "id", "tray_id"),
                 "type": _first_scalar(
                     row, "type", "filament_type", "tray_type", "material"
                 ),
@@ -874,44 +923,34 @@ def _trays(rows: Any) -> list[dict[str, Any]]:
                 ),
             }
         )
+        trays[-1]["_index"] = index
+
+    # An empty slot reports nothing at all. Drawing it as a spool of unknown
+    # filament sends somebody to check a reel that is not there.
+    trays = [
+        tray
+        for tray in trays
+        if tray["type"] or tray["colour"] or tray["colour_hex"]
+        or tray["remaining"] is not None
+    ]
+
+    # Bambu numbers its trays 0-3 *within each AMS unit*, so a machine with two
+    # units reports two slot 0s. Where the machine's own numbering is not
+    # unique it is dropped for a straight count, because two rows labelled the
+    # same are worse than rows labelled differently from the printer's screen.
+    slots = [tray["slot"] for tray in trays]
+    unique = len({str(slot) for slot in slots}) == len(slots) and all(
+        slot is not None for slot in slots
+    )
+    for position, tray in enumerate(trays):
+        tray["slot"] = tray["slot"] if unique else position + 1
+        tray.pop("_index", None)
     return trays
 
 
-# Where a reply about filament keeps the spools, when it is not simply a list.
-TRAY_KEYS = ("trays", "tray", "ams", "filaments", "slots", "spools", "items", "data")
-
-
 def filament_rows(payload: Any) -> list[dict[str, Any]]:
-    """What is loaded, from a reply that is only ever about that.
-
-    A build with its own filament endpoint answers with the spools as a bare
-    list, or wrapped one layer deep under any of half a dozen names, or — for a
-    machine with no AMS — as the single spool itself. All three are the one
-    short list the page draws.
-    """
-    if isinstance(payload, list):
-        return _trays(payload)
-    if not isinstance(payload, dict):
-        return []
-    for key in TRAY_KEYS:
-        found = _trays(payload.get(key))
-        if found:
-            return found
-    # An AMS reported as units, each with its own trays: flatten, because the
-    # operator loads a slot, not a unit.
-    for key in ("units", "ams_units", "modules"):
-        units = payload.get(key)
-        if isinstance(units, list):
-            flat = [
-                tray
-                for unit in units
-                if isinstance(unit, dict)
-                for tray in _trays(unit.get("trays") or unit.get("tray"))
-            ]
-            if flat:
-                return flat
-    lone = _trays([payload])
-    return lone if lone and lone[0]["type"] else []
+    """What is loaded, from a reply that is only ever about that."""
+    return _trays(_spools(payload))
 
 
 def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
@@ -921,13 +960,26 @@ def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
     or nothing at all. All three become the same short list so the page does
     not have to care which kind of machine it is drawing.
     """
-    for key in ("ams", "trays", "filaments", "slots"):
-        rows = look.get(key)
-        if isinstance(rows, dict):
-            rows = rows.get("trays") or rows.get("tray") or []
-        trays = _trays(rows)
-        if trays:
-            return trays
+    spools = _spools({key: look[key] for key in TRAY_KEYS if key in look})
+
+    # The external spool — the one that feeds past the AMS. Bambu calls it
+    # `vt_tray` and keeps it beside the AMS rather than inside it, so it is
+    # appended rather than used as a fallback: a machine can have both loaded,
+    # and the one on the side is the one somebody threaded by hand.
+    for key in ("vt_tray", "external_spool", "ext_tray"):
+        external = look.get(key)
+        if isinstance(external, dict):
+            # Labelled rather than numbered: Bambu calls this one tray 254,
+            # which is an internal id and not a thing on the front of the
+            # machine. "Ext" is what the operator is looking at.
+            spools.append({**external, "slot": "Ext"})
+            break
+
+    found = _trays(spools)
+    if found:
+        return found
+
+    single = _first_scalar(look, "filament_type", "material", "loaded_filament")
     single = _first_scalar(look, "filament_type", "material", "loaded_filament")
     if single:
         # The same row, read as one spool — so it goes through the same reader

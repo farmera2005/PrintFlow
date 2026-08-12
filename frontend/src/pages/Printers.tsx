@@ -904,9 +904,20 @@ function PrinterDetail({
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-ink-400">
-                This machine did not say what is loaded.
-              </p>
+              // Empty is two very different things: a machine with nothing
+              // loaded, and a build that keeps its AMS somewhere PrintFlow did
+              // not look. Only the instance can tell them apart, so it is
+              // asked rather than guessed at — the same move as the camera
+              // panel. The reply below is the machine's own, unedited.
+              <div className="mt-1 space-y-2">
+                <p className="text-xs text-ink-500">
+                  This machine reported no spools. That is either an empty
+                  machine or an AMS somewhere PrintFlow has not been pointed
+                  at — the reply below is what it actually sent. If there are
+                  trays in it, that is a shape worth reporting.
+                </p>
+                <RawReplies endpoint="/api/printers/raw" />
+              </div>
             )}
           </div>
         </div>
