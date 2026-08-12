@@ -1,8 +1,26 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { JOB_STATUS_CLASSES, formatDateTime } from '../lib/format'
-import type { CameraReport, FarmOverview, FarmPrinter, QueueJob } from '../lib/types'
-import { Alert, Badge, Button, Card, EmptyState, Modal, Spinner, cx } from '../components/ui'
+import type {
+  CameraReport,
+  FarmOverview,
+  FarmPrinter,
+  FarmSummary,
+  QueueJob,
+} from '../lib/types'
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Field,
+  Modal,
+  Spinner,
+  cx,
+  inputClass,
+} from '../components/ui'
+import PrintFilePicker, { type FileChoice } from '../components/PrintFilePicker'
 import RawReplies from '../components/RawReplies'
 
 /** How often the farm is re-read. A print takes hours; this is about a person
@@ -163,6 +181,10 @@ export default function Printers() {
           </div>
         ) : (
           <>
+            {farm.summary && farm.printers.length ? (
+              <FarmSummaryStrip summary={farm.summary} />
+            ) : null}
+
             {farm.printers.length === 0 ? (
               <EmptyState
                 title={farm.error ? 'The farm could not be read' : 'Bambuddy listed no printers'}
@@ -235,7 +257,11 @@ export default function Printers() {
       </div>
 
       {watched ? (
-        <WatchPrinter printer={watched} onClose={() => setWatching(null)} />
+        <PrinterDetail
+          printer={watched}
+          onClose={() => setWatching(null)}
+          onPrinted={load}
+        />
       ) : null}
     </div>
   )
@@ -271,9 +297,23 @@ function PrinterCard({
           )}
           title={printer.online === false ? 'Offline' : 'Online'}
         />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-900">
-          {printer.name ?? `Printer ${printer.id ?? '—'}`}
-        </span>
+        {/* A machine with no id cannot be asked anything further — no page to
+            open, no camera to fetch, nothing to print on. It is still a
+            machine and still gets a card. */}
+        {printer.id === null ? (
+          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-900">
+            {printer.name ?? 'Unnamed printer'}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={onWatch}
+            className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-ink-900 underline decoration-ink-300 underline-offset-2 hover:decoration-ink-800"
+            title="Everything this machine reports"
+          >
+            {printer.name ?? `Printer ${printer.id}`}
+          </button>
+        )}
         {printer.model ? <Badge>{printer.model}</Badge> : null}
         <Badge className={state.tone}>{state.label}</Badge>
       </div>
@@ -310,6 +350,30 @@ function PrinterCard({
           {nozzle ? <span>nozzle {nozzle}</span> : null}
           {bed ? <span>bed {bed}</span> : null}
           {chamber ? <span>chamber {chamber}</span> : null}
+          {printer.nozzle_diameter ? <span>{printer.nozzle_diameter}mm</span> : null}
+        </p>
+      ) : null}
+
+      {/* What is loaded, at a glance. The one thing that decides whether a
+          plate can go on this machine at all, and the one thing a card of
+          temperatures never tells you. */}
+      {printer.filament?.length ? (
+        <p className="flex flex-wrap gap-1 text-xs">
+          {printer.filament.slice(0, 4).map((spool) => (
+            <span
+              key={String(spool.slot)}
+              className="rounded bg-ink-100 px-1.5 py-0.5 text-ink-600"
+              title={`Slot ${spool.slot}${spool.colour ? ` · ${spool.colour}` : ''}${
+                spool.remaining === null ? '' : ` · ${spool.remaining}%`
+              }`}
+            >
+              {spool.type ?? '—'}
+              {spool.remaining === null ? '' : ` ${spool.remaining}%`}
+            </span>
+          ))}
+          {printer.filament.length > 4 ? (
+            <span className="text-ink-400">+{printer.filament.length - 4}</span>
+          ) : null}
         </p>
       ) : null}
 
@@ -483,23 +547,358 @@ function WhyNoCameras() {
   )
 }
 
-/** One machine, watched: the same frames, bigger and much more often.
+/** The farm in one line, above the cards.
  *
- *  Once a second, because somebody is looking at it. It is still frames rather
- *  than a stream for the same reason as the cards, but here the cost is one
- *  machine for as long as the panel is open rather than the whole farm for as
- *  long as the tab is. */
-function WatchPrinter({
+ *  Standing in the shop the first question is not about any one machine: it is
+ *  how much of the farm is working, how much of it is standing idle, and when
+ *  the busy ones come free. That is three numbers and a time, and reading them
+ *  off ten cards is work the page can do instead. */
+function FarmSummaryStrip({ summary }: { summary: FarmSummary }) {
+  const free = duration(summary.busy_until_minutes)
+  // Every state the farm reported that is not one of the three named below —
+  // paused, failed, and whatever a build calls something PrintFlow has no word
+  // for. These are the ones worth walking over to, so they are not swallowed.
+  const others = Object.entries(summary.by_state)
+    .filter(([name]) => !['printing', 'idle', 'offline'].includes(name))
+    .sort((a, b) => b[1] - a[1])
+
+  return (
+    <Card className="flex flex-wrap items-center gap-x-6 gap-y-2 p-3">
+      <Stat label="Machines" value={summary.machines} />
+      <Stat label="Printing" value={summary.printing} tone="text-amber-700" />
+      <Stat label="Idle" value={summary.idle} tone="text-emerald-700" />
+      {summary.offline ? (
+        <Stat label="Offline" value={summary.offline} tone="text-ink-500" />
+      ) : null}
+      {others.map(([name, count]) => (
+        <Stat key={name} label={name} value={count} tone="text-sky-700" />
+      ))}
+      <div className="hidden h-8 w-px bg-ink-200 sm:block" />
+      <Stat
+        label="Plates open"
+        value={summary.plates_open}
+        note={summary.plates_waiting ? `${summary.plates_waiting} not on a machine` : null}
+      />
+      <Stat label="Units to make" value={summary.units_open} />
+      {summary.machines && !summary.printing && !summary.plates_open ? (
+        <p className="text-xs text-ink-500">Nothing outstanding.</p>
+      ) : null}
+      {free ? (
+        <div className="ml-auto text-xs text-ink-500">
+          Farm clear in {free.replace(' left', '')}
+        </div>
+      ) : null}
+    </Card>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+  note,
+}: {
+  label: string
+  value: number
+  tone?: string
+  note?: string | null
+}) {
+  return (
+    <div>
+      <p className={cx('text-lg font-semibold leading-none', tone ?? 'text-ink-900')}>
+        {value}
+      </p>
+      {/* Only the first letter: the named stats are written properly already,
+          and the ones from the farm's own vocabulary arrive lower-case. */}
+      <p className="mt-1 text-xs text-ink-500 first-letter:uppercase">{label}</p>
+      {note ? <p className="text-xs text-amber-700">{note}</p> : null}
+    </div>
+  )
+}
+
+/** One machine's own page: everything it reports, and a way to print on it.
+ *
+ *  Three tabs because the three questions are different. *Now* is what a person
+ *  standing at the machine wants — the picture, the progress, the plates on it.
+ *  *Machine* is what it is rather than what it is doing, which barely changes
+ *  and is what you need when something is wrong. *Everything* is the honest
+ *  answer to "all available metrics": PrintFlow cannot know what a given build
+ *  reports, so the whole flattened reply is there, untouched. */
+function PrinterDetail({
   printer,
   onClose,
+  onPrinted,
 }: {
   printer: FarmPrinter
   onClose: () => void
+  onPrinted: () => void | Promise<void>
 }) {
-  const [shown, setShown] = useState<string | null>(null)
-  const [broken, setBroken] = useState(false)
+  const [tab, setTab] = useState<'now' | 'machine' | 'everything'>('now')
+  const [picking, setPicking] = useState(false)
+  const [chosen, setChosen] = useState<FileChoice | null>(null)
+  const [sent, setSent] = useState<string | null>(null)
   const state = machineState(printer)
   const left = duration(printer.remaining_minutes)
+
+  // The picker and the confirmation are full panels of their own. Showing them
+  // instead of this one rather than on top of it: stacked dialogs are two
+  // Escape presses and an ambiguous backdrop, and there is nothing on the page
+  // behind them worth reading while a file is being picked.
+  if (picking) {
+    return (
+      <PrintFilePicker
+        choice={{ printer_id: Number(printer.id), printer_models: [] }}
+        onClose={() => setPicking(false)}
+        onPick={(picked) => {
+          setChosen(picked)
+          setPicking(false)
+        }}
+      />
+    )
+  }
+  if (chosen) {
+    return (
+      <PrintNow
+        printer={printer}
+        file={chosen}
+        onClose={() => setChosen(null)}
+        onDone={async (message) => {
+          setChosen(null)
+          setSent(message)
+          await onPrinted()
+        }}
+      />
+    )
+  }
+
+  return (
+    <Modal open title={printer.name ?? `Printer ${printer.id}`} onClose={onClose} wide>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-ink-500">
+        <Badge className={state.tone}>{state.label}</Badge>
+        {printer.model ? <Badge>{printer.model}</Badge> : null}
+        {printer.serial ? <span className="font-mono">{printer.serial}</span> : null}
+        <Button className="ml-auto" onClick={() => setPicking(true)}>
+          Print a file
+        </Button>
+      </div>
+
+      {sent ? (
+        <div className="mb-3">
+          <Alert tone="success">{sent}</Alert>
+        </div>
+      ) : null}
+
+      <div className="mb-3 flex gap-1 border-b border-ink-200">
+        {(
+          [
+            ['now', 'Now'],
+            ['machine', 'Machine'],
+            ['everything', `Everything (${Object.keys(printer.reported ?? {}).length})`],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={cx(
+              '-mb-px border-b-2 px-3 py-1.5 text-sm',
+              tab === key
+                ? 'border-ink-800 font-medium text-ink-900'
+                : 'border-transparent text-ink-500 hover:text-ink-800',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'now' ? (
+        <div className="space-y-3">
+          {printer.camera ? (
+            <LiveCamera printer={printer} />
+          ) : (
+            <p className="text-xs text-ink-400">No camera on this machine.</p>
+          )}
+
+          {printer.progress !== null &&
+          (printer.progress > 0 || state.label === 'printing') ? (
+            <div>
+              <div className="h-2 overflow-hidden rounded-full bg-ink-200">
+                <div
+                  className="h-full rounded-full bg-sky-500"
+                  style={{ width: `${Math.min(100, Math.max(0, printer.progress))}%` }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-ink-500">
+                {printer.progress}%{left ? ` · ${left}` : ''}
+                {printer.layers
+                  ? ` · layer ${printer.layer ?? '—'}/${printer.layers}`
+                  : ''}
+              </p>
+            </div>
+          ) : null}
+
+          <Readings
+            rows={[
+              ['Printing', printer.current_file],
+              ['Started', printer.print_started_at],
+              ['Nozzle', temperature(printer.nozzle_temp, printer.nozzle_target)],
+              ['Bed', temperature(printer.bed_temp, printer.bed_target)],
+              ['Chamber', temperature(printer.chamber_temp, null)],
+              ['Part fan', printer.fan_speed === null ? null : `${printer.fan_speed}%`],
+              ['Speed', printer.speed_level],
+              ['Light', printer.chamber_light],
+              ['Door', printer.door_open],
+            ]}
+          />
+
+          {printer.error ? <Alert tone="error">{String(printer.error)}</Alert> : null}
+
+          <div>
+            <h3 className="text-sm font-semibold text-ink-800">
+              PrintFlow plates on this machine
+            </h3>
+            {printer.plates.length ? (
+              <div className="divide-y divide-ink-100">
+                {printer.plates.map((job) => (
+                  <div key={job.id} className="flex flex-wrap items-center gap-2 py-1.5 text-xs">
+                    <Badge className={JOB_STATUS_CLASSES[job.status]}>{job.status}</Badge>
+                    <span className="font-mono text-ink-900">#{job.order_number ?? '—'}</span>
+                    <span className="min-w-0 flex-1 truncate text-ink-600">
+                      {job.product_name ?? job.sku ?? '—'}
+                    </span>
+                    <span className="text-ink-500">
+                      plate {job.plate_number ?? '—'} · {job.units_expected}u
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-ink-400">
+                None. Anything printing now was started somewhere other than
+                PrintFlow — the machine still reports it above.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === 'machine' ? (
+        <div className="space-y-3">
+          <Readings
+            rows={[
+              ['Model', printer.model],
+              ['Serial', printer.serial],
+              ['Firmware', printer.firmware],
+              ['Address', printer.ip],
+              ['Online', printer.online],
+              ['Nozzle', printer.nozzle_diameter ? `${printer.nozzle_diameter} mm` : null],
+              ['Nozzle type', printer.nozzle_type],
+              ['Wi-Fi', printer.wifi_signal],
+              ['Prints completed', printer.prints_completed],
+              ['Total print time', printer.total_print_time],
+            ]}
+          />
+
+          <div>
+            <h3 className="text-sm font-semibold text-ink-800">Filament</h3>
+            {printer.filament?.length ? (
+              <div className="mt-1 grid gap-1.5 sm:grid-cols-2">
+                {printer.filament.map((spool) => (
+                  <div
+                    key={String(spool.slot)}
+                    className="flex items-center gap-2 rounded-md bg-ink-50 px-2 py-1.5 text-xs"
+                  >
+                    <span className="font-medium text-ink-700">{spool.slot}</span>
+                    <span className="text-ink-900">{spool.type ?? 'unknown'}</span>
+                    {spool.colour ? (
+                      <span className="text-ink-500">{spool.colour}</span>
+                    ) : null}
+                    {spool.remaining === null ? null : (
+                      <span className="ml-auto text-ink-500">{spool.remaining}%</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-ink-400">
+                This machine did not say what is loaded.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === 'everything' ? (
+        <div className="space-y-2">
+          <p className="text-xs text-ink-500">
+            Every field this Bambuddy sent for this machine, flattened and
+            unedited. PrintFlow reads the handful it understands into the pages
+            above; the rest is here so nothing the instance knows is hidden.
+          </p>
+          {Object.keys(printer.reported ?? {}).length ? (
+            <div className="overflow-hidden rounded-md ring-1 ring-ink-200">
+              <table className="w-full text-xs">
+                <tbody className="divide-y divide-ink-100">
+                  {Object.entries(printer.reported)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([key, value]) => (
+                      <tr key={key} className="odd:bg-ink-50">
+                        <td className="w-1/2 break-all px-2 py-1 font-mono text-ink-600">
+                          {key}
+                        </td>
+                        <td className="break-all px-2 py-1 text-ink-900">
+                          {value === null ? '—' : String(value)}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Alert tone="warning">
+              This machine's row held nothing PrintFlow could flatten. The raw
+              replies below are what Bambuddy actually sent.
+            </Alert>
+          )}
+          <RawReplies endpoint="/api/printers/raw" />
+        </div>
+      ) : null}
+    </Modal>
+  )
+}
+
+/** A row of readings, with the ones this build did not report left out.
+ *
+ *  Blank labels are worse than no label: a machine that reports no chamber
+ *  temperature and a chamber at 0° look the same in a table of empty cells. */
+function Readings({ rows }: { rows: [string, unknown][] }) {
+  const shown = rows.filter(
+    ([, value]) => value !== null && value !== undefined && value !== '',
+  )
+  if (!shown.length) return null
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-3">
+      {shown.map(([label, value]) => (
+        <div key={label} className="min-w-0">
+          <dt className="text-ink-500">{label}</dt>
+          <dd className="truncate font-medium text-ink-900" title={String(value)}>
+            {typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** The picture, bigger and much more often, because somebody is watching.
+ *
+ *  Once a second. It is still frames rather than a stream for the same reason
+ *  as the cards, but here the cost is one machine for as long as the panel is
+ *  open rather than the whole farm for as long as the tab is. */
+function LiveCamera({ printer }: { printer: FarmPrinter }) {
+  const [shown, setShown] = useState<string | null>(null)
+  const [broken, setBroken] = useState(false)
 
   // Each frame is fetched out of sight and only swapped in once it has
   // arrived, so the picture never blinks through empty. And the next one is
@@ -536,24 +935,12 @@ function WatchPrinter({
   }, [printer.id])
 
   return (
-    <Modal open title={printer.name ?? `Printer ${printer.id}`} onClose={onClose} wide>
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-500">
-        <Badge className={state.tone}>{state.label}</Badge>
-        {printer.model ? <Badge>{printer.model}</Badge> : null}
-        {printer.progress !== null && printer.progress > 0 ? (
-          <span>
-            {printer.progress}%{left ? ` · ${left}` : ''}
-            {printer.layers ? ` · layer ${printer.layer ?? '—'}/${printer.layers}` : ''}
-          </span>
-        ) : null}
-        {printer.current_file ? <span>{printer.current_file}</span> : null}
-      </div>
-
+    <div>
       {shown ? (
         <img
           src={shown}
           alt={`Camera on ${printer.name ?? 'this printer'}`}
-          className="max-h-[70vh] w-full rounded-md bg-ink-900 object-contain"
+          className="max-h-[50vh] w-full rounded-md bg-ink-900 object-contain"
         />
       ) : broken ? null : (
         <div className="flex h-64 items-center justify-center rounded-md bg-ink-900">
@@ -568,12 +955,121 @@ function WatchPrinter({
             or this machine may not have one — PrintFlow keeps asking.
           </Alert>
         </div>
-      ) : null}
+      ) : (
+        <p className="mt-1 text-xs text-ink-500">
+          A new picture every second, taken through PrintFlow — the camera
+          itself is on the shop network and behind Bambuddy's key.
+        </p>
+      )}
+    </div>
+  )
+}
 
-      <p className="mt-2 text-xs text-ink-500">
-        A new picture every second, taken through PrintFlow — the camera itself
-        is on the shop network and behind Bambuddy's key.
-      </p>
+/** Send a file straight to this machine — the reprint, the test piece.
+ *
+ *  A confirmation step rather than printing the moment a file is picked: this
+ *  spends filament on a machine that may have something on it already, and the
+ *  file list is close enough together that the wrong row is one scroll away.
+ *  Nothing here touches an order; the plate is Bambuddy's from the moment it
+ *  is queued, which is why the panel says so. */
+function PrintNow({
+  printer,
+  file,
+  onClose,
+  onDone,
+}: {
+  printer: FarmPrinter
+  file: FileChoice
+  onClose: () => void
+  onDone: (message: string) => void | Promise<void>
+}) {
+  const [plateNumber, setPlateNumber] = useState(1)
+  const [copies, setCopies] = useState(1)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const busyNow = machineState(printer).label === 'printing'
+
+  const send = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.post<{ copies: number }>(
+        `/api/printers/${printer.id}/print`,
+        {
+          bambuddy_archive_id: file.archive_id,
+          bambuddy_file_path: file.file_path,
+          name: file.name,
+          plate_number: plateNumber,
+          copies,
+        },
+      )
+      await onDone(
+        `Sent ${file.name} to ${printer.name ?? `printer ${printer.id}`}` +
+          `${result.copies > 1 ? ` — ${result.copies} copies` : ''}.`,
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal open title="Print this now" onClose={onClose}>
+      <div className="space-y-3">
+        <p className="text-sm text-ink-700">
+          <span className="font-medium">{file.name}</span> on{' '}
+          <span className="font-medium">{printer.name ?? `printer ${printer.id}`}</span>.
+        </p>
+
+        {busyNow ? (
+          <Alert tone="warning">
+            This machine is printing something. Bambuddy will hold the file in
+            its queue until the plate on it now is finished and cleared.
+          </Alert>
+        ) : null}
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Plate" hint="Which plate inside the file.">
+            <input
+              className={inputClass}
+              type="number"
+              min={1}
+              value={plateNumber}
+              onChange={(event) => setPlateNumber(Math.max(1, Number(event.target.value) || 1))}
+            />
+          </Field>
+          <Field label="Copies" hint="Queued one after another.">
+            <input
+              className={inputClass}
+              type="number"
+              min={1}
+              max={50}
+              value={copies}
+              onChange={(event) =>
+                setCopies(Math.min(50, Math.max(1, Number(event.target.value) || 1)))
+              }
+            />
+          </Field>
+        </div>
+
+        {error ? <Alert tone="error">{error}</Alert> : null}
+
+        <p className="text-xs text-ink-500">
+          This is not attached to an order and will not count towards one. It
+          goes into Bambuddy's queue for this machine, and the plate has to be
+          cleared by hand like any other.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={send} disabled={busy}>
+            {busy ? 'Sending…' : copies > 1 ? `Print ${copies} copies` : 'Print'}
+          </Button>
+        </div>
+      </div>
     </Modal>
   )
 }

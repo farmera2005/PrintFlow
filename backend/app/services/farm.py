@@ -58,6 +58,61 @@ def camera_url_for(printer_id: Any) -> str:
     return _camera_urls.get(str(printer_id), "")
 
 
+RUNNING_WORDS = ("running", "printing", "busy", "prepare")
+IDLE_WORDS = ("idle", "finish", "finished", "ready", "standby")
+
+
+def _doing(printer: dict[str, Any]) -> str:
+    """One word for what a machine is up to, from whichever field said it."""
+    if printer.get("online") is False:
+        return "offline"
+    word = str(printer.get("state") or printer.get("status") or "").strip().lower()
+    if word in RUNNING_WORDS:
+        return "printing"
+    if word in ("pause", "paused"):
+        return "paused"
+    if word in ("failed", "error"):
+        return "failed"
+    if word in IDLE_WORDS:
+        return "idle"
+    return "unknown"
+
+
+def _summary(printers: list[dict[str, Any]], plates: list[dict[str, Any]]) -> dict[str, Any]:
+    """The farm in one line, for the top of the page.
+
+    What a person wants before they read any card: how much of the farm is
+    working, how much of it could be, and when the machines that are busy will
+    be free. The longest remaining time is the one that matters — the farm is
+    clear when the last one finishes, not the first.
+    """
+    doing: dict[str, int] = {}
+    for printer in printers:
+        state = _doing(printer)
+        doing[state] = doing.get(state, 0) + 1
+
+    remaining = [
+        printer["remaining_minutes"]
+        for printer in printers
+        if _doing(printer) == "printing"
+        and isinstance(printer.get("remaining_minutes"), int)
+        and printer["remaining_minutes"] > 0
+    ]
+    open_plates = [plate for plate in plates if plate["status"] in OPEN_STATUSES]
+    return {
+        "machines": len(printers),
+        "by_state": doing,
+        "printing": doing.get("printing", 0),
+        "idle": doing.get("idle", 0),
+        "offline": doing.get("offline", 0),
+        # When the whole farm is free, not the first machine to finish.
+        "busy_until_minutes": max(remaining) if remaining else None,
+        "plates_open": len(open_plates),
+        "plates_waiting": sum(1 for plate in open_plates if plate["printer_id"] is None),
+        "units_open": sum(plate["units_expected"] for plate in open_plates),
+    }
+
+
 async def overview(session: AsyncSession) -> dict[str, Any]:
     """Every machine with its plates, plus the plates that have no machine.
 
@@ -106,6 +161,7 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
 
     return {
         "printers": cards,
+        "summary": _summary(cards, plates),
         "unplaced": homeless,
         "plates": plates,
         "error": error,

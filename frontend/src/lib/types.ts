@@ -330,6 +330,27 @@ export interface FarmPrinter extends BambuddyPrinter {
   bed_target: number | null
   chamber_temp: number | null
   error: string | null
+  /** What the machine is, beyond what it is doing. All optional — builds
+   *  differ on which of these they report, and most report only some. */
+  serial: string | null
+  firmware: string | null
+  ip: string | null
+  nozzle_diameter: number | null
+  nozzle_type: string | null
+  wifi_signal: string | number | null
+  speed_level: string | number | null
+  fan_speed: number | null
+  chamber_light: string | boolean | null
+  door_open: string | boolean | null
+  print_started_at: string | number | null
+  total_print_time: number | null
+  prints_completed: number | null
+  /** What is loaded — one entry per AMS tray, or one for a lone spool. */
+  filament: { slot: number | string; type: string | null; colour: string | null; remaining: number | null }[]
+  /** Every field the instance sent, flattened and untouched. This is what
+   *  "all available metrics" has to mean: PrintFlow cannot know what a given
+   *  build reports, so the machine's own page shows the lot. */
+  reported: Record<string, string | number | boolean | null>
   /** Whether PrintFlow can fetch a picture from this machine. False when the
    *  build has no camera, or keeps it somewhere PrintFlow will not follow. */
   camera: boolean
@@ -363,8 +384,23 @@ export interface CameraReport {
   } | null
 }
 
+/** The farm in one line, for the top of the page. */
+export interface FarmSummary {
+  machines: number
+  by_state: Record<string, number>
+  printing: number
+  idle: number
+  offline: number
+  /** When the whole farm is free — the longest job left, not the shortest. */
+  busy_until_minutes: number | null
+  plates_open: number
+  plates_waiting: number
+  units_open: number
+}
+
 export interface FarmOverview {
   printers: FarmPrinter[]
+  summary: FarmSummary
   /** Plates with no machine yet, or on a machine the farm no longer lists. */
   unplaced: QueueJob[]
   /** Every plate, finished ones included — the history the farm cards omit. */

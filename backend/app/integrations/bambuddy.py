@@ -719,6 +719,73 @@ def _fault(value: Any) -> str | None:
     return None if text.lower() in _NO_FAULT else text
 
 
+def _flatten(
+    data: dict[str, Any], prefix: str = "", depth: int = 0, limit: int = 200
+) -> dict[str, Any]:
+    """Every scalar the machine reported, by its own name.
+
+    Two levels deep and no further: past that it is arrays of per-layer data
+    and other things a person does not read off a screen.
+    """
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict) and depth < 2:
+            out.update(_flatten(value, f"{name}.", depth + 1, limit))
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            out[name] = value
+        elif isinstance(value, list) and value and not isinstance(value[0], (dict, list)):
+            out[name] = ", ".join(str(item) for item in value[:12])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _filament(look: dict[str, Any]) -> list[dict[str, Any]]:
+    """What is loaded, as trays.
+
+    A machine with an AMS reports several; one without reports a single spool,
+    or nothing at all. All three become the same short list so the page does
+    not have to care which kind of machine it is drawing.
+    """
+    for key in ("ams", "trays", "filaments", "slots"):
+        rows = look.get(key)
+        if isinstance(rows, dict):
+            rows = rows.get("trays") or rows.get("tray") or []
+        if isinstance(rows, list) and rows:
+            trays = []
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                trays.append(
+                    {
+                        "slot": _first_scalar(row, "slot", "id", "tray_id") or index + 1,
+                        "type": _first_scalar(
+                            row, "type", "filament_type", "tray_type", "material"
+                        ),
+                        "colour": _first_scalar(
+                            row, "colour", "color", "tray_color", "hex", "rgb"
+                        ),
+                        "remaining": _rounded(
+                            _first_scalar(row, "remaining", "remain", "percent")
+                        ),
+                    }
+                )
+            if trays:
+                return trays
+    single = _first_scalar(look, "filament_type", "material", "loaded_filament")
+    if single:
+        return [
+            {
+                "slot": 1,
+                "type": single,
+                "colour": _first_scalar(look, "filament_colour", "filament_color"),
+                "remaining": None,
+            }
+        ]
+    return []
+
+
 def parse_printer(row: dict[str, Any]) -> dict[str, Any]:
     """One machine, as much of it as this build cares to say.
 
@@ -779,12 +846,49 @@ def parse_printer(row: dict[str, Any]) -> dict[str, Any]:
         "error": _fault(
             _first_scalar(look, "error", "print_error", "error_message", "last_error")
         ),
+        # The rest of what a machine will say about itself. None of it changes
+        # what PrintFlow does; all of it is what somebody walks over to the
+        # printer to look at, so it belongs on the machine's own page.
+        "serial": _first_scalar(look, "serial", "serial_number", "dev_id", "device_id"),
+        "firmware": _first_scalar(
+            look, "firmware", "firmware_version", "fw_ver", "version"
+        ),
+        "ip": _first_scalar(look, "ip", "ip_address", "host", "address"),
+        "nozzle_diameter": _number(
+            _first_scalar(look, "nozzle_diameter", "nozzle_size", "nozzle_diameter_mm")
+        ),
+        "nozzle_type": _first_scalar(look, "nozzle_type", "nozzle_material"),
+        "wifi_signal": _first_scalar(look, "wifi_signal", "wifi", "rssi", "signal"),
+        "speed_level": _first_scalar(look, "speed_level", "spd_lvl", "print_speed"),
+        "fan_speed": _rounded(
+            _first_scalar(look, "fan_speed", "cooling_fan_speed", "part_fan_speed")
+        ),
+        "chamber_light": _first_scalar(look, "chamber_light", "light", "lights"),
+        "door_open": _first_scalar(look, "door_open", "door", "is_door_open"),
+        "print_started_at": _first_scalar(
+            look, "print_started_at", "start_time", "started_at", "task_start_time"
+        ),
+        "total_print_time": _rounded(
+            _first_scalar(look, "total_print_time", "total_time", "print_time_seconds")
+        ),
+        "prints_completed": _rounded(
+            _first_scalar(look, "prints_completed", "print_count", "total_prints")
+        ),
+        # Filament, whatever shape the build keeps it in — a list of AMS trays
+        # on most, a single loaded spool on the rest.
+        "filament": _filament(look),
         # Some builds hand the camera over as a URL on the row instead of
         # serving an endpoint for it. Kept as sent; whether it can be proxied
         # is a question about where it points, answered at the proxy.
         "camera_url": _first_scalar(
             look, "camera_url", "cameraUrl", "stream_url", "webcam_url", "mjpeg_url"
         ),
+        # Everything the instance sent, flattened and untouched. PrintFlow
+        # cannot know what a given build reports — "all available metrics" is
+        # only honest if it means *all* of them, including the ones nothing
+        # here has a name for. Nested objects are folded in as `parent.child`
+        # so the page can draw one table rather than a tree.
+        "reported": _flatten(look),
     }
 
 

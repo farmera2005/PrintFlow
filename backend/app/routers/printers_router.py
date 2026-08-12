@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_user
@@ -11,7 +14,7 @@ from ..integrations import base as base_api
 from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import PROVIDER_BAMBUDDY, User
-from ..services import farm
+from ..services import audit, farm
 from ..services.credentials import IntegrationNotConfigured
 
 router = APIRouter(prefix="/api/printers", tags=["printers"])
@@ -104,6 +107,90 @@ async def printer_camera(
     # The page asks again for every new frame, so this must not come back out
     # of a cache: a frozen picture of a working printer is worse than none.
     return Response(frame, media_type=kind, headers={"Cache-Control": "no-store"})
+
+
+class PrintRequest(BaseModel):
+    """One file, on one machine, right now."""
+
+    bambuddy_archive_id: int | None = None
+    bambuddy_file_path: str | None = None
+    name: str | None = None
+    plate_number: int = Field(default=1, ge=1)
+    copies: int = Field(default=1, ge=1, le=50)
+    print_options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _names_a_file(self) -> PrintRequest:
+        if self.bambuddy_archive_id is None and not (self.bambuddy_file_path or "").strip():
+            raise ValueError("Pick a file: give an archive id or a file path.")
+        return self
+
+
+@router.post("/{printer_id}/print")
+async def print_on(
+    printer_id: int,
+    body: PrintRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Send a file from Bambuddy straight to this machine.
+
+    Nothing to do with an order: this is the reprint, the test piece, the one
+    the shop needs and nobody bought. It goes on the machine that was clicked
+    rather than through dispatch, because the point of asking here is that the
+    operator has already decided which machine — and it is written to the audit
+    log, because it puts filament through a printer.
+    """
+    try:
+        client = await bambuddy_api.client_for(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    queued: list[Any] = []
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Queueing a print"):
+            for _ in range(body.copies):
+                item = await bambuddy_api.with_healing(
+                    session,
+                    client,
+                    ("queue",),
+                    lambda: client.enqueue(
+                        archive_id=body.bambuddy_archive_id,
+                        file_path=body.bambuddy_file_path,
+                        plate_number=body.plate_number,
+                        printer_id=printer_id,
+                        print_options=body.print_options,
+                    ),
+                )
+                queued.append(item.get("id"))
+    except IntegrationError as exc:
+        # Some may already be on the machine. Saying how many went is the
+        # difference between "try again" and "try again and cancel three".
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"{exc} — {len(queued)} of {body.copies} had already been queued."
+            if queued
+            else str(exc),
+        ) from exc
+
+    await audit.record(
+        session,
+        entity_type="printer",
+        entity_id=None,
+        action="print_now",
+        detail={
+            "printer_id": printer_id,
+            "archive_id": body.bambuddy_archive_id,
+            "file_path": body.bambuddy_file_path,
+            "name": body.name,
+            "plate_number": body.plate_number,
+            "copies": body.copies,
+            "queue_ids": queued,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return {"printer_id": printer_id, "queued": queued, "copies": len(queued)}
 
 
 @router.get("/cameras")

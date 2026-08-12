@@ -25,7 +25,7 @@ from app.integrations.bambuddy import (
     read_farm,
 )
 from app.integrations.base import IntegrationError
-from app.models import PROVIDER_BAMBUDDY, PrintFile, PrintJob
+from app.models import PROVIDER_BAMBUDDY, AuditLog, PrintFile, PrintJob
 from app.services import credentials, farm, intake, printing
 
 from test_intake_pipeline import FakeBambuddy, FakeQbo, seed_catalog
@@ -963,3 +963,282 @@ class TestEndpoint:
     async def test_the_flat_queue_endpoint_is_gone(self, signed_in):
         # Plates are read through the farm now; only the verbs remain.
         assert (await signed_in.get("/api/print-jobs")).status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Everything the machine reports
+# --------------------------------------------------------------------------
+
+
+class TestFlatten:
+    """"All available metrics" has to mean all of them, including the ones
+    PrintFlow has no name for. That is only useful if the flattening keeps the
+    build's own spelling, which is the whole point of showing it."""
+
+    def test_nested_readings_keep_their_parent(self):
+        row = parse_printer(
+            {"id": 1, "name": "P1S", "ams": {"humidity": 3, "temp": 24.5}}
+        )
+        assert row["reported"]["ams.humidity"] == 3
+        assert row["reported"]["ams.temp"] == 24.5
+
+    def test_a_list_of_scalars_becomes_one_line(self):
+        row = parse_printer({"id": 1, "supports": ["ams", "camera", "chamber"]})
+        assert row["reported"]["supports"] == "ams, camera, chamber"
+
+    def test_per_layer_arrays_are_not_a_metric(self):
+        # A thousand rows of nothing a person reads off a screen.
+        row = parse_printer({"id": 1, "layer_times": [{"n": 1}, {"n": 2}]})
+        assert "layer_times" not in row["reported"]
+
+    def test_nothing_reported_is_an_empty_table_not_a_missing_one(self):
+        assert parse_printer({})["reported"] == {}
+
+    def test_a_field_with_no_name_here_is_still_shown(self):
+        row = parse_printer({"id": 1, "xcam_status": "buildplate_marker_detector"})
+        assert row["reported"]["xcam_status"] == "buildplate_marker_detector"
+
+    def test_a_build_that_reports_thousands_of_fields_does_not_take_the_page(self):
+        row = parse_printer({f"f{n}": n for n in range(500)})
+        assert len(row["reported"]) <= 200
+
+
+class TestFilament:
+    def test_an_ams_becomes_one_entry_per_tray(self):
+        row = parse_printer(
+            {
+                "id": 1,
+                "ams": [
+                    {"id": 1, "type": "PLA", "color": "black", "remain": 82},
+                    {"id": 2, "type": "PETG", "color": "white", "remain": 40},
+                ],
+            }
+        )
+        assert [(t["slot"], t["type"], t["remaining"]) for t in row["filament"]] == [
+            (1, "PLA", 82),
+            (2, "PETG", 40),
+        ]
+
+    def test_trays_kept_inside_an_object(self):
+        row = parse_printer({"id": 1, "ams": {"trays": [{"tray_type": "ABS"}]}})
+        assert [t["type"] for t in row["filament"]] == ["ABS"]
+
+    def test_a_tray_with_no_slot_number_is_numbered_by_position(self):
+        row = parse_printer({"id": 1, "trays": [{"type": "PLA"}, {"type": "TPU"}]})
+        assert [t["slot"] for t in row["filament"]] == [1, 2]
+
+    def test_a_machine_with_one_spool_and_no_ams(self):
+        row = parse_printer(
+            {"id": 1, "filament_type": "PLA", "filament_color": "orange"}
+        )
+        assert row["filament"] == [
+            {"slot": 1, "type": "PLA", "colour": "orange", "remaining": None}
+        ]
+
+    def test_a_machine_that_says_nothing_about_filament(self):
+        assert parse_printer({"id": 1, "name": "P1S"})["filament"] == []
+
+
+class TestMachineFacts:
+    def test_what_the_machine_is_rather_than_what_it_is_doing(self):
+        row = parse_printer(
+            {
+                "id": 1, "name": "H2D-01", "dev_id": "0309A2C", "fw_ver": "01.08.02",
+                "ip_address": "192.168.10.31", "nozzle_diameter": "0.4",
+                "nozzle_type": "hardened_steel", "wifi_signal": "-52dBm",
+                "spd_lvl": 2, "cooling_fan_speed": "85", "print_count": 412,
+            }
+        )
+        assert (row["serial"], row["firmware"]) == ("0309A2C", "01.08.02")
+        assert (row["ip"], row["nozzle_diameter"]) == ("192.168.10.31", 0.4)
+        assert (row["nozzle_type"], row["wifi_signal"]) == ("hardened_steel", "-52dBm")
+        assert (row["speed_level"], row["fan_speed"]) == (2, 85)
+        assert row["prints_completed"] == 412
+
+    def test_a_build_that_reports_none_of_it(self):
+        row = parse_printer({"id": 1, "name": "P1S"})
+        assert row["serial"] is None and row["firmware"] is None
+        assert row["nozzle_diameter"] is None and row["prints_completed"] is None
+
+
+# --------------------------------------------------------------------------
+# The farm in one line
+# --------------------------------------------------------------------------
+
+
+def _plate(status="pending", printer_id=None, units=1) -> dict:
+    return {
+        "status": status,
+        "printer_id": printer_id,
+        "units_expected": units,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+
+
+class TestFarmSummary:
+    def test_machines_counted_by_what_they_are_doing(self):
+        found = farm._summary(
+            [
+                {"id": 1, "state": "RUNNING", "remaining_minutes": 20},
+                {"id": 2, "state": "IDLE"},
+                {"id": 3, "state": "IDLE"},
+                {"id": 4, "online": False, "state": "RUNNING"},
+            ],
+            [],
+        )
+        assert (found["machines"], found["printing"]) == (4, 1)
+        assert (found["idle"], found["offline"]) == (2, 1)
+
+    def test_offline_beats_whatever_it_last_said(self):
+        # A machine that was printing when the power went is not printing.
+        found = farm._summary([{"id": 1, "online": False, "state": "RUNNING"}], [])
+        assert found["printing"] == 0 and found["offline"] == 1
+
+    def test_a_state_nothing_here_has_a_word_for_is_still_counted(self):
+        found = farm._summary([{"id": 1, "state": "CALIBRATING"}], [])
+        assert found["by_state"] == {"unknown": 1}
+
+    def test_the_farm_is_clear_when_the_last_machine_finishes(self):
+        found = farm._summary(
+            [
+                {"id": 1, "state": "RUNNING", "remaining_minutes": 12},
+                {"id": 2, "state": "RUNNING", "remaining_minutes": 240},
+            ],
+            [],
+        )
+        assert found["busy_until_minutes"] == 240
+
+    def test_an_idle_farm_has_no_time_to_report(self):
+        assert farm._summary([{"id": 1, "state": "IDLE"}], [])["busy_until_minutes"] is None
+
+    def test_finished_plates_are_not_outstanding_work(self):
+        found = farm._summary(
+            [],
+            [
+                _plate("pending", None, 3),
+                _plate("printing", 1, 2),
+                _plate("done", 1, 9),
+                _plate("cancelled", 1, 9),
+            ],
+        )
+        assert (found["plates_open"], found["units_open"]) == (2, 5)
+
+    def test_plates_with_no_machine_are_called_out(self):
+        found = farm._summary([], [_plate("pending", None), _plate("queued", 1)])
+        assert found["plates_waiting"] == 1
+
+    def test_an_empty_farm_still_answers(self):
+        found = farm._summary([], [])
+        assert found["machines"] == 0 and found["plates_open"] == 0
+
+    async def test_the_page_gets_the_summary_with_the_cards(self, signed_in, db, bambu):
+        body = (await signed_in.get("/api/printers")).json()
+        assert body["summary"]["machines"] == 2
+
+
+# --------------------------------------------------------------------------
+# Printing something that nobody ordered
+# --------------------------------------------------------------------------
+
+
+class TestPrintNow:
+    """The reprint, the test piece, the one the shop needs and nobody bought.
+
+    It bypasses dispatch on purpose — the operator has already decided which
+    machine by clicking on it — so the things that matter are that it goes to
+    *that* machine, that it is written down, and that a half-failure says how
+    far it got rather than leaving somebody to guess."""
+
+    async def test_a_file_goes_to_the_machine_that_was_clicked(
+        self, signed_in, db, bambu
+    ):
+        response = await signed_in.post(
+            "/api/printers/2/print", json={"bambuddy_archive_id": 77, "name": "jig.3mf"}
+        )
+        assert response.status_code == 200, response.text
+        assert bambu.enqueued == [
+            {
+                "archive_id": 77,
+                "file_path": None,
+                "plate_number": 1,
+                "printer_id": 2,
+                "print_options": {},
+            }
+        ]
+
+    async def test_a_file_named_by_path_rather_than_by_archive(
+        self, signed_in, db, bambu
+    ):
+        response = await signed_in.post(
+            "/api/printers/1/print", json={"bambuddy_file_path": "/models/jig.3mf"}
+        )
+        assert response.status_code == 200, response.text
+        assert bambu.enqueued[0]["file_path"] == "/models/jig.3mf"
+
+    async def test_copies_are_queued_one_after_another(self, signed_in, db, bambu):
+        response = await signed_in.post(
+            "/api/printers/1/print",
+            json={"bambuddy_archive_id": 5, "copies": 3, "plate_number": 2},
+        )
+        assert response.json()["copies"] == 3
+        assert len(bambu.enqueued) == 3
+        assert {row["plate_number"] for row in bambu.enqueued} == {2}
+
+    async def test_a_request_that_names_no_file_is_refused(self, signed_in, db, bambu):
+        response = await signed_in.post("/api/printers/1/print", json={"copies": 2})
+        assert response.status_code == 422
+        assert bambu.enqueued == []
+
+    async def test_nought_copies_is_not_a_print(self, signed_in, db, bambu):
+        response = await signed_in.post(
+            "/api/printers/1/print", json={"bambuddy_archive_id": 5, "copies": 0}
+        )
+        assert response.status_code == 422
+
+    async def test_a_failure_partway_says_how_many_already_went(
+        self, signed_in, db, bambu, monkeypatch
+    ):
+        sent = 0
+        original = bambu.enqueue
+
+        async def flaky(**kwargs):
+            nonlocal sent
+            sent += 1
+            if sent > 2:
+                raise IntegrationError("bambuddy", "Printer rejected the file")
+            return await original(**kwargs)
+
+        monkeypatch.setattr(bambu, "enqueue", flaky)
+        response = await signed_in.post(
+            "/api/printers/1/print", json={"bambuddy_archive_id": 5, "copies": 5}
+        )
+        assert response.status_code == 502
+        assert "2 of 5 had already been queued" in response.json()["detail"]
+
+    async def test_putting_filament_through_a_printer_is_written_down(
+        self, signed_in, db, bambu
+    ):
+        await signed_in.post(
+            "/api/printers/2/print",
+            json={"bambuddy_archive_id": 9, "name": "spare-clip.3mf", "copies": 2},
+        )
+        rows = (
+            await db.execute(
+                AuditLog.__table__.select().where(AuditLog.action == "print_now")
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].detail["printer_id"] == 2
+        assert rows[0].detail["name"] == "spare-clip.3mf"
+        assert rows[0].detail["copies"] == 2
+        assert rows[0].actor == "admin"
+
+    async def test_a_bambuddy_that_is_not_set_up_says_so(self, signed_in, db, monkeypatch):
+        async def missing(_session):
+            raise credentials.IntegrationNotConfigured("Bambuddy is not connected")
+
+        monkeypatch.setattr("app.services.farm.bambuddy_api.client_for", missing)
+        response = await signed_in.post(
+            "/api/printers/1/print", json={"bambuddy_archive_id": 5}
+        )
+        assert response.status_code == 409

@@ -578,13 +578,56 @@ answers per order. Standing in the shop the question is nearly always the other
 one, *which machine should I be looking at*, and a list sorted by order cannot
 answer it however it is filtered.
 
+Above the cards, **the farm in one line**: how many machines there are, how many
+are printing, idle or offline, how many plates are outstanding and how many
+units those come to — and, where anything is running, when the farm comes clear.
+That last one is the *longest* job remaining, not the shortest: the farm is free
+when the last machine finishes, not the first. Any state PrintFlow has no word
+for is counted under its own name rather than swept into "unknown", because a
+machine that is calibrating or in error is exactly the one worth walking to.
+
 Each card carries what its build will say: online or not, what it is doing, how
-far through with how long left, the layer it is on, the file on it, and nozzle,
-bed and chamber temperatures. Every reading is optional and a missing one is
-shown as missing rather than as a zero — "no progress reported" and "0% done"
-are different things to act on. A machine reporting a fault says so in red; a
-Bambu machine reports "no fault" as the number 0, which is read as no fault
-rather than printed as one.
+far through with how long left, the layer it is on, the file on it, nozzle, bed
+and chamber temperatures, and what is loaded in each AMS tray with how much is
+left on it. Every reading is optional and a missing one is shown as missing
+rather than as a zero — "no progress reported" and "0% done" are different
+things to act on. A machine reporting a fault says so in red; a Bambu machine
+reports "no fault" as the number 0, which is read as no fault rather than
+printed as one.
+
+### One machine's own page
+
+Click a machine's name and it opens on its own, in three tabs, because the three
+questions are different:
+
+* **Now** — the camera at full size refreshing every second, the progress bar,
+  temperatures, fan, speed, light and door, and the PrintFlow plates on it.
+* **Machine** — what it *is* rather than what it is doing: model, serial,
+  firmware, address, nozzle size and type, Wi-Fi signal, prints completed, and
+  every filament tray with its material, colour and remaining percentage.
+* **Everything** — literally every field this Bambuddy sent for this machine,
+  flattened to `parent.child` and unedited. PrintFlow cannot know what a given
+  build reports, so "all available metrics" is only honest if it means all of
+  them, including the ones nothing here has a name for. Underneath it, the raw
+  replies, for a machine whose card came back blank.
+
+### Printing something nobody ordered
+
+**Print a file**, on that same page, sends anything in Bambuddy's library
+straight to the machine you are looking at — the reprint, the test piece, the
+jig. It uses the same file picker as a product's print files, so the whole
+library and every printer's own files are there, and it asks for the plate
+number and how many copies before it does anything: this spends filament on a
+machine that may have something on it already.
+
+It deliberately does not go through dispatch. Dispatch chooses a machine by
+printer model and what is free; the point of asking here is that the operator
+has already chosen by clicking. Nothing about it touches an order — it will not
+count towards one, and the plate is cleared by hand like any other — and it is
+written to the audit log, because it puts filament through a printer. If the
+machine refuses partway through a run of copies, the error says how many had
+already been queued, which is the difference between "try again" and "try again
+and cancel three".
 
 Above the readings, the **camera**, where the machine has one. Click it and the
 picture fills a panel with the machine's state beside it, refreshing every
@@ -1146,8 +1189,9 @@ an audit row**.
 
 Other screens: **Products** (CRUD, QBO item picker, Bambuddy file picker,
 printer models, BOM editor), [**Printers**](#printers) (the farm, live, with
-every plate grouped under the machine it went to and re-queue/cancel on each),
-**Sync Log** (background runs + audit trail), **Settings**.
+every plate grouped under the machine it went to, a page per machine showing
+everything it reports, and a way to print any file on it), **Sync Log**
+(background runs + audit trail), **Settings**.
 
 ## How the decisioning works
 
