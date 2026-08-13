@@ -4,6 +4,7 @@ import { PROVIDER_LABELS, formatDateTime } from '../lib/format'
 import type { IntegrationStatus } from '../lib/types'
 import { PANELS } from '../components/IntegrationPanels'
 import SecurityPanel from '../components/SecurityPanel'
+import BackupPanel from '../components/BackupPanel'
 import { Alert, Badge, Button, Card, Field, inputClass } from '../components/ui'
 
 interface SettingsResponse {
@@ -118,6 +119,10 @@ export default function Settings({ onChange }: { onChange: () => Promise<void> }
 
         <IntervalsCard data={data} onSaved={load} />
         <PasswordCard />
+
+        <Card className="p-4">
+          <BackupPanel onRestored={onChange} />
+        </Card>
 
         <Card className="p-4">
           <h2 className="text-sm font-semibold text-ink-900">Background jobs</h2>

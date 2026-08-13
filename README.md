@@ -1298,9 +1298,64 @@ Migrations are forward-only; there is no automatic downgrade path.
 
 ### Backups
 
-Two volumes matter: `printflow-db` (all the data) and `printflow-data` (the
-encryption key and the certificate). Without the key, stored credentials cannot
-be decrypted — back it up alongside the database.
+**Settings → Backup gives you one file that is the whole shop**, and the
+Restore panel below it puts one back. Nothing to schedule, no volumes to name,
+no `pg_dump` to get right — press the button, keep the file somewhere other
+than this machine. A backup on the machine that died is not a backup.
+
+The file carries both halves, which is the part a hand-rolled dump usually gets
+wrong. The database holds the orders, products, plates, money and the encrypted
+credentials; the data directory holds the key those credentials are encrypted
+*with*. Either alone restores to nothing useful — a database with no key comes
+up unable to talk to Etsy, and a key with no database comes up empty.
+
+**A passphrase is offered and worth using.** Without one, anybody holding the
+file holds your Etsy, QuickBooks and ShipStation credentials in readable form,
+because the key to them is in the same archive. With one, the whole archive is
+sealed with scrypt and there is no way back into it if the passphrase is lost —
+which is the trade, stated on the screen.
+
+**One case where the file is deliberately incomplete**, and PrintFlow says so
+before you press the button: if `SECRET_KEY` is set in the environment rather
+than generated into the data volume, it is not PrintFlow's to save. The archive
+then holds credentials nothing in it can decrypt, and the restore looks fine
+until every integration fails at once. Keep that value with the backup.
+
+#### Restoring
+
+Restore reads the file and describes it — when it was taken, how many orders
+and products are in it, whether it carries the key — *before* replacing
+anything. On an install that already has data, the confirmation is the word
+"restore" typed out, because this deletes every order, product and credential
+here and there is no undo.
+
+The whole database side is one transaction, so a restore that fails leaves what
+was there intact. That matters most precisely when somebody is restoring
+because something has already gone wrong today.
+
+A backup from an *older* PrintFlow restores fine: migrations here only add
+columns, so the old rows load and the new columns take their defaults. A backup
+from a *newer* one is refused rather than loaded with its extra columns
+silently dropped — update PrintFlow first, then restore.
+
+#### Restoring onto a fresh machine
+
+**The setup wizard's first step offers Restore from a backup**, before you
+create an account. That is deliberate: somebody rebuilding onto a new machine
+has no account on it, and making them create one first creates an account the
+restore immediately throws away — along with the password they just chose.
+After restoring, sign in with the account from the backup.
+
+That door is unauthenticated, and it is open only while the install has no
+admin account — the same gate the wizard's own "create the admin" step sits
+behind. Once somebody owns an install, restoring over it takes signing in.
+
+#### If you would rather do it yourself
+
+The two Docker volumes are still there: `printflow-db` (all the data) and
+`printflow-data` (the encryption key and the certificate). Back up both or
+neither; the key without the database restores nothing, and the database
+without the key restores a shop that cannot log in to anything.
 
 ## The board
 

@@ -16,6 +16,7 @@ from .db import session_scope
 from .integrations.base import AuthExpiredError, IntegrationError
 from .routers import (
     auth_router,
+    backup_router,
     integrations_router,
     manufacturing_router,
     orders_router,
@@ -64,6 +65,10 @@ app = FastAPI(title="PrintFlow", version="1.0.0", lifespan=lifespan)
 
 app.include_router(auth_router.router)
 app.include_router(setup_router.router)
+# Two routers from one module: the signed-in one, and the setup-time one that
+# is open only while this install has no admin account.
+app.include_router(backup_router.router)
+app.include_router(backup_router.setup_router)
 app.include_router(security_router.router)
 app.include_router(integrations_router.router)
 app.include_router(products_router.router)

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
+import { RestorePanel } from '../components/BackupPanel'
 import { PROVIDER_LABELS } from '../lib/format'
 import type { SetupStatus } from '../lib/types'
 import { PANELS } from '../components/IntegrationPanels'
@@ -179,6 +180,7 @@ function AdminStep({
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [restoring, setRestoring] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -206,6 +208,35 @@ function AdminStep({
     } finally {
       setBusy(false)
     }
+  }
+
+  // Restoring instead of starting fresh. Offered here, on the very first
+  // step, because somebody rebuilding onto a new machine has no account on it
+  // — and making them create one first creates an account the restore then
+  // throws away, along with the password they just chose.
+  if (restoring) {
+    return (
+      <div className="space-y-4">
+        <Alert tone="info">
+          Restoring puts a previous PrintFlow back exactly as it was: its
+          orders, its products, its connections, and the accounts you sign in
+          with. There is nothing on this install to lose yet.
+        </Alert>
+        <RestorePanel
+          endpoint="/api/setup/restore"
+          requireTypedConfirmation={false}
+          danger={null}
+          onRestored={async () => {
+            // Everything below this screen has just been replaced, including
+            // whoever is allowed to sign in. Reloading is the honest end of it.
+            window.location.reload()
+          }}
+        />
+        <Button variant="ghost" onClick={() => setRestoring(false)}>
+          Back — set this install up from scratch instead
+        </Button>
+      </div>
+    )
   }
 
   return (
@@ -244,6 +275,24 @@ function AdminStep({
       >
         {busy ? 'Creating…' : 'Create account'}
       </Button>
+
+      <div className="border-t border-ink-200 pt-4">
+        <p className="text-sm text-ink-600">
+          Rebuilding a PrintFlow you already had? Restore it instead — the
+          accounts come back with everything else, so there is no need to make
+          one here first.
+        </p>
+        <Button
+          className="mt-2"
+          onClick={(event) => {
+            // Inside a form, so it would otherwise submit it.
+            event.preventDefault()
+            setRestoring(true)
+          }}
+        >
+          Restore from a backup
+        </Button>
+      </div>
     </form>
   )
 }

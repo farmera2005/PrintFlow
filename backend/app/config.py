@@ -146,3 +146,16 @@ def get_config() -> Config:
 
 def get_config_uncached() -> Config:
     return Config()
+
+
+def reset_config_cache() -> None:
+    """Forget the cached config, so the next reader sees the files as they are.
+
+    There is exactly one moment this is for: a restore has just written a
+    different secret key into the data directory. Everything that decrypts a
+    stored credential asks the config for the key each time, so dropping the
+    cache is what makes the restored credentials readable without a restart —
+    and not dropping it would leave a shop that looks restored and cannot talk
+    to any of its integrations.
+    """
+    get_config.cache_clear()
