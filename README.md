@@ -1333,6 +1333,14 @@ The whole database side is one transaction, so a restore that fails leaves what
 was there intact. That matters most precisely when somebody is restoring
 because something has already gone wrong today.
 
+**A failed restore says what failed and where.** "Internal Server Error" is the
+same five words whether the file was corrupt, the database refused a row, or
+the data volume is read-only — and those have three completely different fixes.
+So a restore that goes wrong names the step it was on — *reading the backup
+file*, *replacing the database*, *writing the data directory* — quotes what
+actually went wrong, and states plainly that nothing was changed. The full
+traceback goes to the container log (`docker compose logs app`).
+
 A backup from an *older* PrintFlow restores fine: migrations here only add
 columns, so the old rows load and the new columns take their defaults. A backup
 from a *newer* one is refused rather than loaded with its extra columns

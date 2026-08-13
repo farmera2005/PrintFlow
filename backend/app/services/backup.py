@@ -34,6 +34,7 @@ import tempfile
 import uuid as uuid_module
 from datetime import date, datetime
 from decimal import Decimal
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -437,15 +438,51 @@ def write_data_files(files: dict[str, bytes], root: Path | None = None) -> list[
         target.parent.mkdir(parents=True, exist_ok=True)
         # Through a temporary file so a crash mid-write cannot leave a
         # truncated secret key, which would lock the shop out of its own
-        # credentials with no way back.
-        staged = target.with_suffix(target.suffix + ".restoring")
+        # credentials with no way back. Named by appending rather than by
+        # with_suffix, which replaces the last extension and would turn
+        # `chain.pem` into `chain.restoring`.
+        staged = target.parent / (target.name + ".restoring")
         staged.write_bytes(payload)
-        os.chmod(staged, 0o600)
+        try:
+            os.chmod(staged, 0o600)
+        except OSError:
+            # Best effort. A bind-mounted data directory on a Windows or macOS
+            # host, and some network filesystems, refuse chmod outright — and
+            # failing a whole restore over file permissions would be losing the
+            # shop to protect the tidiness of one mode bit.
+            log.warning("Could not set permissions on %s", target)
         shutil.move(str(staged), str(target))
         written.append(relative)
     # The secret key has probably just changed underneath a cached Config.
     reset_config_cache()
     return written
+
+
+@contextmanager
+def _stage(what: str):
+    """Name the step, so a failure inside it is not just a stack trace.
+
+    BackupError already carries a sentence written for the operator, so it goes
+    through untouched. Anything else is a surprise — a driver refusing a value,
+    a read-only volume — and gets the step's name attached, which is the
+    difference between "restore failed" and "restore failed while writing the
+    data directory", one of which can be acted on.
+    """
+    try:
+        yield
+    except BackupError:
+        raise
+    except Exception as exc:
+        raise RestoreFailed(what, exc) from exc
+
+
+class RestoreFailed(RuntimeError):
+    """An unexpected failure, with the step it happened in."""
+
+    def __init__(self, stage: str, cause: Exception) -> None:
+        super().__init__(f"{stage}: {type(cause).__name__}: {cause}")
+        self.stage = stage
+        self.cause = cause
 
 
 async def restore(
@@ -462,10 +499,17 @@ async def restore(
     precisely when somebody is restoring because things have already gone
     wrong once today.
     """
-    manifest, database, files = read_archive(raw, passphrase)
-    check(manifest)
-    counts = await load_database(session, database)
-    written = write_data_files(files, data_dir)
+    # Each stage named, because "Internal Server Error" is the same words
+    # whether the file was corrupt, the database refused a row, or the data
+    # volume is read-only — and those have three completely different fixes.
+    # Whatever goes wrong, the operator gets told which third of this it was.
+    with _stage("reading the backup file"):
+        manifest, database, files = read_archive(raw, passphrase)
+        check(manifest)
+    with _stage("replacing the database"):
+        counts = await load_database(session, database)
+    with _stage("writing the data directory"):
+        written = write_data_files(files, data_dir)
     log.warning(
         "Restored a backup taken %s: %s rows across %s tables, %s data files",
         manifest.get("created_at"),

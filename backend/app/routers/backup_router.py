@@ -172,6 +172,25 @@ async def _do_restore(
     except BackupError as exc:
         await session.rollback()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A restore must never answer with a bare "Internal Server Error". The
+        # operator is already having a bad day — that is why they are here —
+        # and the two things they need are what went wrong and whether their
+        # data was touched. A 500 with an empty body answers neither, and
+        # leaves them unable to tell a broken file from a broken PrintFlow.
+        await session.rollback()
+        log.exception("Restore failed")
+        where = getattr(exc, "stage", None)
+        cause = getattr(exc, "cause", exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"The restore failed{f' while {where}' if where else ''} and nothing "
+            f"was changed — this install is exactly as it was. "
+            f"{type(cause).__name__}: {cause}. The full detail is in the "
+            f"container log (docker compose logs app).",
+        ) from exc
 
     # Written after the rows are in, and to the restored audit log — this is
     # now part of the history of the shop that was restored, which is where

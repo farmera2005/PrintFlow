@@ -552,3 +552,260 @@ class TestTheKeyThatMightNotTravel:
         await db.commit()
         # Whichever it is here, the answer is reported rather than assumed.
         assert result["secret_key_from_environment"] in (True, False)
+
+
+# --------------------------------------------------------------------------
+# Every table, not just the ones a test happened to touch
+# --------------------------------------------------------------------------
+
+
+async def _one_of_everything(db) -> dict[str, int]:
+    """A row in every table PrintFlow has.
+
+    Written because the first cut of these tests exercised the tables a test
+    shop happens to fill — orders, products, credentials — and a real install
+    has a TLS certificate, a sync log, made sheets, option rules and variations
+    as well. A backup that round-trips six tables and falls over on the
+    seventh is not a backup, and the seventh is only ever discovered by
+    somebody restoring for real.
+    """
+    from datetime import datetime, timezone
+
+    from app.models import (
+        AppSetting,
+        AuditLog,
+        BomLine,
+        BomOptionRule,
+        EtsyProductLink,
+        MadeSheet,
+        MadeSheetLine,
+        OAuthState,
+        OrderLine,
+        PrintJob,
+        PrintFile,
+        ProductVariation,
+        SyncLog,
+        TlsCertificate,
+    )
+
+    now = datetime.now(timezone.utc)
+    order = await _shop(db, number="9500")
+    product = (await db.execute(select(Product))).scalars().first()
+    component = Product(sku="COMP-1", name="Base", fulfillment="stocked")
+    db.add(component)
+    await db.flush()
+
+    line = OrderLine(
+        order_id=order.id,
+        product_id=product.id,
+        sku_raw="SKU-9500",
+        title="Dragon egg",
+        quantity=2,
+        qty_from_stock=1,
+        qty_to_print=1,
+        state="printed",
+        variations=[{"name": "Colour", "value": "Red"}],
+        option_effects=["swapped a component"],
+    )
+    db.add(line)
+    await db.flush()
+
+    sheet = MadeSheet(reference="MS-1", made_on=now, status="draft")
+    db.add(sheet)
+    await db.flush()
+
+    db.add_all(
+        [
+            User(username="restored-admin", password_hash="not-a-real-hash"),
+            AppSetting(key="a_setting", value={"v": {"nested": [1, 2, 3]}}),
+            AuditLog(
+                entity_type="order",
+                entity_id=order.id,
+                action="set_status",
+                detail={"from": "new", "to": "shipped"},
+                actor="admin",
+            ),
+            SyncLog(job="etsy_receipt_poll", ok=True, detail="found 3"),
+            TlsCertificate(
+                cert_pem="-----BEGIN CERTIFICATE-----\nfake\n",
+                encrypted_key=b"\x00\x01\x02encrypted\xff",
+                fingerprint_sha256="ab" * 32,
+                common_name="printflow.local",
+                sans=["printflow.local", "127.0.0.1"],
+                not_before=now,
+                not_after=now,
+            ),
+            OAuthState(state="abc123", provider="etsy", code_verifier="v",
+                       redirect_uri="https://printflow.local/cb"),
+            BomLine(bundle_id=product.id, component_id=component.id, quantity=2),
+            BomOptionRule(
+                bundle_id=product.id,
+                option_name="Colour",
+                option_value="Red",
+                component_id=component.id,
+                quantity=1,
+            ),
+            EtsyProductLink(etsy_listing_id=12345, product_id=product.id),
+            ProductVariation(product_id=product.id, label="Large", options=[]),
+            PrintFile(
+                product_id=product.id, bambuddy_archive_id=77, units_per_plate=4
+            ),
+            MadeSheetLine(
+                sheet_id=sheet.id,
+                product_id=product.id,
+                quantity=1,
+                unit_cost=Decimal("1.2300"),
+            ),
+            PrintJob(
+                order_line_id=line.id,
+                status="done",
+                bambuddy_archive_id=77,
+                units_expected=4,
+                printer_models=["H2D"],
+            ),
+        ]
+    )
+    await db.commit()
+
+    counts: dict[str, int] = {}
+    for table in backup.Base.metadata.sorted_tables:
+        found = (await db.execute(select(table))).mappings().all()
+        counts[table.name] = len(found)
+    return counts
+
+
+class TestEveryTable:
+    async def test_a_full_install_round_trips(self, db, data_dir, tmp_path):
+        before = await _one_of_everything(db)
+        # Nothing should be empty — otherwise this test proves nothing.
+        empty = [name for name, count in before.items() if not count]
+        assert not empty, f"these tables have no row to round-trip: {empty}" 
+
+        path, _ = await backup.create(db, data_dir=data_dir)
+        raw = path.read_bytes()
+        path.unlink(missing_ok=True)
+
+        result = await backup.restore(db, raw, data_dir=tmp_path / "r")
+        await db.commit()
+        assert result["tables"] == before
+
+    async def test_and_comes_back_as_the_same_values(self, db, data_dir, tmp_path):
+        from app.models import AppSetting, TlsCertificate
+
+        await _one_of_everything(db)
+        path, _ = await backup.create(db, data_dir=data_dir)
+        raw = path.read_bytes()
+        path.unlink(missing_ok=True)
+        await backup.restore(db, raw, data_dir=tmp_path / "r")
+        await db.commit()
+
+        # The awkward ones: encrypted bytes, a JSON list, a nested JSON object.
+        cert = (await db.execute(select(TlsCertificate))).scalars().one()
+        assert cert.encrypted_key == b"\x00\x01\x02encrypted\xff"
+        assert cert.sans == ["printflow.local", "127.0.0.1"]
+        setting = (
+            await db.execute(select(AppSetting).where(AppSetting.key == "a_setting"))
+        ).scalars().one()
+        assert setting.value == {"v": {"nested": [1, 2, 3]}}
+
+
+class TestFailuresExplainThemselves:
+    """"Internal Server Error" is the same words whether the file was corrupt,
+    the database refused a row, or the data volume is read-only — and those
+    have three completely different fixes. Whoever is restoring is already
+    having a bad day; the least this can do is say which third it was, and
+    whether their data was touched."""
+
+    async def test_an_unexpected_failure_names_the_stage_and_the_cause(
+        self, signed_in, db, monkeypatch
+    ):
+        raw = (await signed_in.post("/api/backup/download", json={})).content
+
+        def explode(*_args, **_kwargs):
+            raise PermissionError(13, "Read-only file system")
+
+        monkeypatch.setattr("app.services.backup.write_data_files", explode)
+        response = await signed_in.post(
+            "/api/backup/restore",
+            files={"archive": ("b.tar.gz", raw)},
+            data={"confirm": "restore"},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert "writing the data directory" in detail
+        assert "PermissionError" in detail
+        assert "Read-only file system" in detail
+        # And the promise that matters most.
+        assert "nothing was changed" in detail
+
+    async def test_and_really_does_leave_the_database_alone(
+        self, signed_in, db, monkeypatch
+    ):
+        await _shop(db, number="9600")
+        raw = (await signed_in.post("/api/backup/download", json={})).content
+        await _shop(db, number="9601")
+
+        def explode(*_args, **_kwargs):
+            raise OSError("the volume went away")
+
+        monkeypatch.setattr("app.services.backup.write_data_files", explode)
+        await signed_in.post(
+            "/api/backup/restore",
+            files={"archive": ("b.tar.gz", raw)},
+            data={"confirm": "restore"},
+        )
+        await db.rollback()
+        numbers = sorted(
+            row.order_number for row in (await db.execute(select(Order))).scalars().all()
+        )
+        # 9601 was created after the backup and is still here: the restore that
+        # would have removed it was rolled back in full.
+        assert numbers == ["9600", "9601"]
+
+    async def test_a_database_failure_names_that_stage_instead(
+        self, signed_in, db, monkeypatch
+    ):
+        raw = (await signed_in.post("/api/backup/download", json={})).content
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("column does not exist")
+
+        monkeypatch.setattr("app.services.backup.load_database", explode)
+        response = await signed_in.post(
+            "/api/backup/restore",
+            files={"archive": ("b.tar.gz", raw)},
+            data={"confirm": "restore"},
+        )
+        assert "replacing the database" in response.json()["detail"]
+
+    async def test_a_file_permission_quirk_does_not_lose_the_restore(
+        self, db, data_dir, tmp_path, monkeypatch
+    ):
+        # A bind-mounted data directory on a Windows or macOS host refuses
+        # chmod outright. Failing a whole restore over one mode bit would be
+        # losing the shop to protect its tidiness.
+        await _shop(db)
+        path, _ = await backup.create(db, data_dir=data_dir)
+        raw = path.read_bytes()
+        path.unlink(missing_ok=True)
+
+        def no_chmod(*_args, **_kwargs):
+            raise PermissionError("chmod not supported here")
+
+        monkeypatch.setattr("app.services.backup.os.chmod", no_chmod)
+        target = tmp_path / "restored"
+        result = await backup.restore(db, raw, data_dir=target)
+        await db.commit()
+        assert "secret_key" in result["data_files"]
+        assert (target / "secret_key").exists()
+
+    def test_a_file_with_several_dots_keeps_its_name(self, tmp_path):
+        # Named by appending rather than by with_suffix, which replaces the
+        # last extension — turning `chain.pem` into `chain.restoring` and
+        # leaving the real file untouched.
+        written = backup.write_data_files(
+            {"tls/chain.pem": b"cert", "secret_key": b"key"}, tmp_path
+        )
+        assert sorted(written) == ["secret_key", "tls/chain.pem"]
+        assert (tmp_path / "tls" / "chain.pem").read_bytes() == b"cert"
+        assert not list(tmp_path.rglob("*.restoring"))
