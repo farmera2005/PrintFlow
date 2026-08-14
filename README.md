@@ -1346,6 +1346,16 @@ columns, so the old rows load and the new columns take their defaults. A backup
 from a *newer* one is refused rather than loaded with its extra columns
 silently dropped — update PrintFlow first, then restore.
 
+Rows are loaded in dependency order, and within a table in *parent-first*
+order. That second part is not decoration: a product variant names its master
+product and a bundle's component line names the ordered line it came from, so
+two tables point at themselves. Postgres checks a foreign key the moment the
+row lands rather than at the end of the transaction, and a plain `SELECT`
+returns rows in whatever order the heap has them in — which, after a row has
+been updated, is *not* the order they were created in. A shop with no bundles
+and no variants would restore perfectly while a shop with either failed, on row
+order nobody chose.
+
 #### Restoring onto a fresh machine
 
 **The setup wizard's first step offers Restore from a backup**, before you

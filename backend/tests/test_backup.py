@@ -809,3 +809,149 @@ class TestFailuresExplainThemselves:
         assert sorted(written) == ["secret_key", "tls/chain.pem"]
         assert (tmp_path / "tls" / "chain.pem").read_bytes() == b"cert"
         assert not list(tmp_path.rglob("*.restoring"))
+
+
+class TestSelfReferencingRows:
+    """Two tables point at themselves: a product variant names its master, and
+    a bundle's component line names the ordered line it came from.
+
+    Sorting the *tables* by dependency does nothing for those — the rows come
+    out of a plain SELECT in whatever order the database felt like, and
+    Postgres checks a foreign key the moment the row lands rather than at the
+    end of the transaction. So a child arriving before its parent is a straight
+    IntegrityError, and which one arrives first is nobody's decision.
+
+    That is what made this hide: a shop with no bundles and no variants
+    restores perfectly. The reported symptom was "Internal Server Error".
+    """
+
+    def test_a_child_listed_first_is_still_inserted_second(self):
+        from app.models import Product
+
+        master, variant = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        ordered = backup.parents_first(
+            Product.__table__,
+            [
+                {"id": variant, "sku": "V", "parent_id": master},
+                {"id": master, "sku": "M", "parent_id": None},
+            ],
+        )
+        assert [row["sku"] for row in ordered] == ["M", "V"]
+
+    def test_a_chain_comes_out_in_order(self):
+        from app.models import OrderLine
+
+        a, b, c = ("aaaa", "bbbb", "cccc")
+        ordered = backup.parents_first(
+            OrderLine.__table__,
+            [
+                {"id": c, "parent_line_id": b},
+                {"id": b, "parent_line_id": a},
+                {"id": a, "parent_line_id": None},
+            ],
+        )
+        assert [row["id"] for row in ordered] == [a, b, c]
+
+    def test_a_table_that_does_not_point_at_itself_is_left_alone(self):
+        rows = [{"id": "2"}, {"id": "1"}]
+        assert backup.parents_first(Order.__table__, rows) == rows
+
+    def test_a_parent_that_is_not_in_the_backup_does_not_hang_it(self):
+        from app.models import Product
+
+        # The database will reject this row on its own terms, which is a better
+        # error than looping here forever deciding what to do about it.
+        rows = [{"id": "1", "parent_id": "missing"}]
+        assert backup.parents_first(Product.__table__, rows) == rows
+
+    def test_a_row_that_is_its_own_parent_does_not_hang_it_either(self):
+        from app.models import Product
+
+        rows = [{"id": "1", "parent_id": "1"}]
+        assert backup.parents_first(Product.__table__, rows) == rows
+
+    async def test_a_shop_with_variants_and_bundles_round_trips(
+        self, db, data_dir, tmp_path
+    ):
+        # The end-to-end version of the bug, through the real archive.
+        from app.models import OrderLine
+
+        order = await _shop(db, number="9700")
+        master = (await db.execute(select(Product))).scalars().first()
+        variant = Product(
+            sku="VARIANT-1", name="Dragon egg, large", fulfillment="printed",
+            parent_id=master.id,
+        )
+        db.add(variant)
+        bundle = OrderLine(
+            order_id=order.id, product_id=master.id, quantity=1,
+            qty_from_stock=0, qty_to_print=1, state="exploded", variations=[],
+        )
+        db.add(bundle)
+        await db.flush()
+        db.add(
+            OrderLine(
+                order_id=order.id, parent_line_id=bundle.id, product_id=variant.id,
+                quantity=1, qty_from_stock=0, qty_to_print=1, state="printed",
+                variations=[],
+            )
+        )
+        await db.commit()
+
+        path, _ = await backup.create(db, data_dir=data_dir)
+        raw = path.read_bytes()
+        path.unlink(missing_ok=True)
+
+        result = await backup.restore(db, raw, data_dir=tmp_path / "r")
+        await db.commit()
+        assert result["tables"]["products"] == 2
+        assert result["tables"]["order_lines"] == 2
+
+        # And the relationships survived, rather than merely inserting.
+        restored = (
+            await db.execute(select(Product).where(Product.sku == "VARIANT-1"))
+        ).scalars().one()
+        assert restored.parent_id == master.id
+
+    async def test_rows_in_the_worst_possible_order_still_load(self, db):
+        """The deterministic version, because the natural one is luck.
+
+        A freshly inserted table hands its rows back in insertion order, which
+        is parents-first, so a test that just writes rows and reads them back
+        passes with or without the fix. Real tables do not look like that: an
+        UPDATE in Postgres writes a new row version at the end of the heap, and
+        PrintFlow updates an order line every time it recomputes one — so an
+        edited parent ends up *after* its own children. That is the shape this
+        forces, by reversing every table's rows before loading them.
+        """
+        from app.models import OrderLine
+
+        order = await _shop(db, number="9800")
+        master = (await db.execute(select(Product))).scalars().first()
+        db.add(
+            Product(
+                sku="V-9800", name="Variant", fulfillment="printed",
+                parent_id=master.id,
+            )
+        )
+        bundle = OrderLine(
+            order_id=order.id, product_id=master.id, quantity=1,
+            qty_from_stock=0, qty_to_print=1, state="exploded", variations=[],
+        )
+        db.add(bundle)
+        await db.flush()
+        db.add(
+            OrderLine(
+                order_id=order.id, parent_line_id=bundle.id, quantity=1,
+                qty_from_stock=0, qty_to_print=1, state="printed", variations=[],
+            )
+        )
+        await db.commit()
+
+        dumped = await backup.dump_database(db)
+        upside_down = {name: list(reversed(rows)) for name, rows in dumped.items()}
+
+        counts = await backup.load_database(db, upside_down)
+        await db.commit()
+        assert counts["products"] == 2
+        assert counts["order_lines"] == 2

@@ -191,6 +191,59 @@ def known_revisions() -> set[str]:
     return found
 
 
+def parents_first(table: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order a table's own rows so a parent is inserted before its children.
+
+    Sorting the *tables* by dependency is not enough when a table points at
+    itself, and two here do: a product variant names its master product, and a
+    bundle's component line names the ordered line it came from. Those rows
+    come out of a plain SELECT in whatever order the database felt like, so a
+    child can perfectly well arrive first — and Postgres checks a foreign key
+    the moment the row lands, not at the end of the transaction.
+
+    Which made this the sort of bug that hides: a shop with no bundles and no
+    variants restores perfectly, and one with either fails on an INSERT, with
+    the outcome depending on row order that nobody chose. It has to be decided
+    here rather than hoped for.
+    """
+    self_columns = [
+        fk.parent.name for fk in table.foreign_keys if fk.column.table is table
+    ]
+    keys = list(table.primary_key.columns)
+    if not self_columns or len(keys) != 1:
+        return rows
+
+    key = keys[0].name
+    known = {str(row.get(key)) for row in rows}
+    placed: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    waiting = rows
+    while waiting:
+        later: list[dict[str, Any]] = []
+        for row in waiting:
+            parents = [
+                str(row[column])
+                for column in self_columns
+                if row.get(column) is not None
+            ]
+            # A parent that is not in this backup at all cannot be waited for.
+            # It is a row the database will reject on its own terms, which is a
+            # better error than hanging here deciding what to do about it.
+            if all(parent in placed or parent not in known for parent in parents):
+                ordered.append(row)
+                placed.add(str(row.get(key)))
+            else:
+                later.append(row)
+        if len(later) == len(waiting):
+            # A cycle, or a row that is its own parent. Nothing here can fix
+            # that; hand the rest to the database and let it say so plainly
+            # rather than looping forever.
+            ordered.extend(later)
+            break
+        waiting = later
+    return ordered
+
+
 async def load_database(session: AsyncSession, data: dict[str, Any]) -> dict[str, int]:
     """Replace every row in every table with the ones in the archive.
 
@@ -223,6 +276,7 @@ async def load_database(session: AsyncSession, data: dict[str, Any]) -> dict[str
                     if name in columns
                 }
             )
+        prepared = parents_first(table, prepared)
         for start in range(0, len(prepared), BATCH):
             await session.execute(table.insert(), prepared[start : start + BATCH])
         counts[table.name] = len(prepared)
