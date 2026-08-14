@@ -755,6 +755,17 @@ library and every printer's own files are there, and it asks for the plate
 number and how many copies before it does anything: this spends filament on a
 machine that may have something on it already.
 
+**Pressing Print twice does not print twice.** The dangerous case is not a
+double click, it is an answer that never arrives: a proxy in front of PrintFlow
+times out, or a tunnel drops, and the operator sees an error for a plate that
+is already on the machine. Nothing in the browser can tell that apart from a
+request that never landed, and guessing wrong costs a plate of filament. So the
+dialog carries one id for as long as it is open and sends it again on a retry;
+a request that has already been done reports what it did — *"had already gone
+to H2D-01 — the error was the reply going missing, not the print"* — rather
+than doing it again. A genuinely new print gets a new id, so two deliberate
+prints of the same file are still two prints.
+
 It deliberately does not go through dispatch. Dispatch chooses a machine by
 printer model and what is free; the point of asking here is that the operator
 has already chosen by clicking. Nothing about it touches an order — it will not

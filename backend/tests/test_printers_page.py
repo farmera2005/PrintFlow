@@ -1692,3 +1692,78 @@ class TestRealAmsShapes:
             {"id": 1, "vt_tray": {"id": "254", "tray_type": "PLA", "remain": 30}}
         )
         assert [t["slot"] for t in row["filament"]] == ["Ext"]
+
+
+class TestPrintingTwiceByAccident:
+    """Pressing Print again after an error must not print again.
+
+    The dangerous case is not a double click, it is an answer that never
+    arrives: a proxy in front of PrintFlow times out, or a tunnel drops, and
+    the operator sees an error for a plate that is already on the machine.
+    Nothing in the browser can tell that apart from a request that never
+    landed — so the retry has to be safe rather than the operator having to
+    guess, because guessing wrong costs a plate of filament.
+    """
+
+    async def test_the_same_request_twice_prints_once(self, signed_in, db, bambu):
+        body = {"bambuddy_archive_id": 5, "request_id": "abc-123"}
+        first = await signed_in.post("/api/printers/1/print", json=body)
+        second = await signed_in.post("/api/printers/1/print", json=body)
+
+        assert first.status_code == 200 and second.status_code == 200
+        assert len(bambu.enqueued) == 1
+        # And says which of the two it was, because "it worked" and "it had
+        # already worked" are different things to read after an error.
+        assert first.json().get("already_done") is not True
+        assert second.json()["already_done"] is True
+        assert second.json()["queued"] == first.json()["queued"]
+
+    async def test_copies_are_not_multiplied_by_a_retry(self, signed_in, db, bambu):
+        body = {"bambuddy_archive_id": 5, "copies": 3, "request_id": "def-456"}
+        await signed_in.post("/api/printers/1/print", json=body)
+        await signed_in.post("/api/printers/1/print", json=body)
+        assert len(bambu.enqueued) == 3
+
+    async def test_a_genuinely_new_print_is_not_mistaken_for_a_retry(
+        self, signed_in, db, bambu
+    ):
+        # Two deliberate prints of the same file are two prints. Only the id
+        # decides, and the dialog issues a new one each time it opens.
+        await signed_in.post(
+            "/api/printers/1/print",
+            json={"bambuddy_archive_id": 5, "request_id": "one"},
+        )
+        await signed_in.post(
+            "/api/printers/1/print",
+            json={"bambuddy_archive_id": 5, "request_id": "two"},
+        )
+        assert len(bambu.enqueued) == 2
+
+    async def test_without_an_id_nothing_is_deduplicated(self, signed_in, db, bambu):
+        # An older browser, or a script. Two requests are two prints, which is
+        # the behaviour that was there before and is still the honest reading
+        # of a request that declines to identify itself.
+        for _ in range(2):
+            await signed_in.post(
+                "/api/printers/1/print", json={"bambuddy_archive_id": 5}
+            )
+        assert len(bambu.enqueued) == 2
+
+    async def test_a_retry_after_a_failure_still_prints(self, signed_in, db, bambu):
+        # The other half, and the one that would be far worse to get wrong:
+        # when the first attempt genuinely did not reach Bambuddy, the retry
+        # has to actually print rather than reporting a success that never was.
+        working = bambu.enqueue
+
+        async def refuse(**_kwargs):
+            raise IntegrationError("bambuddy", "Connection refused")
+
+        bambu.enqueue = refuse
+        body = {"bambuddy_archive_id": 5, "request_id": "ghi-789"}
+        assert (await signed_in.post("/api/printers/1/print", json=body)).status_code == 502
+
+        bambu.enqueue = working
+        again = await signed_in.post("/api/printers/1/print", json=body)
+        assert again.status_code == 200
+        assert again.json().get("already_done") is not True
+        assert len(bambu.enqueued) == 1

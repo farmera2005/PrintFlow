@@ -118,6 +118,9 @@ class PrintRequest(BaseModel):
     plate_number: int = Field(default=1, ge=1)
     copies: int = Field(default=1, ge=1, le=50)
     print_options: dict[str, Any] = Field(default_factory=dict)
+    # One id per open dialog, sent again unchanged when the operator presses
+    # Print a second time. See print_on for why that matters.
+    request_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _names_a_file(self) -> PrintRequest:
@@ -141,6 +144,30 @@ async def print_on(
     operator has already decided which machine — and it is written to the audit
     log, because it puts filament through a printer.
     """
+    # Pressing Print twice must not print twice.
+    #
+    # The dangerous case is not a double click, it is an answer that never
+    # arrives: a proxy in front of PrintFlow times out, or a tunnel drops, and
+    # the operator sees an error for a plate that is already on the machine.
+    # There is no way to tell that apart from a request that never landed, so
+    # the honest thing is to make the retry safe rather than to ask them to
+    # guess. The dialog sends the same id both times; a request that has
+    # already been done reports what it did rather than doing it again.
+    if body.request_id:
+        already = await audit.find(
+            session, action="print_now", key="request_id", value=body.request_id
+        )
+        if already is not None:
+            return {
+                "printer_id": printer_id,
+                "queued": already.detail.get("queue_ids") or [],
+                "copies": already.detail.get("copies") or 0,
+                # Said plainly, because "it worked" and "it had already worked"
+                # are different things to see after an error.
+                "already_done": True,
+                "done_at": already.created_at,
+            }
+
     try:
         client = await bambuddy_api.client_for(session)
     except IntegrationNotConfigured as exc:
@@ -186,6 +213,7 @@ async def print_on(
             "plate_number": body.plate_number,
             "copies": body.copies,
             "queue_ids": queued,
+            "request_id": body.request_id,
         },
         actor=user.username,
     )

@@ -1083,11 +1083,22 @@ function PrintNow({
   const [error, setError] = useState<string | null>(null)
   const busyNow = machineState(printer).label === 'printing'
 
+  // One id for as long as this dialog is open, so pressing Print again after a
+  // failure is the *same* request rather than a second one. The case that
+  // matters is not a double click: it is an answer that never arrives —
+  // a proxy timing out, a tunnel dropping — where the plate may well already
+  // be on the machine and nothing here can tell.
+  const [requestId] = useState(() =>
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  )
+
   const send = async () => {
     setBusy(true)
     setError(null)
     try {
-      const result = await api.post<{ copies: number }>(
+      const result = await api.post<{ copies: number; already_done?: boolean }>(
         `/api/printers/${printer.id}/print`,
         {
           bambuddy_archive_id: file.archive_id,
@@ -1095,11 +1106,16 @@ function PrintNow({
           name: file.name,
           plate_number: plateNumber,
           copies,
+          request_id: requestId,
         },
       )
+      const where = printer.name ?? `printer ${printer.id}`
       await onDone(
-        `Sent ${file.name} to ${printer.name ?? `printer ${printer.id}`}` +
-          `${result.copies > 1 ? ` — ${result.copies} copies` : ''}.`,
+        result.already_done
+          ? `${file.name} had already gone to ${where} — the error was the reply ` +
+            `going missing, not the print. Nothing was sent twice.`
+          : `Sent ${file.name} to ${where}` +
+            `${result.copies > 1 ? ` — ${result.copies} copies` : ''}.`,
       )
     } catch (err) {
       setError(errorMessage(err))
@@ -1147,7 +1163,16 @@ function PrintNow({
           </Field>
         </div>
 
-        {error ? <Alert tone="error">{error}</Alert> : null}
+        {error ? (
+          <div className="space-y-2">
+            <Alert tone="error">{error}</Alert>
+            <p className="text-xs text-ink-600">
+              Press Print again — it is safe. This is the same request, so if
+              the plate did reach the machine and only the answer went missing,
+              PrintFlow will say so rather than sending it a second time.
+            </p>
+          </div>
+        ) : null}
 
         <p className="text-xs text-ink-500">
           This is not attached to an order and will not count towards one. It
