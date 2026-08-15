@@ -1077,9 +1077,9 @@ Guardrails, because this writes to your books:
 ## Orders in the books
 
 Two things happen to an order in QuickBooks: its units leave stock when they are
-printed, and its money is recorded when you invoice it. They are two halves of
-one arrangement, and the reason they are designed together is that either one
-done carelessly counts the same unit twice.
+printed, and the sale is recorded when you invoice it. They are designed
+together because **both of them move stock**, and left to themselves they would
+move the same units twice. What follows is how they hand over instead.
 
 ### Stock out when a line is printed
 
@@ -1134,20 +1134,29 @@ books, and which orders get one is a decision about the business.
 
 It bills the buyer's **name and address from the order** — finding that customer
 in QuickBooks by display name, or creating them. Lines come from the order's
-top-level lines at the price Etsy recorded, plus postage the buyer paid. Bundle
+top-level lines at the price Etsy recorded, plus postage the buyer paid when
+Settings names an item for it. Bundle
 components are not itemised: the buyer bought a bundle, not its bill of
 materials. A line whose price cannot be found is left off rather than billed at
 zero, because a zero on an invoice looks like a decision somebody made.
 
-**Every line names the income item from Settings — a Service or Non-Inventory
-item — not the product's own.** This is the half that keeps the arrangement
-honest. An invoice line naming an *Inventory* item takes that unit out of stock
-and books its cost, and the printed line already did exactly that. What was
-actually sold is in the line's description, where a person reads it. Choosing an
-inventory item for this setting is refused, with that explanation, and the picker
-does not offer one.
+**Every line names its own QuickBooks item** — the product's, or the variation's
+where it has one. That is what lets QuickBooks report sales and cost of goods
+sold *by item*, which an invoice of identical "Etsy sales" lines cannot. What
+was sold is in the description too, options included, for whoever reads the
+invoice.
 
-Between the two, each unit is deducted once and its cost recognised once.
+**Which means the invoice moves stock**, for every line billed on an inventory
+item: QuickBooks relieves quantity on hand and books cost from the invoice
+itself. Those units were already taken out when the line was printed, so
+**raising the invoice takes that earlier Purchase back**. The removal at print
+time is provisional — it keeps QuickBooks honest between printing and billing —
+and the invoice is the real document. A line billed on a service item (a bundle,
+or a product QuickBooks does not track) keeps its removal, because nothing else
+is going to make it.
+
+Net: one deduction per unit, whichever way an order goes. The hand-over is
+audited, so a deleted Purchase is never a mystery.
 
 **Voiding.** An invoice can be voided from the Money tab, which leaves a
 zero-total document in QuickBooks — rather than deleting it and leaving a gap in
@@ -1161,12 +1170,17 @@ Under **Settings → QuickBooks → Orders in the books**:
 * **Cost of goods sold account** (required for stock removals). The removal also
   reuses the "paid from" account under Manufacturing postings; since the document
   totals zero, the same clearing account serves both.
-* **Invoice lines go on** (required for invoicing). A Service or Non-Inventory
-  item — an "Etsy sales" service item is the usual answer.
-* **Shipping goes on** (optional). Leave it blank and postage joins the item
-  above.
+* **Fallback item for lines with no item of their own.** Invoice lines name the
+  real item sold, so this is only for what has none — a bundle, or a product
+  QuickBooks does not track. It must be a **Service or Non-Inventory** item: it
+  stands in for goods QuickBooks holds no stock of, so it must not pretend to
+  move any. Inventory items are refused here and not offered by the picker. A
+  line with nothing to name blocks the invoice rather than being dropped, which
+  would send an invoice for the wrong total.
+* **Shipping.** Which item postage the buyer paid goes on, or **None** — no
+  item, no line, for a shop that accounts for postage elsewhere.
 
-Neither has a default. Which account and which item are right depends on your
+Nothing has a default. Which account and which item are right depends on your
 chart of accounts, and picking on your behalf would file real money somewhere
 nobody chose. Each unset setting says, where it matters, what it is blocking.
 

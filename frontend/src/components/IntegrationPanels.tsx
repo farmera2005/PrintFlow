@@ -718,9 +718,17 @@ function BooksPosting() {
         </select>
       </Field>
 
+      <p className="text-xs text-ink-500">
+        Invoice lines name the item that was actually sold — each product's own
+        QuickBooks item, or its variation's — so QuickBooks can report sales and
+        cost of goods sold by item. Where that item carries stock the invoice
+        relieves it, and PrintFlow takes back the removal the printed line made,
+        so each unit is deducted once.
+      </p>
+
       <Field
-        label="Invoice lines go on"
-        hint="A Service or Non-Inventory item. Every invoice line names it, with the product in the description — so the invoice records the money without moving stock a second time. Inventory items are not listed."
+        label="Fallback item for lines with no item of their own"
+        hint="A bundle, or a product QuickBooks does not track, has no item to bill against. This stands in for those. It must be a Service or Non-Inventory item — it represents goods QuickBooks holds no stock of, so it must not pretend to move any. Inventory items are not listed."
       >
         <select
           className={inputClass}
@@ -728,7 +736,7 @@ function BooksPosting() {
           disabled={busy}
           onChange={(e) => pickItem(e.target.value, 'income_item_id', 'income_item_name')}
         >
-          <option value="">Choose an item…</option>
+          <option value="">None — such a line blocks the invoice</option>
           {items.map((item) => (
             <option key={item.id} value={String(item.id)}>
               {item.name} ({item.type})
@@ -738,8 +746,8 @@ function BooksPosting() {
       </Field>
 
       <Field
-        label="Shipping goes on (optional)"
-        hint="Postage the buyer paid gets its own invoice line. Leave it blank and it goes on the item above."
+        label="Shipping"
+        hint="Postage the buyer paid, as its own invoice line. Choose None if postage is accounted for elsewhere — no item, no line."
       >
         <select
           className={inputClass}
@@ -747,7 +755,7 @@ function BooksPosting() {
           disabled={busy}
           onChange={(e) => pickItem(e.target.value, 'shipping_item_id', 'shipping_item_name')}
         >
-          <option value="">Same item as the lines above</option>
+          <option value="">None — do not bill shipping</option>
           {items.map((item) => (
             <option key={item.id} value={String(item.id)}>
               {item.name} ({item.type})
@@ -766,11 +774,6 @@ function BooksPosting() {
         <Alert tone="warning">
           Until a cost of goods sold account is chosen, printed lines cannot take
           their units out of stock. The lines say so where it happens.
-        </Alert>
-      ) : null}
-      {!settings.income_item_id ? (
-        <Alert tone="warning">
-          Until an invoice item is chosen, orders cannot be invoiced.
         </Alert>
       ) : null}
       {saved ? <p className="text-xs text-emerald-700">Saved.</p> : null}

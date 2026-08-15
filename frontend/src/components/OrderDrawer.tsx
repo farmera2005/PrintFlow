@@ -1149,8 +1149,9 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
               : null}
           </p>
           <p className="text-xs text-ink-500">
-            Raised {formatDateTime(order.qbo_invoice_at)}. Recorded on non-inventory
-            lines, so it did not move stock — the printed lines did that.
+            Raised {formatDateTime(order.qbo_invoice_at)}, billed line by line
+            against each item sold. Stock the invoice relieves was handed back by
+            the printed lines, so each unit is deducted once.
           </p>
           <Button
             size="sm"
@@ -1171,7 +1172,9 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
         <div className="mt-1.5 space-y-1.5">
           <p className="text-xs text-ink-500">
             Bills the buyer's name and address from this order, at the prices Etsy
-            recorded. Stock is not touched — the printed lines already did that.
+            recorded, each line against its own QuickBooks item. Where that item
+            carries stock the invoice relieves it, and the printed line's removal
+            is taken back so nothing is deducted twice.
           </p>
           <Button size="sm" variant="primary" disabled={busy} onClick={() => run('')}>
             {busy ? 'Creating…' : 'Create invoice'}

@@ -6,7 +6,7 @@ system was a manufacturing sheet raising stock. That left two things happening
 in the shop that QuickBooks never heard about — units going out of the door, and
 the money they went out for.
 
-## Two writes, and why they do not overlap
+## Two writes, and how they hand over
 
 **A printed line takes its own units out of stock.** One QuickBooks Purchase
 carrying two lines that cancel each other out:
@@ -21,14 +21,22 @@ The document totals zero, so the payment account it names is untouched. That
 matters: a Purchase with only the negative line would total *below* zero, which
 QuickBooks reads as money arriving in a bank account, and nothing arrived.
 
-**An invoice records what the buyer paid** — and deliberately does not touch
-stock. Its lines name a Service or Non-Inventory item chosen in Settings, with
-the product's name in the description. An Inventory item there would relieve
-stock a second time and book its cost twice, so the setting refuses one.
+**An invoice records the sale, line by line, against the items actually sold.**
+Each line names its own QuickBooks item — the product's, or the variation's
+where it has one — so QuickBooks can report sales and cost of goods sold by
+item, which an invoice of identical "Etsy sales" lines cannot.
 
-Between them each unit is deducted exactly once and its cost is recognised
-once. The split is the whole design; changing either half without the other is
-how books stop balancing.
+**Which means the invoice moves stock too**, for every line billed on an
+inventory item: QuickBooks relieves quantity on hand and books cost from the
+invoice itself. That would be the same units twice. So raising an invoice
+**takes back** the printed line's Purchase for exactly those lines — the
+removal at print time is provisional, and the invoice is the real document. A
+line billed on a service item (a bundle, or a product QuickBooks does not
+track) keeps its removal, because nothing else is going to make it.
+
+Net: one deduction per unit, whichever way the order goes. That hand-over is
+the whole design, and changing either half without the other is how books stop
+balancing.
 
 ## Rules that exist because this writes to real books
 
@@ -507,6 +515,23 @@ def customer_payload(order: Order) -> dict[str, Any]:
     return payload
 
 
+def invoice_item_for(line: OrderLine, books: dict[str, Any]) -> str | None:
+    """Which QuickBooks item this invoice line should name.
+
+    The thing that was actually sold: the line's own item, the variation's
+    where it has one. An invoice reading "Storage bin" against the Storage bin
+    item is one QuickBooks can report on — sales by item, cost of goods sold by
+    item — and an invoice of identical "Etsy sales" lines is not.
+
+    The fallback item from Settings covers what has no item of its own: a
+    bundle, or a product QuickBooks does not track. Without it those lines have
+    nothing to name, which is an error rather than a line quietly dropped.
+    """
+    return line_item_id(line) or (
+        str(books["income_item_id"]) if books.get("income_item_id") else None
+    )
+
+
 def build_invoice(
     order: Order,
     lines: list[tuple[OrderLine, int, Decimal]],
@@ -514,14 +539,16 @@ def build_invoice(
     customer_id: str,
     books: dict[str, Any],
     shipping: Decimal | None,
+    item_for: dict[Any, str],
 ) -> dict[str, Any]:
     """The exact Invoice body sent to QuickBooks. Pure.
 
-    Every line names the income item from Settings — a Service or Non-Inventory
-    item — so the invoice records the money without touching stock. What was
-    actually sold is in the description, where a person reads it.
+    Each line names its own item, so the invoice is a record of what was sold
+    rather than of how much money arrived. Where that item is an inventory
+    item, QuickBooks relieves its stock and books its cost from this document —
+    which is why invoicing takes back the provisional removal the printed line
+    made. See `invoice_order`.
     """
-    income_item = str(books["income_item_id"])
     body_lines: list[dict[str, Any]] = []
 
     for line, quantity, price in lines:
@@ -531,26 +558,24 @@ def build_invoice(
                 "Amount": float(money(price * quantity)),
                 "Description": line_description(line),
                 "SalesItemLineDetail": {
-                    "ItemRef": {"value": income_item},
+                    "ItemRef": {"value": str(item_for[line.id])},
                     "Qty": quantity,
                     "UnitPrice": float(money(price)),
                 },
             }
         )
 
-    if shipping and shipping > 0:
-        # The buyer paid for postage, so it is revenue like anything else. Its
-        # own item when Settings names one, otherwise the income item — the
-        # money is not worth losing over a missing setting.
+    # Postage the buyer paid, when Settings names an item to put it on. No item
+    # means no line: a shop whose postage is accounted for elsewhere — or is
+    # simply not worth a line — should not have one invented for it.
+    if shipping and shipping > 0 and books.get("shipping_item_id"):
         body_lines.append(
             {
                 "DetailType": "SalesItemLineDetail",
                 "Amount": float(money(shipping)),
                 "Description": "Shipping",
                 "SalesItemLineDetail": {
-                    "ItemRef": {
-                        "value": str(books.get("shipping_item_id") or income_item)
-                    },
+                    "ItemRef": {"value": str(books["shipping_item_id"])},
                     "Qty": 1,
                     "UnitPrice": float(money(shipping)),
                 },
@@ -560,10 +585,7 @@ def build_invoice(
     body: dict[str, Any] = {
         "CustomerRef": {"value": str(customer_id)},
         "Line": body_lines,
-        "PrivateNote": (
-            f"PrintFlow — Etsy order {order.order_number}. Recorded on "
-            "non-inventory lines; stock is taken out when the line is printed."
-        ),
+        "PrivateNote": f"PrintFlow — Etsy order {order.order_number}.",
     }
     if order.placed_at:
         body["TxnDate"] = order.placed_at.date().isoformat()
@@ -616,6 +638,12 @@ async def invoice_order(
 ) -> dict[str, Any]:
     """Raise the QuickBooks invoice for an order. Once per order.
 
+    Each line names its own QuickBooks item. Where that item is an inventory
+    item the invoice relieves its stock and books its cost — so the provisional
+    removal the printed line made is taken back in the same breath, leaving one
+    deduction per unit. Lines billed on an item that carries no stock keep their
+    removal, because nothing else is going to make it.
+
     Raises BooksError with a sentence worth showing when it cannot be done. A
     person pressed a button for this, so nothing here fails quietly.
     """
@@ -626,11 +654,6 @@ async def invoice_order(
         )
 
     books = await get_books_settings(session)
-    if not books.get("income_item_id"):
-        raise BooksError(
-            "No income item is set. Choose a Service or Non-Inventory item "
-            "under Settings → QuickBooks books."
-        )
 
     lines = (
         (
@@ -651,18 +674,40 @@ async def invoice_order(
             "to invoice."
         )
 
+    item_for = {line.id: invoice_item_for(line, books) for line, _, _ in billable}
+    nameless = [
+        line for line, _, _ in billable if not item_for[line.id]
+    ]
+    if nameless:
+        names = ", ".join(
+            (line.product.name if line.product else line.title) or "an unmatched line"
+            for line in nameless
+        )
+        raise BooksError(
+            f"{names} has no QuickBooks item, and no fallback item is set for "
+            "lines like it. Link the product to an item, or choose a fallback "
+            "under Settings → QuickBooks → Orders in the books."
+        )
+
     try:
         client = await qbo_api.client_for(session)
         customer = await find_or_create_customer(session, client, order)
         customer_id = str(customer.get("Id") or "")
         if not customer_id:
             raise BooksError("QuickBooks did not return a customer to bill.")
+        # Which of these lines the invoice will move stock for. Asked before
+        # the write, because the answer decides what has to be undone after it
+        # and a failure to read it afterwards would leave the books doubled.
+        catalogue = await client.get_items(
+            [str(item) for item in item_for.values() if item]
+        )
         body = build_invoice(
             order,
             billable,
             customer_id=customer_id,
             books=books,
             shipping=order.shipping_total,
+            item_for={key: str(value) for key, value in item_for.items() if value},
         )
         created = await client.create_invoice(
             body, request_id=_key("invoice", str(order.id))
@@ -683,6 +728,21 @@ async def invoice_order(
     order.qbo_invoice_error = None
     await session.flush()
 
+    # The invoice has just relieved stock for every line billed on an inventory
+    # item. Those units were already taken out when the line was printed, so
+    # that earlier Purchase is now a second deduction of the same goods — take
+    # it back. A line billed on a service item keeps its removal, because
+    # nothing else is going to make it.
+    handed_over: list[dict[str, Any]] = []
+    for line, _, _ in billable:
+        item = catalogue.get(str(item_for[line.id]))
+        if not (item and qbo_api.item_moves_stock(item)):
+            continue
+        if line.qbo_stock_removed_at is None:
+            continue
+        outcome = await restore_stock(session, line, actor=actor)
+        handed_over.append({"line_id": str(line.id), **outcome})
+
     await audit.record(
         session,
         entity_type="order",
@@ -695,6 +755,9 @@ async def invoice_order(
             "customer_id": customer_id,
             "lines": len(body["Line"]),
             "total": str(order.qbo_invoice_total),
+            # What the invoice took over from the printed lines. Worth logging:
+            # it is the only record that a Purchase was deleted on purpose.
+            "stock_handed_over": len([row for row in handed_over if row.get("restored")]),
         },
         actor=actor,
     )
@@ -703,6 +766,7 @@ async def invoice_order(
         "doc_number": order.qbo_invoice_doc_number,
         "total": str(order.qbo_invoice_total),
         "customer_id": customer_id,
+        "stock_handed_over": handed_over,
     }
 
 

@@ -44,18 +44,20 @@ PAYMENT_TYPES = ("Cash", "Check", "CreditCard")
 
 # What the order pipeline writes into QuickBooks, and where it lands.
 #
-# Two writes, deliberately split so no unit is counted twice:
-#
 # * a printed line takes its own item out of stock — inventory asset down,
 #   `cogs_account_id` up. That account is where the value of a sold unit goes,
 #   so it wants to be a Cost of Goods Sold account.
-# * an invoice records what the buyer paid, on `income_item_id` — which must be
-#   a **Service or Non-Inventory** item. An inventory item on an invoice line
-#   would take the same unit out of stock a second time, which is the whole
-#   thing this arrangement exists to avoid.
+# * an invoice bills each line against **its own** QuickBooks item, so sales
+#   and cost of goods sold can be reported by item.
 #
-# `shipping_item_id` is optional: without it, postage the buyer paid is folded
-# into the invoice as one more line on the income item rather than being lost.
+# `income_item_id` is the fallback for lines with no item of their own — a
+# bundle, or a product QuickBooks does not track. It must be a **Service or
+# Non-Inventory** item: it stands in for goods QuickBooks holds no stock of, so
+# a line naming it must not pretend to move any.
+#
+# `shipping_item_id` is optional and means what it says: no item, no shipping
+# line. A shop that accounts for postage elsewhere should not have a line
+# invented for it.
 #
 # The Purchase behind a stock removal reuses the manufacturing payment account,
 # because it is the same books and the document totals zero either way.
@@ -79,9 +81,9 @@ BOOKS_FIELDS = tuple(DEFAULT_BOOKS)
 # than to Cost of Goods Sold is not wrong — so both are offered.
 COGS_ACCOUNT_TYPES = ("Cost of Goods Sold", "Expense", "Other Expense")
 
-# Item types that may carry an invoice line without moving stock. This is
-# enforced rather than advised: picking an Inventory item here would silently
-# double-count every unit sold.
+# Item types the fallback and shipping settings may name. Enforced rather than
+# advised: both stand in for things QuickBooks holds no stock of, and an
+# Inventory item there would move stock nobody meant to move.
 NON_STOCK_ITEM_TYPES = ("Service", "NonInventory", "Category")
 
 # What AccountRef may be, per payment type. QuickBooks has no "Cash" account

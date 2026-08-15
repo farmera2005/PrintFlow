@@ -174,12 +174,13 @@ async def read_books_settings(
 
 
 async def _refuse_stock_moving_item(session: AsyncSession, item_id: str | None) -> None:
-    """Stop an Inventory item being chosen to carry invoice lines.
+    """Stop an Inventory item being chosen as the fallback or as shipping.
 
-    The whole arrangement rests on the invoice not moving stock — the printed
-    line already did that. An Inventory item here would deduct every unit a
-    second time and book its cost twice, and it would do it quietly, in
-    somebody's real books. Better to refuse the setting than to find out later.
+    Invoice lines name the item that was actually sold, and where that is an
+    inventory item moving its stock is the point. These two settings are the
+    exception: both stand in for things QuickBooks holds no stock of — a
+    bundle, a product it does not track, postage — so an inventory item here
+    would quietly move stock nobody meant to move, in somebody's real books.
 
     QuickBooks being unreachable is not a reason to refuse: the check is a
     guard, and a shop should still be able to configure PrintFlow while Intuit
@@ -195,9 +196,9 @@ async def _refuse_stock_moving_item(session: AsyncSession, item_id: str | None) 
     if item and qbo_api.item_moves_stock(item):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"'{item.get('Name')}' is an inventory item, so putting it on an "
-            "invoice would take the same units out of stock a second time — "
-            "the printed line already did that. Choose a Service or "
+            f"'{item.get('Name')}' is an inventory item. This setting stands in "
+            "for things QuickBooks holds no stock of, so naming it here would "
+            "move stock nobody meant to move. Choose a Service or "
             "Non-Inventory item instead.",
         )
 

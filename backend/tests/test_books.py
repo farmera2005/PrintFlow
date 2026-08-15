@@ -6,9 +6,11 @@ same as the manufacturing suite's — a wrong number here is a wrong number on a
 tax return — and the thing most worth pinning is not that the writes happen but
 that they happen *once* and that they do not overlap.
 
-The overlap is the subtle one. A QuickBooks invoice line naming an inventory
-item takes that unit out of stock all by itself. The printed line has already
-done exactly that. Several tests here exist only to hold those two apart.
+The overlap is the subtle one. An invoice line naming an inventory item takes
+that unit out of stock all by itself, and the printed line has already done
+exactly that — so invoicing hands the job over, taking back the printed
+removal for the lines the invoice now covers. Several tests exist only to pin
+that hand-over, in both directions.
 """
 
 from __future__ import annotations
@@ -37,7 +39,13 @@ from app.models import (
     ProductVariation,
 )
 from app.services import books, credentials, settings_store
-from app.services.books import BooksError, build_invoice, build_removal, customer_payload
+from app.services.books import (
+    BooksError,
+    build_invoice,
+    build_removal,
+    customer_payload,
+    invoice_item_for,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -149,6 +157,8 @@ async def _configured(session, **books_overrides):
             "cogs_account_name": "Cost of Goods Sold",
             "income_item_id": "900",
             "income_item_name": "Etsy sales",
+            "shipping_item_id": "901",
+            "shipping_item_name": "Shipping income",
             **books_overrides,
         },
     )
@@ -176,9 +186,16 @@ STOCK_ITEM = {
 }
 # What an invoice line is allowed to name.
 INCOME_ITEM = {"Id": "900", "Name": "Etsy sales", "Type": "Service"}
+SHIPPING_ITEM = {"Id": "901", "Name": "Shipping income", "Type": "Service"}
 
 
-def _stub(*, items=(STOCK_ITEM, INCOME_ITEM), customers=(), posted=None, responses=None):
+def _stub(
+    *,
+    items=(STOCK_ITEM, INCOME_ITEM, SHIPPING_ITEM),
+    customers=(),
+    posted=None,
+    responses=None,
+):
     """A QuickBooks that answers queries and records what was written to it.
 
     `posted` collects (entity, body) pairs so a test can assert on the exact
@@ -600,32 +617,53 @@ class TestWhatCountsAsPrinted:
 
 
 class TestInvoiceDocument:
-    async def test_lines_name_the_income_item_not_the_product(self, db):
-        """The heart of it: an invoice must not move stock.
+    async def test_each_line_names_its_own_item(self, db):
+        """The invoice is a record of what was sold, not of money arriving.
 
-        The printed line already took these units out. An inventory item here
-        would take them out again and book their cost twice.
+        Naming the real item is what lets QuickBooks report sales and cost of
+        goods sold by item; an invoice of identical "Etsy sales" lines cannot.
         """
-        product = await _product(db)
+        bin_ = await _product(db)
+        lid = await _product(db, sku="LID", name="Lid", qbo_id="501")
         order = await _order(db)
-        line = await _line(db, order, product, quantity=2)
+        first = await _line(db, order, bin_, quantity=2)
+        second = await _line(db, order, lid, quantity=1, transaction_id=2)
 
         body = build_invoice(
             order,
-            [(line, 2, Decimal("18.00"))],
+            [(first, 2, Decimal("18.00")), (second, 1, Decimal("4.00"))],
             customer_id="77",
-            books={"income_item_id": "900"},
-            shipping=Decimal("7.50"),
+            books={},
+            shipping=None,
+            item_for={first.id: "500", second.id: "501"},
         )
 
-        items = [
-            row["SalesItemLineDetail"]["ItemRef"]["value"] for row in body["Line"]
-        ]
-        assert items == ["900", "900"]
-        assert product.qbo_item_id not in items
+        items = [row["SalesItemLineDetail"]["ItemRef"]["value"] for row in body["Line"]]
+        assert items == ["500", "501"]
+
+    async def test_a_variation_bills_its_own_item(self, db):
+        """One colour of a printed part is its own item in QuickBooks."""
+        product = await _product(db)
+        variation = ProductVariation(product_id=product.id, label="Red", qbo_item_id="555")
+        db.add(variation)
+        await db.flush()
+        order = await _order(db)
+        line = await _line(db, order, product, variation_id=variation.id)
+        await db.refresh(line)
+
+        assert invoice_item_for(line, {"income_item_id": "900"}) == "555"
+
+    async def test_a_line_with_no_item_falls_back(self, db):
+        """A bundle has nothing of its own to bill against."""
+        bundle = await _product(db, sku="KIT", fulfillment="bundle", qbo_id=None)
+        order = await _order(db)
+        line = await _line(db, order, bundle)
+
+        assert invoice_item_for(line, {"income_item_id": "900"}) == "900"
+        assert invoice_item_for(line, {}) is None
 
     async def test_the_product_is_named_in_the_description(self, db):
-        """A line that says only "Etsy sales" is one nobody can read."""
+        """The item says what it is; the description says which one."""
         product = await _product(db)
         order = await _order(db)
         line = await _line(db, order, product)
@@ -635,8 +673,9 @@ class TestInvoiceDocument:
             order,
             [(line, 2, Decimal("18.00"))],
             customer_id="77",
-            books={"income_item_id": "900"},
+            books={},
             shipping=None,
+            item_for={line.id: "500"},
         )
 
         assert body["Line"][0]["Description"] == "Storage bin (Color: Red)"
@@ -650,8 +689,9 @@ class TestInvoiceDocument:
             order,
             [(line, 1, Decimal("18.00"))],
             customer_id="77",
-            books={"income_item_id": "900", "shipping_item_id": "901"},
+            books={"shipping_item_id": "901"},
             shipping=Decimal("7.50"),
+            item_for={line.id: "500"},
         )
 
         shipping = body["Line"][-1]
@@ -659,7 +699,9 @@ class TestInvoiceDocument:
         assert shipping["Amount"] == 7.5
         assert shipping["SalesItemLineDetail"]["ItemRef"]["value"] == "901"
 
-    async def test_no_shipping_means_no_shipping_line(self, db):
+    async def test_no_shipping_item_means_no_shipping_line(self, db):
+        """None means none: a shop that accounts for postage elsewhere should
+        not have a line invented for it."""
         product = await _product(db)
         order = await _order(db)
         line = await _line(db, order, product)
@@ -668,8 +710,25 @@ class TestInvoiceDocument:
             order,
             [(line, 1, Decimal("18.00"))],
             customer_id="77",
-            books={"income_item_id": "900"},
+            books={"shipping_item_id": None},
+            shipping=Decimal("7.50"),
+            item_for={line.id: "500"},
+        )
+
+        assert len(body["Line"]) == 1
+
+    async def test_no_postage_paid_means_no_shipping_line(self, db):
+        product = await _product(db)
+        order = await _order(db)
+        line = await _line(db, order, product)
+
+        body = build_invoice(
+            order,
+            [(line, 1, Decimal("18.00"))],
+            customer_id="77",
+            books={"shipping_item_id": "901"},
             shipping=Decimal("0"),
+            item_for={line.id: "500"},
         )
 
         assert len(body["Line"]) == 1
@@ -718,6 +777,98 @@ class TestInvoiceOrder:
         assert invoice["Line"][0]["Amount"] == 36.0
         assert invoice["Line"][0]["SalesItemLineDetail"]["UnitPrice"] == 18.0
         assert invoice["Line"][-1]["Amount"] == 7.5
+
+    async def test_invoicing_takes_back_the_printed_removal(self, db, monkeypatch):
+        """The hand-over, and the whole reason it exists.
+
+        The invoice line names an inventory item, so QuickBooks relieves that
+        stock from the invoice itself. The printed line already took the same
+        units out. Left alone that is two deductions of one unit, in somebody's
+        real books — so the earlier Purchase is deleted.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        line = await _line(db, order, product, quantity=2, transaction_id=1)
+        await books.remove_stock(db, line, actor="adam", order=order)
+        assert line.qbo_stock_removed_at is not None
+
+        result = await books.invoice_order(db, order, actor="adam")
+
+        assert [row["restored"] for row in result["stock_handed_over"]] == [True]
+        assert line.qbo_stock_removed_at is None
+        # The Purchase was deleted, not merely forgotten about here.
+        assert posted[-1][0] == "purchase"
+        assert posted[-1][1]["Id"] == "180"
+
+    async def test_a_line_billed_on_a_service_item_keeps_its_removal(
+        self, db, monkeypatch
+    ):
+        """Nothing else is going to make that deduction.
+
+        A bundle bills against the fallback item, which carries no stock — so
+        the invoice moves nothing and the printed removal has to stand.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        bundle = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id=None)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        line = await _line(db, order, bundle, quantity=2, transaction_id=1)
+        # A bundle is never booked as itself, so put the marker on by hand —
+        # what is under test is the invoice's decision, not how it got there.
+        line.qbo_stock_removed_at = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        line.qbo_stock_purchase_id = "180"
+        await db.flush()
+
+        result = await books.invoice_order(db, order, actor="adam")
+
+        assert result["stock_handed_over"] == []
+        assert line.qbo_stock_removed_at is not None
+        assert "purchase:delete" not in [entity for entity, _ in posted]
+
+    async def test_an_uninvoiced_line_that_was_never_booked_is_left_alone(
+        self, db, monkeypatch
+    ):
+        """No removal to take back is not an error, and not a write."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        result = await books.invoice_order(db, order, actor="adam")
+
+        assert result["stock_handed_over"] == []
+        assert [entity for entity, _ in posted] == ["customer", "invoice"]
+
+    async def test_shipping_can_be_billed_on_nothing_at_all(self, db, monkeypatch):
+        """None means none — postage accounted for outside QuickBooks."""
+        await _qbo_connected(db)
+        await _configured(db, shipping_item_id=None)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db)
+        order = await _order(
+            db, transactions=self.TRANSACTIONS, shipping_total=Decimal("7.50")
+        )
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert len(invoice["Line"]) == 1
+        assert "Shipping" not in [row["Description"] for row in invoice["Line"]]
 
     async def test_an_existing_customer_is_reused(self, db, monkeypatch):
         """A second order from a repeat buyer must not make a second customer."""
@@ -810,7 +961,25 @@ class TestInvoiceOrder:
         invoice = [body for entity, body in posted if entity == "invoice"][0]
         assert len(invoice["Line"]) == 1
 
-    async def test_no_income_item_refuses_before_anything_is_sent(self, db, monkeypatch):
+    async def test_a_line_with_nothing_to_name_refuses_before_anything_is_sent(
+        self, db, monkeypatch
+    ):
+        """A bundle with no fallback has no item to bill against. Better to
+        refuse than to drop the line and send an invoice for the wrong total."""
+        await _qbo_connected(db)
+        await _configured(db, income_item_id=None)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        bundle = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id=None)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, bundle, quantity=2, transaction_id=1)
+
+        with pytest.raises(BooksError, match="no QuickBooks item"):
+            await books.invoice_order(db, order, actor="adam")
+        assert posted == []
+
+    async def test_a_line_that_has_its_own_item_needs_no_fallback(self, db, monkeypatch):
         await _qbo_connected(db)
         await _configured(db, income_item_id=None)
         posted: list = []
@@ -820,9 +989,10 @@ class TestInvoiceOrder:
         order = await _order(db, transactions=self.TRANSACTIONS)
         await _line(db, order, product, quantity=2, transaction_id=1)
 
-        with pytest.raises(BooksError, match="income item"):
-            await books.invoice_order(db, order, actor="adam")
-        assert posted == []
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "500"
 
     async def test_a_refusal_leaves_the_order_uninvoiced(self, db, monkeypatch):
         """Half-invoiced is the state worth making impossible."""
@@ -979,10 +1149,11 @@ class TestThroughTheApi:
 
 
 class TestBooksSettings:
-    async def test_an_inventory_item_cannot_carry_invoice_lines(
+    async def test_an_inventory_item_cannot_be_the_fallback(
         self, signed_in, db, monkeypatch
     ):
-        """The one setting that would quietly double-count every sale."""
+        """The fallback stands in for goods QuickBooks holds no stock of, so it
+        must not move any. Invoice lines proper name real items on purpose."""
         await _qbo_connected(db)
         await db.commit()
         _patch_qbo(monkeypatch, _stub())
@@ -992,7 +1163,7 @@ class TestBooksSettings:
         )
 
         assert response.status_code == 400
-        assert "second time" in response.json()["detail"]
+        assert "stock nobody meant to move" in response.json()["detail"]
 
     async def test_a_service_item_is_accepted(self, signed_in, db, monkeypatch):
         await _qbo_connected(db)

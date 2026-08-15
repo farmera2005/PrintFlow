@@ -50,7 +50,7 @@ export default function InvoiceAction({
       !window.confirm(
         `Create a QuickBooks invoice for order ${order.order_number}? It bills ` +
           "the buyer's name and address from this order, at the prices Etsy " +
-          'recorded, and does not move stock.',
+          'recorded, each line against its own QuickBooks item.',
       )
     )
       return
