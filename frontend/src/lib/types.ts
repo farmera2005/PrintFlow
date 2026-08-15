@@ -285,6 +285,10 @@ export interface Product {
   print_files: PrintFile[]
   bom: BomEntry[]
   option_rules: OptionRule[]
+  /** Which QuickBooks item each chosen option is sold as. A listing sold in
+   *  several scales is several items on the books, so one product carries as
+   *  many of these as it has options worth telling apart. */
+  option_items: OptionItem[]
   etsy_links: EtsyLink[]
   variations: ProductVariation[]
 }
@@ -322,6 +326,17 @@ export interface ProductVariation {
 }
 
 /** An Etsy listing that resolves to this product. This is how orders match. */
+/** "When the buyer picks this, bill it as that." Set by hand, never derived. */
+export interface OptionItem {
+  id: string
+  option_name: string
+  option_value: string
+  qbo_item_id: string
+  qbo_item_name: string | null
+  /** Which mapping wins when a buyer's choices match more than one. First wins. */
+  position: number
+}
+
 export interface EtsyLink {
   id: string
   etsy_listing_id: number

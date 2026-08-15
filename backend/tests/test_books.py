@@ -36,6 +36,7 @@ from app.models import (
     OrderLine,
     PrintJob,
     Product,
+    ProductOptionItem,
     ProductVariation,
 )
 from app.services import books, credentials, settings_store
@@ -109,6 +110,23 @@ async def _line(session, order, product, *, quantity=2, transaction_id=1, **fiel
     await session.flush()
     await session.refresh(line)
     return line
+
+
+async def _reloaded(session, line):
+    """The line as a request would load it: product, its mappings, variation.
+
+    Setting `variations` on an object already in the identity map does not
+    refresh what was loaded with it, so the mappings have to be re-read the way
+    the service reads them.
+    """
+    return (
+        await session.execute(
+            select(OrderLine)
+            .where(OrderLine.id == line.id)
+            .options(selectinload(OrderLine.product).selectinload(Product.option_items))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().one()
 
 
 async def _with_plates(session, line):
@@ -1336,3 +1354,222 @@ class TestBooksSettings:
     async def test_the_default_is_to_remove_stock_when_printed(self, signed_in):
         body = (await signed_in.get("/api/manufacturing/books")).json()
         assert body["settings"]["remove_stock_on_printed"] is True
+
+
+# --------------------------------------------------------------------------
+# Which item a chosen option is sold as
+# --------------------------------------------------------------------------
+
+
+class TestOptionItems:
+    """One listing, several QuickBooks items, chosen by what the buyer picked.
+
+    A playset sold in HO and 1:64 is two items on the books. The mapping lives
+    on the option rather than on the product, is set by hand, and decides both
+    what an invoice line names and what a printed unit is drawn down from —
+    a unit billed as one item and taken out of another would be two mistakes
+    that look like one.
+    """
+
+    async def _mapped(self, db, product, *pairs):
+        for position, (name, value, item) in enumerate(pairs):
+            db.add(
+                ProductOptionItem(
+                    product_id=product.id,
+                    option_name=name,
+                    option_value=value,
+                    qbo_item_id=item,
+                    position=position,
+                )
+            )
+        await db.flush()
+        # The product was loaded before these existed, and a loaded collection
+        # is not re-read just because rows appeared. A request loads it fresh;
+        # an awaited refresh is how the test gets the same starting point
+        # without forcing a lazy load outside the greenlet.
+        await db.refresh(product, ["option_items"])
+
+    async def test_the_option_the_buyer_picked_decides(self, db):
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db, product, ("Scale", "HO", "601"), ("Scale", "1:64", "602")
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "602"
+
+    async def test_case_and_spacing_do_not_matter(self, db):
+        """These strings are typed by hand in Etsy's listing editor."""
+        product = await _product(db, qbo_id="500")
+        await self._mapped(db, product, ("Scale", "1:64", "602"))
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [{"name": "  scale ", "value": "1:64"}]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "602"
+
+    async def test_an_option_nobody_mapped_falls_back_to_the_product(self, db):
+        product = await _product(db, qbo_id="500")
+        await self._mapped(db, product, ("Scale", "HO", "601"))
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [{"name": "Scale", "value": "N"}]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "500"
+
+    async def test_the_first_mapping_wins_a_tie(self, db):
+        """A buyer can pick a scale and a loadout, and both can name an item.
+
+        Which one it is billed as is the operator's call, so it is the order
+        they put the mappings in rather than anything inferred.
+        """
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db, product, ("Scale", "1:64", "602"), ("Loadout", "Yes", "603")
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [
+            {"name": "Loadout", "value": "Yes"},
+            {"name": "Scale", "value": "1:64"},
+        ]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "602"
+
+    async def test_a_variation_item_still_wins(self, db):
+        """One exact combination named deliberately beats one option."""
+        product = await _product(db, qbo_id="500")
+        await self._mapped(db, product, ("Scale", "1:64", "602"))
+        variation = ProductVariation(
+            product_id=product.id, label="1:64", qbo_item_id="900"
+        )
+        db.add(variation)
+        await db.flush()
+        order = await _order(db)
+        line = await _line(db, order, product, variation_id=variation.id)
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "900"
+
+    async def test_the_invoice_bills_against_it(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db, qbo_id="500")
+        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        order = await _order(
+            db,
+            transactions=[
+                {"transaction_id": 1, "price": {"amount": 4450, "divisor": 100}}
+            ],
+        )
+        line = await _line(db, order, product, quantity=1, transaction_id=1)
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
+
+    async def test_the_stock_removal_uses_the_same_item(self, db, monkeypatch):
+        """Billed as one item and drawn down from another is two mistakes."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db, qbo_id="500")
+        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        order = await _order(db)
+        line = await _line(db, order, product, quantity=2)
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        await books.remove_stock(db, await _reloaded(db, line), actor="adam", order=order)
+
+        purchase = [body for entity, body in posted if entity == "purchase"][0]
+        assert purchase["Line"][0]["ItemBasedExpenseLineDetail"]["ItemRef"]["value"] == "501"
+
+
+class TestOptionItemsApi:
+    async def _product(self, signed_in, db):
+        product = Product(sku="KIT", name="Playset", fulfillment="bundle", qbo_item_id=None)
+        db.add(product)
+        await db.commit()
+        return product
+
+    async def test_adding_two_items_to_one_product(self, signed_in, db):
+        """The point of the whole thing: several items on one product."""
+        product = await self._product(signed_in, db)
+
+        for value, item in (("HO", "601"), ("1:64", "602")):
+            response = await signed_in.post(
+                f"/api/products/{product.id}/option-items",
+                json={
+                    "option_name": "Scale",
+                    "option_value": value,
+                    "qbo_item_id": item,
+                    "qbo_item_name": f"Playset {value}",
+                },
+            )
+            assert response.status_code == 201, response.text
+
+        rows = response.json()["option_items"]
+        assert [row["qbo_item_id"] for row in rows] == ["601", "602"]
+        assert [row["position"] for row in rows] == [0, 1]
+
+    async def test_the_same_option_twice_is_refused(self, signed_in, db):
+        product = await self._product(signed_in, db)
+        body = {"option_name": "Scale", "option_value": "HO", "qbo_item_id": "601"}
+        await signed_in.post(f"/api/products/{product.id}/option-items", json=body)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={"option_name": "scale", "option_value": " ho ", "qbo_item_id": "602"},
+        )
+
+        assert response.status_code == 409
+        assert "already sold as" in response.json()["detail"]
+
+    async def test_reordering_decides_ties(self, signed_in, db):
+        product = await self._product(signed_in, db)
+        for name, value, item in (("Scale", "HO", "601"), ("Loadout", "Yes", "603")):
+            await signed_in.post(
+                f"/api/products/{product.id}/option-items",
+                json={"option_name": name, "option_value": value, "qbo_item_id": item},
+            )
+        rows = (await signed_in.get(f"/api/products/{product.id}")).json()["option_items"]
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-items/{rows[1]['id']}/move?up=true"
+        )
+
+        assert [row["qbo_item_id"] for row in response.json()["option_items"]] == [
+            "603",
+            "601",
+        ]
+
+    async def test_removing_one(self, signed_in, db):
+        product = await self._product(signed_in, db)
+        await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={"option_name": "Scale", "option_value": "HO", "qbo_item_id": "601"},
+        )
+        rows = (await signed_in.get(f"/api/products/{product.id}")).json()["option_items"]
+
+        response = await signed_in.delete(
+            f"/api/products/{product.id}/option-items/{rows[0]['id']}"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["option_items"] == []

@@ -26,6 +26,7 @@ from ..models import (
     OrderLine,
     PrintFile,
     Product,
+    ProductOptionItem,
     ProductVariation,
     User,
 )
@@ -133,6 +134,20 @@ def _serialize(product: Product) -> dict[str, Any]:
                 product.variations, key=lambda variation: variation.label.lower()
             )
         ],
+        # Which QuickBooks item each option is sold as. A listing sold in two
+        # scales is two items on the books, so a product carries as many of
+        # these as it has options worth telling apart.
+        "option_items": [
+            {
+                "id": row.id,
+                "option_name": row.option_name,
+                "option_value": row.option_value,
+                "qbo_item_id": row.qbo_item_id,
+                "qbo_item_name": row.qbo_item_name,
+                "position": row.position,
+            }
+            for row in sorted(product.option_items, key=lambda row: row.position)
+        ],
         # Etsy listings that resolve to this product without a SKU.
         "etsy_links": [
             {
@@ -157,6 +172,7 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
                 selectinload(Product.option_rules).selectinload(BomOptionRule.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
                 selectinload(Product.etsy_links),
+                selectinload(Product.option_items),
                 selectinload(Product.variations).selectinload(ProductVariation.variant_product),
             )
             # Sessions do not expire on commit, so without this the identity map
@@ -184,6 +200,7 @@ async def list_products(
         selectinload(Product.option_rules).selectinload(BomOptionRule.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
         selectinload(Product.etsy_links),
+        selectinload(Product.option_items),
         selectinload(Product.variations).selectinload(ProductVariation.variant_product),
     )
     if q.strip():
@@ -1328,6 +1345,122 @@ async def _reattach_open_lines(session: AsyncSession, product: Product) -> int:
         # alone by plan_jobs; only undispatched ones are corrected.
         await printing.plan_jobs(session, moved)
     return reattached
+
+
+class OptionItemRequest(BaseModel):
+    option_name: str = Field(min_length=1, max_length=200)
+    option_value: str = Field(min_length=1, max_length=500)
+    qbo_item_id: str = Field(min_length=1, max_length=100)
+    qbo_item_name: str | None = None
+
+
+@router.post("/{product_id}/option-items", status_code=201)
+async def add_option_item(
+    product_id: uuid.UUID,
+    body: OptionItemRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Say which QuickBooks item a chosen option is sold as.
+
+    One listing is often several things on the books — a playset in HO and in
+    1:64 — and the option the buyer picked is what says which. Set by hand, and
+    only by hand: which of a shop's items a combination is sold as is a decision
+    about their books, and deriving it would put a real sale on the wrong item.
+    """
+    product = await _get(session, product_id)
+    name = body.option_name.strip()
+    value = body.option_value.strip()
+    wanted = (variations_service.normalize(name), variations_service.normalize(value))
+
+    for existing in product.option_items:
+        if (
+            variations_service.normalize(existing.option_name),
+            variations_service.normalize(existing.option_value),
+        ) == wanted:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"“{existing.option_name}: {existing.option_value}” is already "
+                f"sold as {existing.qbo_item_name or existing.qbo_item_id}.",
+            )
+
+    row = ProductOptionItem(
+        product_id=product.id,
+        option_name=name,
+        option_value=value,
+        qbo_item_id=body.qbo_item_id.strip(),
+        qbo_item_name=(body.qbo_item_name or "").strip() or None,
+        # Last, so adding one never changes what the ones above it already do.
+        position=max((item.position for item in product.option_items), default=-1) + 1,
+    )
+    session.add(row)
+    await session.flush()
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product.id,
+        action="option_item_added",
+        detail={"option": f"{name}: {value}", "qbo_item": row.qbo_item_name or row.qbo_item_id},
+        actor=user.username,
+    )
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+@router.post("/{product_id}/option-items/{item_id}/move")
+async def move_option_item(
+    product_id: uuid.UUID,
+    item_id: uuid.UUID,
+    up: bool = True,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Reorder the mappings, which is what decides ties.
+
+    A buyer can pick a scale *and* a loadout, and both can name an item. Which
+    one the sale is booked as is the operator's call, not something to infer —
+    so it is the order on the screen, and the order is theirs to set.
+    """
+    product = await _get(session, product_id)
+    rows = sorted(product.option_items, key=lambda row: row.position)
+    index = next((i for i, row in enumerate(rows) if row.id == item_id), None)
+    if index is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mapping not found")
+
+    swap = index - 1 if up else index + 1
+    if 0 <= swap < len(rows):
+        rows[index], rows[swap] = rows[swap], rows[index]
+    # Renumber the lot: positions may have gaps from earlier deletes, and a
+    # swap of two numbers that were never contiguous does nothing visible.
+    for position, row in enumerate(rows):
+        row.position = position
+    await session.flush()
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+@router.delete("/{product_id}/option-items/{item_id}")
+async def delete_option_item(
+    product_id: uuid.UUID,
+    item_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    row = await session.get(ProductOptionItem, item_id)
+    if row is None or row.product_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mapping not found")
+    await session.delete(row)
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product_id,
+        action="option_item_removed",
+        detail={"option": f"{row.option_name}: {row.option_value}"},
+        actor=user.username,
+    )
+    await session.commit()
+    return _serialize(await _get(session, product_id))
 
 
 class OptionPair(BaseModel):

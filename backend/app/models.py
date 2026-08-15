@@ -247,6 +247,12 @@ class Product(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    option_items: Mapped[list[ProductOptionItem]] = relationship(
+        back_populates="product",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ProductOptionItem.position",
+    )
     etsy_links: Mapped[list[EtsyProductLink]] = relationship(
         back_populates="product", cascade="all, delete-orphan", lazy="selectin"
     )
@@ -447,6 +453,56 @@ class ProductVariation(Base):
     variant_product: Mapped[Product | None] = relationship(
         foreign_keys=[variant_product_id], lazy="selectin"
     )
+
+
+class ProductOptionItem(Base):
+    """Which QuickBooks item a chosen Etsy option bills against.
+
+    One listing is often several things in QuickBooks. A playset sold in HO and
+    1:64 is two items on the books, and the buyer picking a scale is what says
+    which — so the mapping belongs on the option, not on the product, and a
+    product carries as many of these as it has options worth telling apart.
+
+    Set by hand and only by hand. Nothing derives these: which of a shop's items
+    a combination is sold as is a decision about their books, and guessing it
+    would put a real sale against the wrong item.
+
+    Deliberately not the same table as `BomOptionRule`, which answers a
+    different question about the same option — that one says what comes off the
+    shelf to make the thing, this one says what the thing is sold as. A colour
+    usually changes the first and not the second; a scale usually changes both.
+
+    `position` decides which wins when a buyer's choices match more than one:
+    the first, as the screen lists them. That is a real case — a scale and a
+    loadout can both name an item — and it is the operator's to order rather
+    than something to be inferred.
+    """
+
+    __tablename__ = "product_option_items"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Matched against Etsy's formatted_name / formatted_value, trimmed and
+    # case-insensitively — the same forgiveness the BOM option rules get,
+    # because these strings are typed by hand in the Etsy listing editor.
+    option_name: Mapped[str] = mapped_column(Text, nullable=False)
+    option_value: Mapped[str] = mapped_column(Text, nullable=False)
+    qbo_item_id: Mapped[str] = mapped_column(Text, nullable=False)
+    qbo_item_name: Mapped[str | None] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "option_name", "option_value", name="uq_option_item_choice"
+        ),
+    )
+
+    product: Mapped[Product] = relationship(back_populates="option_items")
 
 
 class BomOptionRule(Base):

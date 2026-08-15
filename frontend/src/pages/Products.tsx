@@ -533,6 +533,9 @@ function ProductEditor({
           />
         ) : null}
 
+        {/* Every fulfillment, because every product is invoiced. */}
+        {product ? <OptionItemsEditor product={product} onSaved={onSaved} /> : null}
+
         {product ? <EtsyLinksEditor product={product} onSaved={onSaved} /> : null}
 
         {/* Bundles included. This used to be hidden for them, on the grounds
@@ -1156,36 +1159,246 @@ function QboItemPicker({
   )
 }
 
-function OptionRulesEditor({
+/** Which QuickBooks item each chosen option is sold as.
+ *
+ * One listing is often several things on the books — a playset in HO and in
+ * 1:64 — and the option the buyer picked is what says which. So the mapping
+ * belongs on the option, and a product carries as many as it has options worth
+ * telling apart. That is the whole point: several QuickBooks items on one
+ * product, chosen by what the buyer picked.
+ *
+ * Set by hand and only by hand. Nothing derives these, because which of a
+ * shop's items a combination is sold as is a decision about their books.
+ *
+ * Not the same thing as the option rules above, which answer a different
+ * question about the same option: those say what comes off the shelf to make
+ * it, these say what it is sold as. A colour usually changes the first and not
+ * the second; a scale usually changes both.
+ */
+function OptionItemsEditor({
   product,
-  allProducts,
   onSaved,
 }: {
   product: Product
-  allProducts: Product[]
   onSaved: (product: Product) => void | Promise<void>
 }) {
-  const [observed, setObserved] = useState<ObservedOption[] | null>(null)
+  const observed = useObservedOptions(product.id)
   const [optionName, setOptionName] = useState('')
   const [optionValue, setOptionValue] = useState('')
-  const [replacesId, setReplacesId] = useState('')
-  const [componentId, setComponentId] = useState('')
-  const [quantity, setQuantity] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [qboOpen, setQboOpen] = useState(false)
+  const [picking, setPicking] = useState(false)
 
-  /* Two sources, merged: what past orders carried, and what the Etsy listing
-     offers. The listing is the one that works before a single order has
-     arrived, which is when the rules actually need writing. */
+  const values = observed?.find((o) => o.name === optionName)?.values ?? []
+  const ready = Boolean(optionName.trim() && optionValue.trim())
+
+  const call = async (run: Promise<Product>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onSaved(await run)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const add = async (item: QboItem) => {
+    setPicking(false)
+    await call(
+      api.post<Product>(`/api/products/${product.id}/option-items`, {
+        option_name: optionName.trim(),
+        option_value: optionValue.trim(),
+        qbo_item_id: item.id,
+        qbo_item_name: item.name,
+      }),
+    )
+    setOptionValue('')
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-ink-200 p-3">
+      <h3 className="text-sm font-semibold text-ink-800">Sold as, by option</h3>
+      <p className="text-xs text-ink-500">
+        Which QuickBooks item an invoice line names, decided by what the buyer
+        picked. A listing sold in two scales is two items on the books — put both
+        here and each order bills against the right one. The same item is what
+        printed units are taken out of stock from, so the two can never disagree.
+      </p>
+
+      {product.option_items.length === 0 ? (
+        <p className="text-sm text-ink-500">
+          None — every order for this product bills against the product's own
+          QuickBooks item.
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {product.option_items.map((row, index) => (
+            <li
+              key={row.id}
+              className="flex flex-wrap items-center gap-2 rounded-md bg-ink-50 px-2 py-1.5 text-xs"
+            >
+              <span className="text-ink-500">When</span>
+              <span className="font-medium text-ink-800">
+                {row.option_name}: {row.option_value}
+              </span>
+              <span className="text-ink-500">bill as</span>
+              <span className="font-medium text-ink-800">
+                {row.qbo_item_name ?? `item ${row.qbo_item_id}`}
+              </span>
+              {product.option_items.length > 1 ? (
+                <span className="ml-auto flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy || index === 0}
+                    onClick={() =>
+                      call(
+                        api.post<Product>(
+                          `/api/products/${product.id}/option-items/${row.id}/move?up=true`,
+                        ),
+                      )
+                    }
+                  >
+                    ↑
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy || index === product.option_items.length - 1}
+                    onClick={() =>
+                      call(
+                        api.post<Product>(
+                          `/api/products/${product.id}/option-items/${row.id}/move?up=false`,
+                        ),
+                      )
+                    }
+                  >
+                    ↓
+                  </Button>
+                </span>
+              ) : null}
+              <Button
+                size="sm"
+                variant="ghost"
+                className={product.option_items.length > 1 ? '' : 'ml-auto'}
+                disabled={busy}
+                onClick={() =>
+                  call(
+                    api.del<Product>(
+                      `/api/products/${product.id}/option-items/${row.id}`,
+                    ),
+                  )
+                }
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {product.option_items.length > 1 ? (
+        <p className="text-xs text-ink-500">
+          A buyer can pick two things that both name an item — a scale and a
+          loadout. The first one here that matches is the one it is billed as;
+          the arrows are how you say which.
+        </p>
+      ) : null}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label="Option">
+          <select
+            className={inputClass}
+            value={optionName}
+            onChange={(e) => {
+              setOptionName(e.target.value)
+              setOptionValue('')
+            }}
+          >
+            <option value="">Choose an option…</option>
+            {(observed ?? []).map((option) => (
+              <option key={option.name} value={option.name}>
+                {option.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Value">
+          {values.length ? (
+            <select
+              className={inputClass}
+              value={optionValue}
+              onChange={(e) => setOptionValue(e.target.value)}
+            >
+              <option value="">Choose a value…</option>
+              {values.map((entry) => (
+                <option key={entry.value} value={entry.value}>
+                  {entry.value}
+                  {entry.orders ? ` (${entry.orders} orders)` : ''}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className={inputClass}
+              placeholder="1:64"
+              value={optionValue}
+              onChange={(e) => setOptionValue(e.target.value)}
+            />
+          )}
+        </Field>
+      </div>
+
+      {observed !== null && observed.length === 0 ? (
+        <p className="text-xs text-ink-500">
+          No options seen yet, from an order or from the listing. Type the name
+          and value exactly as Etsy sends them.
+        </p>
+      ) : null}
+      {observed !== null && observed.length === 0 ? (
+        <Field label="Option name">
+          <input
+            className={inputClass}
+            placeholder="Scale"
+            value={optionName}
+            onChange={(e) => setOptionName(e.target.value)}
+          />
+        </Field>
+      ) : null}
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+
+      <Button size="sm" disabled={busy || !ready} onClick={() => setPicking(true)}>
+        {busy ? 'Saving…' : 'Choose the QuickBooks item…'}
+      </Button>
+
+      {picking ? (
+        <QboItemPicker onClose={() => setPicking(false)} onPick={add} />
+      ) : null}
+    </div>
+  )
+}
+
+/** The options this product is actually sold with, from both places they exist.
+ *
+ * What past orders carried, and what the Etsy listing offers. The listing is
+ * the one that works before a single order has arrived, which is exactly when
+ * these need setting up; the order counts are the more informative of the two
+ * where both know a value, so those win.
+ *
+ * Shared by the two editors that map an option to something — a BOM component,
+ * or a QuickBooks item — so neither can offer a name the other does not.
+ */
+function useObservedOptions(productId: string): ObservedOption[] | null {
+  const [observed, setObserved] = useState<ObservedOption[] | null>(null)
+
   useEffect(() => {
     let cancelled = false
     Promise.all([
       api
-        .get<{ options: ObservedOption[] }>(
-          `/api/products/${product.id}/observed-options`,
-        )
+        .get<{ options: ObservedOption[] }>(`/api/products/${productId}/observed-options`)
         .then((d) => d.options)
         .catch(() => [] as ObservedOption[]),
       api
@@ -1194,7 +1407,7 @@ function OptionRulesEditor({
           c.error
             ? []
             : c.rows
-                .filter((row) => row.product_id === product.id)
+                .filter((row) => row.product_id === productId)
                 .flatMap((row) => row.listing_options),
         )
         .catch(() => [] as ObservedOption[]),
@@ -1205,7 +1418,6 @@ function OptionRulesEditor({
         for (const option of source) {
           const values = merged.get(option.name) ?? new Map()
           for (const entry of option.values) {
-            // An order count is the more informative of the two, so it wins.
             values.set(entry.value, entry.orders ?? values.get(entry.value))
           }
           merged.set(option.name, values)
@@ -1221,7 +1433,31 @@ function OptionRulesEditor({
     return () => {
       cancelled = true
     }
-  }, [product.id])
+  }, [productId])
+
+  return observed
+}
+
+
+function OptionRulesEditor({
+  product,
+  allProducts,
+  onSaved,
+}: {
+  product: Product
+  allProducts: Product[]
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const observed = useObservedOptions(product.id)
+  const [optionName, setOptionName] = useState('')
+  const [optionValue, setOptionValue] = useState('')
+  const [replacesId, setReplacesId] = useState('')
+  const [componentId, setComponentId] = useState('')
+  const [quantity, setQuantity] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [qboOpen, setQboOpen] = useState(false)
 
   // Single-level BOMs, so an option can never bring in another bundle.
   const candidates = allProducts.filter((p) => p.fulfillment !== 'bundle')

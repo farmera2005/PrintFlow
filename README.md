@@ -1217,14 +1217,36 @@ you want depends on how many products it is:
   inventory item, and the invoice relieves it; assembling **to order**, use a
   Service item, because the components already left stock when they were
   printed and an inventory item here would take the assembled thing out as well.
-* **Link a variation to its own item**, where one listing is really several
-  things. *Playset — HO and 1:64 Scale* is one bundle with a Scale variation,
+* **Map an option to an item**, under *Sold as, by option* on the product. This
+  is the one to reach for when a listing is several things on the books. A
+  playset sold in HO and in 1:64 is two items, and the scale the buyer picked is
+  what says which — so the mapping sits on the option, and a product carries as
+  many as it has options worth telling apart. Several QuickBooks items on one
+  product is the normal case, not an edge one.
+
+  The option names and values are offered from what past orders carried and what
+  the listing sells, so there is nothing to type. Where a buyer picks two things
+  that both name an item — a scale *and* a loadout — the first mapping listed
+  wins, and the arrows are how you say which that is. Nothing derives these:
+  which of your items a combination is sold as is a decision about your books.
+
+  Not to be confused with the *Etsy options* rules above it, which answer a
+  different question about the same option — those say what comes off the shelf
+  to make the thing, these say what it is sold as. A colour usually changes the
+  first and not the second; a scale usually changes both.
+
+* **Link a variation to its own item**, where one exact combination needs
+  naming. *Playset — HO and 1:64 Scale* is one bundle with a Scale variation,
   and the two scales are not the same item on anybody's books. **Every**
   variation can name its own item, whatever the product is and whether or not
   it has been given a product of its own, and the most specific answer wins:
 
-  > the variation's item → the item of the product the line resolved to →
-  > the fallback from Settings.
+  > the variation's item → an item mapped to an option the buyer chose →
+  > the item of the product the line resolved to → the fallback from Settings.
+
+  The same answer decides what a printed unit is taken out of stock from. A unit
+  billed as one item and drawn down from another would be two mistakes that look
+  like one, so there is only ever one lookup.
 
   Two gates used to stand in the way of that, both resting on the same
   assumption. Variations were hidden on a bundle, because a bundle's options

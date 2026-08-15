@@ -74,7 +74,7 @@ from ..models import (
     Order,
     OrderLine,
 )
-from . import audit
+from . import audit, variations
 from .credentials import IntegrationNotConfigured
 from .finance import amount_of
 from .manufacturing import money
@@ -102,15 +102,56 @@ def _key(*parts: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def line_item_id(line: OrderLine) -> str | None:
-    """Which QuickBooks item this line draws down.
+def option_item(line: OrderLine) -> str | None:
+    """The item mapped to one of the options this buyer actually chose.
 
-    The variation's own item wins where it has one — one colour of a printed
-    part carries its own stock, and that is the point of a variation naming an
-    item at all.
+    A listing sold in two scales is two items on the books, and the scale the
+    buyer picked is what says which. The mappings live on the product and are
+    set by hand — nothing here derives them, because which of a shop's items a
+    combination is sold as is a decision about their books.
+
+    Read from the line's own chosen options rather than from a matched
+    variation, so it works for a line no variation described. Where a buyer's
+    choices match more than one mapping — a scale and a loadout both naming an
+    item — the first as the operator ordered them wins.
+    """
+    if line.product is None or not line.product.option_items:
+        return None
+    chosen = {
+        (variations.normalize(option.get("name")), variations.normalize(option.get("value")))
+        for option in (line.variations or [])
+        if isinstance(option, dict) and option.get("name") and option.get("value")
+    }
+    if not chosen:
+        return None
+    for rule in sorted(line.product.option_items, key=lambda row: row.position):
+        if (
+            variations.normalize(rule.option_name),
+            variations.normalize(rule.option_value),
+        ) in chosen:
+            return str(rule.qbo_item_id)
+    return None
+
+
+def line_item_id(line: OrderLine) -> str | None:
+    """Which QuickBooks item this line is sold as, and drawn down from.
+
+    Most specific first, and every step of it is something a person set:
+
+    1. the variation's own item — one exact combination, named deliberately;
+    2. an item mapped to one of the options the buyer chose, which is how one
+       listing sold in several scales becomes several items;
+    3. the product's own item, for a listing that is one thing on the books.
+
+    Shared by the invoice and by the stock removal on purpose. A unit billed as
+    one item and drawn down from another would be two different mistakes that
+    look like one.
     """
     if line.variation is not None and line.variation.qbo_item_id:
         return str(line.variation.qbo_item_id)
+    mapped = option_item(line)
+    if mapped:
+        return mapped
     if line.product is not None and line.product.qbo_item_id:
         return str(line.product.qbo_item_id)
     return None

@@ -583,7 +583,8 @@ async def _one_of_everything(db) -> dict[str, int]:
         OrderLine,
         PrintJob,
         PrintFile,
-        ProductVariation,
+        ProductOptionItem,
+    ProductVariation,
         SyncLog,
         TlsCertificate,
     )
@@ -647,6 +648,12 @@ async def _one_of_everything(db) -> dict[str, int]:
             ),
             EtsyProductLink(etsy_listing_id=12345, product_id=product.id),
             ProductVariation(product_id=product.id, label="Large", options=[]),
+            ProductOptionItem(
+                product_id=product.id,
+                option_name="Scale",
+                option_value="1:64",
+                qbo_item_id="601",
+            ),
             PrintFile(
                 product_id=product.id, bambuddy_archive_id=77, units_per_plate=4
             ),
