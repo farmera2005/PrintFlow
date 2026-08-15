@@ -1184,6 +1184,29 @@ Nothing has a default. Which account and which item are right depends on your
 chart of accounts, and picking on your behalf would file real money somewhere
 nobody chose. Each unset setting says, where it matters, what it is blocking.
 
+### "This product has no QuickBooks item"
+
+An invoice refused for this reason names the products it could not bill, by
+**code as well as title** — an Etsy listing title is long and punctuated and is
+not what the Products search matches on. There are two ways out, and which one
+you want depends on how many products it is:
+
+* **Link the product to an item**, on the Products tab. Every fulfillment can
+  have one, bundles included. A bundle has no stock of its own — decisioning and
+  stock removal go through its components — so the item there does nothing but
+  name the invoice line. Which one to pick follows from how you make it:
+  assembling **to stock** through a made-items sheet, use the assembled
+  inventory item, and the invoice relieves it; assembling **to order**, use a
+  Service item, because the components already left stock when they were
+  printed and an inventory item here would take the assembled thing out as well.
+* **Set the fallback item** once, and every such line goes on it.
+
+The Products list marks a product **no QuickBooks item** when it is something
+the shop sells — linked to an Etsy listing — and has none. Components reached
+through a bundle's BOM are not marked: nothing invoices them on their own, so
+having no item is ordinary rather than a gap. Finding this out on the list is
+better than finding it out at the moment of invoicing.
+
 ## Running it
 
 Two services, nothing to edit. Designed to sit on a NAS next to the existing

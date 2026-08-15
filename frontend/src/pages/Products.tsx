@@ -44,6 +44,32 @@ const FULFILLMENTS: { value: Fulfillment; label: string; hint: string }[] = [
   { value: 'bundle', label: 'Bundle', hint: 'Explodes into components via its BOM.' },
 ]
 
+/** What the QuickBooks item actually does, which depends on what this is.
+ *
+ * It has two jobs and they land on different products. On anything with stock
+ * it is where quantity on hand is read and where printed units are taken back
+ * out. On every product it is what an invoice line names — which is why a
+ * bundle wants one too, even though a bundle has no stock of its own. */
+const QBO_ITEM_HINTS: Record<Fulfillment, string> = {
+  printed:
+    'Quantity on hand is read here, printed units are taken back out of it, and an invoice line for this product names it. With no item linked this always prints in full and moves nothing in QuickBooks.',
+  stocked:
+    'Quantity on hand is read here, and an invoice line for this product names it.',
+  bundle:
+    'A bundle has no stock of its own — decisioning and stock removal go through its components — so this is only what an invoice line for the bundle names. Assembling to stock through a made-items sheet? Use the assembled inventory item. Assembling to order? Use a Service item: the components were already taken out of stock when they were printed, and an inventory item here would take the assembled thing out as well.',
+}
+
+/** Is this something the shop sells, rather than something it makes?
+ *
+ * A product linked to an Etsy listing arrives as a top-level order line, and
+ * top-level lines are what an invoice bills. Components reached through a
+ * bundle's BOM are never invoiced on their own — the buyer bought the bundle —
+ * so a component with no QuickBooks item is ordinary rather than a gap.
+ */
+function sellable(product: Product): boolean {
+  return product.etsy_links.length > 0
+}
+
 /** Masters first, each followed by its variants.
  *
  * A variant is a product in its own right, but it is not a thing the shop
@@ -270,7 +296,21 @@ export default function Products() {
                       : 'no print file'}
                   </Badge>
                 ) : null}
-                {product.qbo_item_id ? <Badge>QBO linked</Badge> : null}
+                {product.qbo_item_id ? (
+                  <Badge>QBO linked</Badge>
+                ) : sellable(product) ? (
+                  // Only on something the shop actually sells. A component
+                  // with no item is ordinary — nothing invoices it — but a
+                  // listing with none is an invoice that cannot be raised
+                  // until a fallback is set, and finding that out at the
+                  // moment of invoicing is finding out too late.
+                  <Badge
+                    className="bg-amber-100 text-amber-800 ring-amber-300"
+                    title="An invoice line for this product has no item to name. It will fall back to the item set under Settings → QuickBooks, or block the invoice if there is none."
+                  >
+                    no QuickBooks item
+                  </Badge>
+                ) : null}
                 {!product.active ? <Badge>inactive</Badge> : null}
                 </button>
               </div>
@@ -418,25 +458,38 @@ function ProductEditor({
           </select>
         </Field>
 
-        {fulfillment !== 'bundle' ? (
-          <Field
-            label="QuickBooks item"
-            hint="Quantity on hand comes from here. A printed product with no item linked always prints in full."
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm text-ink-700">
-                {qboItem ? `${qboItem.name} (${qboItem.id})` : 'Not linked'}
-              </span>
-              <Button size="sm" onClick={() => setQboPickerOpen(true)}>
-                {qboItem ? 'Change' : 'Link item'}
+        {/* Offered for every fulfillment, bundles included. The item used to
+            be hidden on a bundle because a bundle has no quantity on hand of
+            its own — decisioning goes through its components — which was the
+            whole job the field did. It has a second job now: an invoice line
+            for this product names it, and hiding the field left "link the
+            product to an item" as advice nobody could act on. */}
+        <Field label="QuickBooks item" hint={QBO_ITEM_HINTS[fulfillment]}>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-ink-700">
+              {qboItem ? `${qboItem.name} (${qboItem.id})` : 'Not linked'}
+            </span>
+            <Button size="sm" onClick={() => setQboPickerOpen(true)}>
+              {qboItem ? 'Change' : 'Link item'}
+            </Button>
+            {qboItem ? (
+              <Button size="sm" variant="ghost" onClick={() => setQboItem(null)}>
+                Unlink
               </Button>
-              {qboItem ? (
-                <Button size="sm" variant="ghost" onClick={() => setQboItem(null)}>
-                  Unlink
-                </Button>
-              ) : null}
-            </div>
-          </Field>
+            ) : null}
+          </div>
+        </Field>
+        {/* Only where it changes what to pick. A shop that assembles to stock
+            through a made-items sheet wants the assembled item here; one that
+            assembles to order wants a service item, because its components
+            were already taken out of stock when they were printed. Getting
+            this the wrong way round shows up as a playset going negative. */}
+        {fulfillment === 'bundle' && !qboItem ? (
+          <p className="-mt-1 text-xs text-ink-500">
+            Without one, an invoice for this bundle falls back to the item set
+            under Settings → QuickBooks → Orders in the books, and will not be
+            raised at all if there is no fallback either.
+          </p>
         ) : null}
 
         <label className="flex items-center gap-2 text-sm text-ink-700">

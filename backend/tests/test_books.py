@@ -975,9 +975,66 @@ class TestInvoiceOrder:
         order = await _order(db, transactions=self.TRANSACTIONS)
         await _line(db, order, bundle, quantity=2, transaction_id=1)
 
-        with pytest.raises(BooksError, match="no QuickBooks item"):
+        with pytest.raises(BooksError) as raised:
             await books.invoice_order(db, order, actor="adam")
+
+        # Written to be acted on: which product, by the code the Products
+        # search matches on, and both ways out of it. An Etsy listing title is
+        # long and punctuated and is not what anybody searches by.
+        message = str(raised.value)
+        assert "Bin kit" in message and "(KIT)" in message
+        assert "Products tab" in message
+        assert "fallback" in message
         assert posted == []
+
+    async def test_several_nameless_lines_are_all_named(self, db, monkeypatch):
+        """One trip to the Products tab, not one per attempt."""
+        await _qbo_connected(db)
+        await _configured(db, income_item_id=None)
+        _patch_qbo(monkeypatch, _stub())
+
+        first = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id=None)
+        second = await _product(db, sku="SET", name="Barn set", fulfillment="bundle", qbo_id=None)
+        order = await _order(
+            db,
+            transactions=[
+                {"transaction_id": 1, "price": {"amount": 1800, "divisor": 100}},
+                {"transaction_id": 2, "price": {"amount": 900, "divisor": 100}},
+            ],
+        )
+        await _line(db, order, first, transaction_id=1)
+        await _line(db, order, second, transaction_id=2)
+
+        with pytest.raises(BooksError) as raised:
+            await books.invoice_order(db, order, actor="adam")
+
+        assert "(KIT)" in str(raised.value)
+        assert "(SET)" in str(raised.value)
+        assert "These products have" in str(raised.value)
+
+    async def test_a_bundle_with_its_own_item_bills_against_it(self, db, monkeypatch):
+        """The fix the message asks for, working.
+
+        A bundle could not be given a QuickBooks item from the Products tab at
+        all, which made "link the product to an item" advice nobody could act
+        on. Nothing in decisioning reads it — a bundle is produced through its
+        components — so the only thing it changes is this.
+        """
+        await _qbo_connected(db)
+        await _configured(db, income_item_id=None)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        bundle = await _product(
+            db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id="900"
+        )
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, bundle, quantity=2, transaction_id=1)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "900"
 
     async def test_a_line_that_has_its_own_item_needs_no_fallback(self, db, monkeypatch):
         await _qbo_connected(db)

@@ -675,18 +675,25 @@ async def invoice_order(
         )
 
     item_for = {line.id: invoice_item_for(line, books) for line, _, _ in billable}
-    nameless = [
-        line for line, _, _ in billable if not item_for[line.id]
-    ]
+    nameless = [line for line, _, _ in billable if not item_for[line.id]]
     if nameless:
-        names = ", ".join(
-            (line.product.name if line.product else line.title) or "an unmatched line"
+        # Named by SKU as well as title, because the title is an Etsy listing
+        # name — long, punctuated, and not what the Products search matches on.
+        # Whoever reads this has to go and find these products, so the message
+        # is written to be acted on rather than only to be correct.
+        which = "; ".join(
+            f"{(line.product.name if line.product else line.title) or 'an unmatched line'}"
+            + (f" ({line.product.sku})" if line.product else "")
             for line in nameless
         )
+        one = len(nameless) == 1
         raise BooksError(
-            f"{names} has no QuickBooks item, and no fallback item is set for "
-            "lines like it. Link the product to an item, or choose a fallback "
-            "under Settings → QuickBooks → Orders in the books."
+            f"{'This product has' if one else 'These products have'} no "
+            f"QuickBooks item, and no fallback is set for lines like "
+            f"{'it' if one else 'them'}: {which}. Open "
+            f"{'it' if one else 'them'} on the Products tab and link "
+            f"{'an item' if one else 'items'}, or set one fallback item for "
+            "everything under Settings → QuickBooks → Orders in the books."
         )
 
     try:
