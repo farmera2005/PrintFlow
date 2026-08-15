@@ -206,8 +206,34 @@ async def non_inventory_items(
 
 
 async def suggest_unit_cost(session: AsyncSession, product: Product) -> Decimal | None:
-    """The BOM roll-up used to prefill a new line, or None if it cannot be had."""
+    """What to prefill a new line for this product with.
+
+    Two sources, and which one applies is decided by whether the product has a
+    BOM rather than by preference:
+
+    * **it has a BOM** — roll its components up. That is what the thing costs to
+      make, and it is a better answer than anything QuickBooks holds about the
+      finished item.
+    * **it has no BOM** — ask QuickBooks what the item itself costs. A product
+      made from materials that are expensed on purchase has nothing to roll up,
+      and leaving the line at zero was the wrong answer: QuickBooks knows the
+      figure, it is the same one a direct item line is prefilled with, and a
+      zero on a line that reaches somebody's accounts is worse than a real cost
+      the operator can overrule.
+
+    None where neither can be had, which leaves the line at zero for somebody to
+    type into.
+    """
     product = await loaded_product(session, product.id) or product
+    if not product.bom_lines:
+        # Deliberately not a fallback for a BOM that could not be priced: half a
+        # roll-up is worse than none (see bom_unit_cost), and quietly swapping
+        # in the finished item's cost would hide a component with no cost on it.
+        return (
+            await qbo_item_cost(session, str(product.qbo_item_id))
+            if product.qbo_item_id
+            else None
+        )
     try:
         costs = await component_costs(session, [product])
     except (IntegrationError, IntegrationNotConfigured) as exc:

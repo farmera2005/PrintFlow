@@ -1050,6 +1050,20 @@ from the list**, so stock that is not a product here — packaging, supplies,
 sub-assemblies — can still be counted in. A direct item line has no BOM and so
 consumes nothing; its cost is prefilled from the item's own cost in QuickBooks.
 
+**Where a line's cost comes from** is decided by whether the product has a BOM,
+and the line says which under the figure:
+
+* **it has one** — the components are rolled up. That is what the thing costs to
+  make, and it beats anything QuickBooks holds about the finished item.
+* **it has none** — QuickBooks is asked what the item itself costs, the same
+  figure a direct item line gets. A product made from materials that are
+  expensed on purchase has nothing to roll up, and a zero on a line that reaches
+  your accounts is a worse answer than a real cost you can overrule.
+
+A BOM that *cannot* be priced — a component with no cost on it — still leaves the
+line at zero rather than quietly borrowing the finished item's cost. Half a
+roll-up is worse than none, and so is a plausible substitute for one.
+
 Picking an item that a product already maps to files the line against that
 product, BOM and all. Otherwise the same physical act would post two different
 ways depending on which picker you happened to use. Service and non-inventory

@@ -532,6 +532,47 @@ class TestCostRollup:
         plain = await _product(db, "PLAIN", qbo_id="9")
         assert await manufacturing.bom_unit_cost(db, plain, {}) is None
 
+    async def test_a_product_without_a_bom_is_priced_from_its_own_item(
+        self, db, monkeypatch
+    ):
+        """The reported bug: every such line sat at 0.00.
+
+        A product made from materials that are expensed on purchase has nothing
+        to roll up, and QuickBooks knows what the item costs — the same figure a
+        direct item line is prefilled with. Zero on a line that reaches
+        somebody's accounts is the worse answer.
+        """
+        await _qbo_connected(db)
+        plain = await _product(db, "GRAIN-BIN-MEDIUM", qbo_id="9")
+        _patch_qbo(monkeypatch, _stub(items=[{"Id": "9", "PurchaseCost": 27.15}]))
+
+        assert await manufacturing.suggest_unit_cost(db, plain) == Decimal("27.15")
+
+    async def test_a_product_with_no_item_at_all_still_has_no_cost(self, db, monkeypatch):
+        await _qbo_connected(db)
+        plain = await _product(db, "PLAIN", qbo_id=None)
+        _patch_qbo(monkeypatch, _stub())
+
+        assert await manufacturing.suggest_unit_cost(db, plain) is None
+
+    async def test_a_bom_that_cannot_be_priced_does_not_borrow_the_item_cost(
+        self, db, monkeypatch
+    ):
+        """Half a roll-up is worse than none, and so is a quiet substitute.
+
+        Falling back here would hide a component with no cost on it behind a
+        plausible figure for the finished thing.
+        """
+        await _qbo_connected(db)
+        screw = await _product(db, "SCREW", qbo_id="1")
+        widget = await _bundle(db, "WIDGET", [(screw, 4)])
+        widget.qbo_item_id = "9"
+        await db.flush()
+        # QuickBooks knows the finished item but not the component.
+        _patch_qbo(monkeypatch, _stub(items=[{"Id": "9", "PurchaseCost": 27.15}]))
+
+        assert await manufacturing.suggest_unit_cost(db, widget) is None
+
     async def test_a_quickbooks_outage_does_not_block_editing(self, db, monkeypatch):
         """Costing is a convenience; losing it must not stop the sheet."""
         await _qbo_connected(db)
@@ -587,6 +628,31 @@ class TestTheSheetApi:
         assert line["unit_cost"] == "1.00"
         assert line["cost_from_bom"] is True
         assert line["amount"] == "10.00"
+
+    async def test_a_line_with_no_bom_is_priced_from_its_quickbooks_item(
+        self, signed_in, db, monkeypatch
+    ):
+        """Through the API, which is where the operator saw 0.00."""
+        await _qbo_connected(db)
+        plain = await _product(db, "GRAIN-BIN-MEDIUM", qbo_id="9")
+        await db.commit()
+        _patch_qbo(monkeypatch, _stub(items=[{"Id": "9", "PurchaseCost": 27.15}]))
+
+        sheet = (await signed_in.post("/api/manufacturing/sheets", json={})).json()
+        body = (
+            await signed_in.post(
+                f"/api/manufacturing/sheets/{sheet['id']}/lines",
+                json={"product_id": str(plain.id), "quantity": 25},
+            )
+        ).json()
+
+        line = body["lines"][0]
+        assert line["unit_cost"] == "27.15"
+        assert line["amount"] == "678.75"
+        # Suggested, so a later edit may refresh it — and the screen can say
+        # where it came from, which is QuickBooks rather than a BOM.
+        assert line["cost_from_bom"] is True
+        assert line["has_bom"] is False
 
     async def test_typing_a_cost_stops_it_being_treated_as_the_bom_figure(
         self, signed_in, db

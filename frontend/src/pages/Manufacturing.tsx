@@ -481,9 +481,15 @@ function SheetEditor({
                             }}
                           />
                         </div>
+                        {/* Where the figure came from, exactly. A product line
+                            is rolled up from its BOM when it has one and read
+                            off its QuickBooks item when it does not, so the
+                            label follows the BOM rather than the line's kind. */}
                         {line.cost_from_bom ? (
                           <div className="text-xs text-ink-500">
-                            {line.source === 'product' ? 'from BOM' : 'from QuickBooks'}
+                            {line.source === 'product' && line.has_bom
+                              ? 'from BOM'
+                              : 'from QuickBooks'}
                           </div>
                         ) : null}
                       </td>
@@ -540,7 +546,7 @@ function SheetEditor({
                 <div className="min-w-56 flex-1">
                   <Field
                     label="Add a product"
-                    hint="Cost is prefilled from its BOM where one exists."
+                    hint="Cost is prefilled from its BOM, or from its QuickBooks item when it has no BOM."
                   >
                     <select
                       className={inputClass}
