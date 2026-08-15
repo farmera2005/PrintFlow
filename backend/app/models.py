@@ -653,6 +653,23 @@ class Order(Base):
     fee_lines: Mapped[list[dict[str, Any]] | None] = mapped_column(JsonType)
     finance_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # The QuickBooks invoice raised for this order, when somebody raised one.
+    # An order can be invoiced once: the id is what makes a second press say
+    # "already invoiced" rather than putting a duplicate in somebody's books.
+    qbo_invoice_id: Mapped[str | None] = mapped_column(Text)
+    # QuickBooks' own document number, which is what a person searches for in
+    # QuickBooks. Not the same as PrintFlow's order number and worth both.
+    qbo_invoice_doc_number: Mapped[str | None] = mapped_column(Text)
+    qbo_invoice_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    qbo_invoice_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    # Who it was billed to. Kept so a second invoice for a repeat buyer reuses
+    # the customer rather than making a near-duplicate of them.
+    qbo_customer_id: Mapped[str | None] = mapped_column(Text)
+    # Why the last attempt failed, when it did. Cleared by a success. An
+    # invoice that could not be raised is not an error to swallow: somebody is
+    # waiting to see it in QuickBooks.
+    qbo_invoice_error: Mapped[str | None] = mapped_column(Text)
+
     raw: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
@@ -730,6 +747,22 @@ class OrderLine(Base):
     assembled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stock_note: Mapped[str | None] = mapped_column(Text)
+
+    # What was taken out of QuickBooks stock for this line, and the Purchase
+    # that did it. Written once and read as "already booked": line states are
+    # derived and recomputed constantly (see services/state.py), so a flapping
+    # state must never be able to book the same units twice.
+    qbo_stock_removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    qbo_stock_purchase_id: Mapped[str | None] = mapped_column(Text)
+    # Needed to delete the Purchase again if the line is cancelled after the
+    # fact. QuickBooks refuses a write without the token it last issued.
+    qbo_stock_sync_token: Mapped[str | None] = mapped_column(Text)
+    qbo_stock_qty: Mapped[int | None] = mapped_column(Integer)
+    # Why the last attempt failed. Kept on the line so the drawer can show it
+    # and offer to try again, rather than the removal quietly not happening.
+    qbo_stock_error: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()

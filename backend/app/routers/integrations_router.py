@@ -32,7 +32,7 @@ from ..models import (
     OAuthState,
     User,
 )
-from ..services import audit, catalog, credentials, intake, public_url
+from ..services import audit, catalog, credentials, intake, public_url, settings_store
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.integrations")
@@ -678,13 +678,24 @@ async def qbo_callback(
 async def qbo_items(
     q: str = "",
     limit: int = 50,
+    kind: str = "",
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Searchable QBO item picker used by the Products screen."""
+    """Searchable QBO item picker used by the Products screen.
+
+    `kind=non_stock` narrows it to items that can carry an invoice line without
+    moving stock, which is what the income item on an invoice has to be.
+    """
+    if kind not in ("", "non_stock"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown item kind '{kind}'. Use 'non_stock' or leave it out.",
+        )
+    types = settings_store.NON_STOCK_ITEM_TYPES if kind == "non_stock" else ()
     try:
         client = await qbo_api.client_for(session)
-        items = await client.search_items(q, limit)
+        items = await client.search_items(q, limit, item_types=types)
         await credentials.mark_ok(session, PROVIDER_QBO)
         await session.commit()
     except IntegrationNotConfigured as exc:
@@ -708,6 +719,9 @@ async def qbo_items(
                     str(cost) if (cost := qbo_api.item_purchase_cost(item)) is not None else None
                 ),
                 "inventory": qbo_api.item_is_inventory(item),
+                # Whether an invoice line naming this item would change quantity
+                # on hand. The income-item picker refuses one that would.
+                "moves_stock": qbo_api.item_moves_stock(item),
             }
             for item in items
         ]
@@ -728,7 +742,12 @@ OFFSET_ACCOUNT_TYPES = (
     "Other Current Liability",
 )
 
-ACCOUNT_ROLES = {"payment": PAYMENT_ACCOUNT_TYPES, "offset": OFFSET_ACCOUNT_TYPES}
+ACCOUNT_ROLES = {
+    "payment": PAYMENT_ACCOUNT_TYPES,
+    "offset": OFFSET_ACCOUNT_TYPES,
+    # Where the cost of a unit goes when a printed line takes it out of stock.
+    "cogs": settings_store.COGS_ACCOUNT_TYPES,
+}
 
 
 @router.get("/qbo/accounts")

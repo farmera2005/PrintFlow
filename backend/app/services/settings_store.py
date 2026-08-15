@@ -14,6 +14,7 @@ KEY_POLL_INTERVALS = "poll_intervals"
 KEY_PUBLIC_BASE_URL = "public_base_url"
 KEY_HTTPS_REDIRECT = "https_redirect"
 KEY_MANUFACTURING = "manufacturing"
+KEY_BOOKS = "books"
 
 # How a made-items sheet posts to QuickBooks.
 #
@@ -40,6 +41,48 @@ DEFAULT_MANUFACTURING: dict[str, Any] = {
 MANUFACTURING_FIELDS = tuple(DEFAULT_MANUFACTURING)
 # QuickBooks rejects anything else on a Purchase.
 PAYMENT_TYPES = ("Cash", "Check", "CreditCard")
+
+# What the order pipeline writes into QuickBooks, and where it lands.
+#
+# Two writes, deliberately split so no unit is counted twice:
+#
+# * a printed line takes its own item out of stock — inventory asset down,
+#   `cogs_account_id` up. That account is where the value of a sold unit goes,
+#   so it wants to be a Cost of Goods Sold account.
+# * an invoice records what the buyer paid, on `income_item_id` — which must be
+#   a **Service or Non-Inventory** item. An inventory item on an invoice line
+#   would take the same unit out of stock a second time, which is the whole
+#   thing this arrangement exists to avoid.
+#
+# `shipping_item_id` is optional: without it, postage the buyer paid is folded
+# into the invoice as one more line on the income item rather than being lost.
+#
+# The Purchase behind a stock removal reuses the manufacturing payment account,
+# because it is the same books and the document totals zero either way.
+DEFAULT_BOOKS: dict[str, Any] = {
+    "cogs_account_id": None,
+    "cogs_account_name": None,
+    "income_item_id": None,
+    "income_item_name": None,
+    "shipping_item_id": None,
+    "shipping_item_name": None,
+    # Whether finishing a print books the stock removal on its own. Off means
+    # only a person pressing Mark printed moves anything, which is the older
+    # rule that nothing but a person writes to the books.
+    "remove_stock_on_printed": True,
+}
+
+BOOKS_FIELDS = tuple(DEFAULT_BOOKS)
+
+# What `cogs_account_id` is allowed to be. QuickBooks will accept an expense
+# account on the line, and a shop that books its printing to "Materials" rather
+# than to Cost of Goods Sold is not wrong — so both are offered.
+COGS_ACCOUNT_TYPES = ("Cost of Goods Sold", "Expense", "Other Expense")
+
+# Item types that may carry an invoice line without moving stock. This is
+# enforced rather than advised: picking an Inventory item here would silently
+# double-count every unit sold.
+NON_STOCK_ITEM_TYPES = ("Service", "NonInventory", "Category")
 
 # What AccountRef may be, per payment type. QuickBooks has no "Cash" account
 # type — petty cash is a Bank account like any other.
@@ -75,6 +118,7 @@ _DEFAULTS: dict[str, Any] = {
     # the operator out of the only UI that can fix it.
     KEY_HTTPS_REDIRECT: False,
     KEY_MANUFACTURING: DEFAULT_MANUFACTURING,
+    KEY_BOOKS: DEFAULT_BOOKS,
 }
 
 
@@ -140,6 +184,29 @@ async def set_manufacturing_settings(
     if current.get("payment_type") not in PAYMENT_TYPES:
         current["payment_type"] = DEFAULT_MANUFACTURING["payment_type"]
     await set_setting(session, KEY_MANUFACTURING, current)
+    return current
+
+
+async def get_books_settings(session: AsyncSession) -> dict[str, Any]:
+    stored = await get_setting(session, KEY_BOOKS) or {}
+    merged = dict(DEFAULT_BOOKS)
+    if isinstance(stored, dict):
+        for key in BOOKS_FIELDS:
+            if key in stored:
+                merged[key] = stored[key]
+    merged["remove_stock_on_printed"] = bool(merged.get("remove_stock_on_printed"))
+    return merged
+
+
+async def set_books_settings(
+    session: AsyncSession, values: dict[str, Any]
+) -> dict[str, Any]:
+    current = await get_books_settings(session)
+    for key in BOOKS_FIELDS:
+        if key in values:
+            current[key] = values[key]
+    current["remove_stock_on_printed"] = bool(current.get("remove_stock_on_printed"))
+    await set_setting(session, KEY_BOOKS, current)
     return current
 
 

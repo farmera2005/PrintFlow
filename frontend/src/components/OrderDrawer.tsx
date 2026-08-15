@@ -325,6 +325,21 @@ function LineRow({
           <p className="mt-1 text-xs text-amber-800">{line.stock_note}</p>
         ) : null}
 
+        {/* What QuickBooks was told about these units. A removal that quietly
+            did not happen is the failure worth designing against, so the line
+            says either that it is done or what went wrong. */}
+        {line.qbo_stock_removed_at ? (
+          <p className="mt-1 text-xs text-emerald-800">
+            {line.qbo_stock_qty ?? line.quantity} out of QuickBooks stock ·{' '}
+            {formatDateTime(line.qbo_stock_removed_at)}
+          </p>
+        ) : null}
+        {line.qbo_stock_error ? (
+          <p className="mt-1 text-xs text-red-700">
+            QuickBooks stock not updated: {line.qbo_stock_error}
+          </p>
+        ) : null}
+
         {line.print_jobs.length ? (
           <ul className="mt-2 space-y-1">
             {line.print_jobs.map((job) => (
@@ -408,6 +423,35 @@ function LineRow({
               {line.force_print ? (
                 <Button size="sm" onClick={() => run('force-print', false)} disabled={busy}>
                   Use stock again
+                </Button>
+              ) : null}
+              {/* The way back in when the removal could not be made —
+                  QuickBooks was down, or an account had not been chosen yet.
+                  Booking twice is impossible; the line remembers. */}
+              {line.qbo_stock_error && !line.qbo_stock_removed_at ? (
+                <Button
+                  size="sm"
+                  onClick={() => run('stock-removal')}
+                  disabled={busy}
+                  title="Try the QuickBooks stock removal again"
+                >
+                  Retry stock removal
+                </Button>
+              ) : null}
+              {/* Cancelling a line puts its stock back on its own. This is the
+                  other case: a line marked printed that was not. Clearing the
+                  override cannot be trusted to mean "undo the books" — it is
+                  just as often a tidy-up after a print that really did finish
+                  — so the reversal is its own deliberate button. */}
+              {line.qbo_stock_removed_at ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => run('restore-stock')}
+                  disabled={busy}
+                  title="Delete the QuickBooks Purchase and put these units back"
+                >
+                  Put stock back
                 </Button>
               ) : null}
               <Button
@@ -532,9 +576,44 @@ export default function OrderDrawer({
       await apply(api.post(`${base}/force-print`, { force_print: payload }))
       return
     }
+    if (action === 'stock-removal') {
+      await apply(api.post(`${base}/stock-removal`))
+      return
+    }
+    if (action === 'restore-stock') {
+      if (
+        !window.confirm(
+          'Put these units back into QuickBooks stock? The Purchase that took ' +
+            'them out is deleted, which reverses every quantity it moved.',
+        )
+      )
+        return
+      await apply(api.del(`${base}/stock-removal`))
+      return
+    }
     if (action === 'override') {
       if (payload === 'cancel' && !window.confirm('Cancel this line?')) return
-      await apply(api.post(`${base}/override`, { action: payload }))
+      setNotice(null)
+      await apply(
+        api
+          .post<Order & { books?: { booked?: boolean; quantity?: number }[] }>(
+            `${base}/override`,
+            { action: payload },
+          )
+          .then((updated) => {
+            // Marking a line printed writes to somebody's books. Saying so is
+            // the difference between a button that worked and a button that
+            // did something nobody asked about.
+            const booked = (updated.books ?? []).filter((row) => row.booked)
+            const units = booked.reduce((sum, row) => sum + (row.quantity ?? 0), 0)
+            if (units) {
+              setNotice(
+                `${units} unit${units === 1 ? '' : 's'} taken out of QuickBooks stock.`,
+              )
+            }
+            return updated
+          }),
+      )
     }
   }
 
@@ -1026,7 +1105,90 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
 
       {order.fee_lines?.length ? <FeeBreakdown order={order} /> : null}
 
+      <InvoicePanel order={order} onChanged={onRefreshed} />
     </section>
+  )
+}
+
+/** The QuickBooks invoice for this order — raise one, or say there is one.
+ *
+ *  Deliberately a button rather than something that happens on its own: an
+ *  invoice is a document in somebody's books, and which orders get one is a
+ *  decision about the business rather than about the software.
+ */
+function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (path: string, confirmText?: string) => {
+    if (confirmText && !window.confirm(confirmText)) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post(`/api/orders/${order.id}/invoice${path}`)
+      onChanged()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-ink-200 pt-3">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+        QuickBooks invoice
+      </h4>
+      {order.qbo_invoice_id ? (
+        <div className="mt-1.5 space-y-1">
+          <p className="text-sm text-ink-800">
+            Invoice{' '}
+            <span className="font-mono">{order.qbo_invoice_doc_number ?? order.qbo_invoice_id}</span>
+            {order.qbo_invoice_total
+              ? ` · ${formatMoney(order.qbo_invoice_total, order.currency)}`
+              : null}
+          </p>
+          <p className="text-xs text-ink-500">
+            Raised {formatDateTime(order.qbo_invoice_at)}. Recorded on non-inventory
+            lines, so it did not move stock — the printed lines did that.
+          </p>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() =>
+              run(
+                '/void',
+                'Void this invoice in QuickBooks? It stays visible there with a ' +
+                  'zero total, and this order can then be invoiced again.',
+              )
+            }
+          >
+            {busy ? 'Working…' : 'Void invoice'}
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-1.5 space-y-1.5">
+          <p className="text-xs text-ink-500">
+            Bills the buyer's name and address from this order, at the prices Etsy
+            recorded. Stock is not touched — the printed lines already did that.
+          </p>
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => run('')}>
+            {busy ? 'Creating…' : 'Create invoice'}
+          </Button>
+        </div>
+      )}
+      {error ? (
+        <div className="mt-2">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+      {order.qbo_invoice_error && !order.qbo_invoice_id ? (
+        <p className="mt-1.5 text-xs text-red-700">
+          Last attempt failed: {order.qbo_invoice_error}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

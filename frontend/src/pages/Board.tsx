@@ -10,6 +10,7 @@ import {
   formatMoney,
 } from '../lib/format'
 import type { BoardResponse, Order, OrderLine, OrderStatus } from '../lib/types'
+import InvoiceAction from '../components/InvoiceAction'
 import OrderDrawer from '../components/OrderDrawer'
 import { Alert, Badge, EmptyState, Spinner, cx } from '../components/ui'
 
@@ -62,6 +63,7 @@ function OrderCard({
   onOpen,
   onDragStart,
   onDragEnd,
+  onInvoiced,
   dragging,
   completeHours,
 }: {
@@ -69,6 +71,8 @@ function OrderCard({
   onOpen: () => void
   onDragStart: () => void
   onDragEnd: () => void
+  /** Reload the board — an invoice changes what this card says about itself. */
+  onInvoiced: () => void
   dragging: boolean
   /** How long a delivered card stays drawn, as the server sets it. */
   completeHours: number
@@ -170,6 +174,11 @@ function OrderCard({
           <Badge className="bg-ink-100 text-ink-600 ring-ink-300">
             {leavesBoardIn(order.completed_at, completeHours)}
           </Badge>
+        ) : null}
+        {/* The QuickBooks invoice: the number once there is one, the way to
+            raise one until then. Cancelled orders are not billed. */}
+        {order.status !== 'cancelled' ? (
+          <InvoiceAction order={order} onChanged={onInvoiced} />
         ) : null}
         {/* What the label cost. Labels are the one thing PrintFlow spends
             money on, and the number is otherwise only visible in ShipStation. */}
@@ -382,6 +391,7 @@ export default function Board() {
                         setOver(null)
                       }}
                       onOpen={() => setOpenOrderId(order.id)}
+                      onInvoiced={load}
                       completeHours={board.complete_board_hours}
                     />
                   ))

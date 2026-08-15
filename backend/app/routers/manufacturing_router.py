@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_user
 from ..db import get_session
+from ..integrations import qbo as qbo_api
 from ..integrations.base import IntegrationError
 from ..models import (
     SHEET_DRAFT,
@@ -149,6 +150,79 @@ async def write_settings(
         # The account is the one that decides where the money lands, so it is
         # worth having in the log by name rather than just by id.
         detail={"account": saved.get("account_name"), "payment_type": saved.get("payment_type")},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"settings": saved}
+
+
+class BooksSettingsRequest(BaseModel):
+    cogs_account_id: str | None = None
+    cogs_account_name: str | None = None
+    income_item_id: str | None = None
+    income_item_name: str | None = None
+    shipping_item_id: str | None = None
+    shipping_item_name: str | None = None
+    remove_stock_on_printed: bool | None = None
+
+
+@router.get("/books")
+async def read_books_settings(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    return {"settings": await settings_store.get_books_settings(session)}
+
+
+async def _refuse_stock_moving_item(session: AsyncSession, item_id: str | None) -> None:
+    """Stop an Inventory item being chosen to carry invoice lines.
+
+    The whole arrangement rests on the invoice not moving stock — the printed
+    line already did that. An Inventory item here would deduct every unit a
+    second time and book its cost twice, and it would do it quietly, in
+    somebody's real books. Better to refuse the setting than to find out later.
+
+    QuickBooks being unreachable is not a reason to refuse: the check is a
+    guard, and a shop should still be able to configure PrintFlow while Intuit
+    is having a bad afternoon.
+    """
+    if not item_id:
+        return
+    try:
+        client = await qbo_api.client_for(session)
+        item = (await client.get_items([str(item_id)])).get(str(item_id))
+    except (IntegrationError, IntegrationNotConfigured):
+        return
+    if item and qbo_api.item_moves_stock(item):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"'{item.get('Name')}' is an inventory item, so putting it on an "
+            "invoice would take the same units out of stock a second time — "
+            "the printed line already did that. Choose a Service or "
+            "Non-Inventory item instead.",
+        )
+
+
+@router.put("/books")
+async def write_books_settings(
+    body: BooksSettingsRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    values = body.model_dump(exclude_unset=True)
+    for field in ("income_item_id", "shipping_item_id"):
+        if field in values:
+            await _refuse_stock_moving_item(session, values[field])
+    saved = await settings_store.set_books_settings(session, values)
+    await audit.record(
+        session,
+        entity_type="settings",
+        entity_id=None,
+        action="books_settings_changed",
+        detail={
+            "cogs_account": saved.get("cogs_account_name"),
+            "income_item": saved.get("income_item_name"),
+            "remove_stock_on_printed": saved.get("remove_stock_on_printed"),
+        },
         actor=user.username,
     )
     await session.commit()

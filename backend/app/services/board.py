@@ -84,6 +84,13 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             "etsy_listing_id": line.etsy_listing_id,
             "etsy_product_id": line.etsy_product_id,
             "assembled_at": line.assembled_at,
+            # What QuickBooks was told about these units, and what went wrong
+            # if it was not told. A removal that silently did not happen is the
+            # failure mode worth designing against, so the line carries its own
+            # answer rather than the operator having to go and look.
+            "qbo_stock_removed_at": line.qbo_stock_removed_at,
+            "qbo_stock_qty": line.qbo_stock_qty,
+            "qbo_stock_error": line.qbo_stock_error,
             "is_bundle": bool(kids),
             "print_jobs": [_job(job) for job in sorted(line.print_jobs, key=lambda j: j.created_at)],
             "children": [serialize(kid) for kid in sorted(kids, key=lambda c: c.created_at)],
@@ -185,6 +192,14 @@ def order_card(order: Order) -> dict[str, Any]:
         },
         "net": _amount(finance.net_of(order)),
         "finance_synced_at": order.finance_synced_at,
+        # The QuickBooks invoice, when there is one. On the card rather than
+        # only in the drawer because "has this been invoiced" is a question
+        # asked of a whole column at once.
+        "qbo_invoice_id": order.qbo_invoice_id,
+        "qbo_invoice_doc_number": order.qbo_invoice_doc_number,
+        "qbo_invoice_at": order.qbo_invoice_at,
+        "qbo_invoice_total": _amount(order.qbo_invoice_total),
+        "qbo_invoice_error": order.qbo_invoice_error,
         "shipstation_order_id": order.shipstation_order_id,
         "summary": _summary(order),
         "lines": _line_tree(order),

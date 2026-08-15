@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { COLUMN_LABELS, formatDateTime } from '../lib/format'
 import type { Order, OrderStatus } from '../lib/types'
+import InvoiceAction from '../components/InvoiceAction'
 import OrderDrawer from '../components/OrderDrawer'
 import { Alert, Badge, Card, EmptyState, Spinner, cx, inputClass } from '../components/ui'
 
@@ -118,11 +119,23 @@ export default function Orders() {
         ) : (
           <Card className="divide-y divide-ink-200">
             {data.orders.map((order) => (
-              <button
+              // A div with a button's manners rather than a <button>: the row
+              // carries its own Invoice control, and a button inside a button
+              // is not something a browser is obliged to make sense of.
+              // Focusable, activated by Enter and Space, announced as a button.
+              <div
                 key={order.id}
-                type="button"
+                role="button"
+                tabIndex={0}
                 onClick={() => setOpenOrderId(order.id)}
-                className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left hover:bg-ink-50"
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setOpenOrderId(order.id)
+                  }
+                }}
+                className="flex w-full cursor-pointer flex-wrap items-center gap-2 px-4 py-3 text-left hover:bg-ink-50"
               >
                 <span className="font-mono text-sm font-semibold text-ink-900">
                   #{order.order_number}
@@ -138,10 +151,13 @@ export default function Orders() {
                     {order.summary.unmatched_count} without a product
                   </Badge>
                 ) : null}
+                {order.status !== 'cancelled' ? (
+                  <InvoiceAction order={order} onChanged={load} />
+                ) : null}
                 <Badge className={STATUS_CLASSES[order.status]}>
                   {order.status === 'cancelled' ? 'Cancelled' : COLUMN_LABELS[order.status]}
                 </Badge>
-              </button>
+              </div>
             ))}
           </Card>
         )}

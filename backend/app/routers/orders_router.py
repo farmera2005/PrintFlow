@@ -29,7 +29,8 @@ from ..models import (
     Product,
     User,
 )
-from ..services import audit, board, finance, intake, shipping
+from ..services import audit, board, books, finance, intake, shipping
+from ..services.books import BooksError
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import ALLOWED_LINE_OVERRIDES, recompute_order
 
@@ -391,8 +392,15 @@ async def override_line(
         detail={"reason": body.reason, "sku": line.sku_raw},
         actor=user.username,
     )
+    # Marking a line printed says those units exist and are spoken for, so
+    # QuickBooks stops counting them. Cancelling one that was already booked
+    # puts them back. Both directions live in sync_order_stock, which is why
+    # this is one call rather than a branch per action.
+    booked = await books.sync_order_stock(session, order, actor=user.username)
     await session.commit()
-    return await board.load_order_detail(session, order_id)
+    detail = await board.load_order_detail(session, order_id)
+    detail["books"] = booked
+    return detail
 
 
 class ForcePrintRequest(BaseModel):
@@ -466,6 +474,100 @@ async def assemble_bundle(
         action="assembled" if body.assembled else "assembly_undone",
         actor=user.username,
     )
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
+# --------------------------------------------------------------------------
+# QuickBooks: stock out when it is printed, an invoice when it is sold
+# --------------------------------------------------------------------------
+
+
+@router.post("/orders/{order_id}/lines/{line_id}/stock-removal")
+async def remove_line_stock(
+    order_id: uuid.UUID,
+    line_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Take this line's units out of QuickBooks stock, or try again after a failure.
+
+    The removal normally happens on its own when the line is printed. This is
+    the way back in when it could not: QuickBooks was down, or an account had
+    not been chosen yet. Booking twice is impossible — the line records that it
+    has already been done.
+    """
+    line = await _get_line(session, order_id, line_id)
+    order = await _get_order(session, order_id)
+    result = await books.remove_stock(session, line, actor=user.username, order=order)
+    await session.commit()
+    if result["failed"]:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, result["reason"])
+    detail = await board.load_order_detail(session, order_id)
+    detail["books"] = [{"line_id": str(line_id), **result}]
+    return detail
+
+
+@router.delete("/orders/{order_id}/lines/{line_id}/stock-removal")
+async def restore_line_stock(
+    order_id: uuid.UUID,
+    line_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Put this line's units back into QuickBooks stock.
+
+    Cancelling a line does this on its own, because stock that never left the
+    shop should not stay gone. This is the other case: somebody marked a line
+    printed that was not, and clearing the override cannot be trusted to mean
+    "undo the books" — it is just as often a tidy-up after a print that really
+    did finish. So the reversal is its own button, and it is deliberate.
+    """
+    line = await _get_line(session, order_id, line_id)
+    result = await books.restore_stock(session, line, actor=user.username)
+    await session.commit()
+    if not result["restored"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, result["reason"])
+    detail = await board.load_order_detail(session, order_id)
+    detail["books"] = [{"line_id": str(line_id), **result}]
+    return detail
+
+
+@router.post("/orders/{order_id}/invoice")
+async def create_invoice(
+    order_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Raise this order's QuickBooks invoice.
+
+    Deliberately a button rather than something that happens on its own: an
+    invoice is a document in somebody's books, and which orders get one is a
+    decision about the business rather than about the software.
+    """
+    order = await _get_order(session, order_id)
+    try:
+        await books.invoice_order(session, order, actor=user.username)
+    except BooksError as exc:
+        await session.commit()  # keep the recorded reason, not the write
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
+@router.post("/orders/{order_id}/invoice/void")
+async def void_invoice(
+    order_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Void this order's invoice, which frees it to be invoiced again."""
+    order = await _get_order(session, order_id)
+    try:
+        await books.void_invoice(session, order, actor=user.username)
+    except BooksError as exc:
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     await session.commit()
     return await board.load_order_detail(session, order_id)
 

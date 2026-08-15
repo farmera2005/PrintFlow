@@ -1,11 +1,17 @@
 """QuickBooks Online client.
 
-QBO is the inventory system of record. Order handling only ever reads QtyOnHand
-(§4.2) — nothing in the order pipeline writes to the books.
+QBO is the inventory system of record. Deciding print-or-pull only ever reads
+QtyOnHand (§4.2); the writes are few, deliberate, and each has a service that
+explains itself:
 
-The one exception is manufacturing: posting a made-items sheet creates a
-Purchase, which is how QuickBooks raises quantity on hand. Every write is
-started by a person pressing a button; no background job posts anything.
+* **manufacturing** — posting a made-items sheet creates a Purchase, which is
+  how QuickBooks raises quantity on hand;
+* **books** — a printed line takes its units back out again, and an invoice
+  records what the order sold for without touching stock a second time.
+
+Every write is started by a person pressing a button, with one exception the
+operator controls: a print finishing can book its own stock removal while the
+setting under Settings says so.
 """
 
 from __future__ import annotations
@@ -246,6 +252,60 @@ class QboClient:
         )
         return data.get("Purchase") or {}
 
+    async def create_invoice(
+        self, invoice: dict[str, Any], *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Create an Invoice. Lines must not name inventory items.
+
+        An invoice line for an Inventory item takes the unit out of stock and
+        books its cost — which is right for a shop that only sells, and wrong
+        here, where the printed line already did exactly that. See
+        services/books.py for the arrangement this is one half of.
+        """
+        data = await self._write("invoice", invoice, request_id=request_id)
+        return data.get("Invoice") or {}
+
+    async def void_invoice(self, invoice_id: str, sync_token: str) -> dict[str, Any]:
+        """Void the Invoice, leaving a zero-value document in its place.
+
+        Void rather than delete: an invoice number that simply vanishes is a
+        gap somebody has to explain to an accountant, and QuickBooks keeps a
+        voided invoice visible with its total zeroed.
+        """
+        data = await self._write(
+            "invoice",
+            {"Id": str(invoice_id), "SyncToken": str(sync_token)},
+            params={"operation": "void"},
+        )
+        return data.get("Invoice") or {}
+
+    async def get_invoice(self, invoice_id: str) -> dict[str, Any] | None:
+        result = await self.query(
+            f"select * from Invoice where Id = '{escape_literal(str(invoice_id))}'"
+        )
+        rows = result.get("Invoice") or []
+        return rows[0] if rows else None
+
+    async def find_customer(self, display_name: str) -> dict[str, Any] | None:
+        """The customer with exactly this display name, if there is one.
+
+        Exact rather than `like`: QuickBooks makes DisplayName unique, so this
+        is an identity check. A fuzzy match here would bill one buyer's order
+        to a different buyer who happens to share a first name.
+        """
+        needle = escape_literal(display_name.strip())
+        if not needle:
+            return None
+        result = await self.query(
+            f"select * from Customer where DisplayName = '{needle}'"
+        )
+        rows = result.get("Customer") or []
+        return rows[0] if rows else None
+
+    async def create_customer(self, customer: dict[str, Any]) -> dict[str, Any]:
+        data = await self._write("customer", customer)
+        return data.get("Customer") or {}
+
     async def get_accounts(
         self, account_types: tuple[str, ...] = (), limit: int = 500
     ) -> list[dict[str, Any]]:
@@ -297,18 +357,27 @@ class QboClient:
                 out[str(item.get("Id"))] = item
         return out
 
-    async def search_items(self, term: str = "", limit: int = 50) -> list[dict[str, Any]]:
-        """Item picker backing query."""
+    async def search_items(
+        self,
+        term: str = "",
+        limit: int = 50,
+        item_types: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        """Item picker backing query.
+
+        `item_types` narrows the picker to the kinds of item the caller can
+        actually use — an invoice that must not move stock has no business
+        offering an Inventory item to choose.
+        """
         limit = max(1, min(limit, 200))
+        clauses = []
         if term.strip():
-            needle = escape_literal(term.strip())
-            statement = (
-                f"select * from Item where Name like '%{needle}%' "
-                f"maxresults {limit}"
-            )
-        else:
-            statement = f"select * from Item maxresults {limit}"
-        result = await self.query(statement)
+            clauses.append(f"Name like '%{escape_literal(term.strip())}%'")
+        if item_types:
+            joined = ",".join(f"'{escape_literal(t)}'" for t in item_types)
+            clauses.append(f"Type in ({joined})")
+        where = f" where {' and '.join(clauses)}" if clauses else ""
+        result = await self.query(f"select * from Item{where} maxresults {limit}")
         return list(result.get("Item") or [])
 
 
@@ -330,6 +399,17 @@ def item_purchase_cost(item: dict[str, Any]) -> Decimal | None:
 def item_is_inventory(item: dict[str, Any]) -> bool:
     """Only Inventory items carry a quantity that a Purchase can move."""
     return str(item.get("Type") or "") == "Inventory"
+
+
+def item_moves_stock(item: dict[str, Any]) -> bool:
+    """Would putting this item on an invoice line change quantity on hand?
+
+    The question the income-item setting has to answer before it is saved. An
+    Inventory item on an invoice relieves stock and books cost, which is the
+    right behaviour for a shop that only sells and the wrong one here, where
+    the printed line has already done it.
+    """
+    return item_is_inventory(item) or bool(item.get("TrackQtyOnHand"))
 
 
 def item_qty_on_hand(item: dict[str, Any]) -> float | None:

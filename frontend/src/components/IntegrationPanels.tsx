@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { formatDateTime } from '../lib/format'
-import type { BambuddyPrinter, IntegrationStatus } from '../lib/types'
+import type { BambuddyPrinter, IntegrationStatus, QboItem } from '../lib/types'
 import { Alert, Badge, Button, Field, inputClass } from './ui'
 
 interface Diagnosis {
@@ -603,6 +603,182 @@ function ManufacturingPosting() {
   )
 }
 
+interface BooksSettings {
+  cogs_account_id: string | null
+  cogs_account_name: string | null
+  income_item_id: string | null
+  income_item_name: string | null
+  shipping_item_id: string | null
+  shipping_item_name: string | null
+  remove_stock_on_printed: boolean
+}
+
+/** What the order pipeline writes into QuickBooks, and where it lands.
+ *
+ * Two settings, and they are two halves of one arrangement. A printed line
+ * takes its units out of stock and puts their value in the cost account. The
+ * invoice records the money on an item that does *not* carry stock — because
+ * the printed line already moved it, and an inventory item on an invoice would
+ * move it a second time. Choosing one is refused, loudly, for that reason.
+ *
+ * Neither has a default: which account and which item are right depends on the
+ * shop's chart of accounts, and picking on their behalf would file real money
+ * somewhere nobody chose.
+ */
+function BooksPosting() {
+  const [settings, setSettings] = useState<BooksSettings | null>(null)
+  const [accounts, setAccounts] = useState<QboAccount[]>([])
+  const [items, setItems] = useState<QboItem[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api
+      .get<{ settings: BooksSettings }>('/api/manufacturing/books')
+      .then((data) => setSettings(data.settings))
+      .catch((err) => setError(errorMessage(err)))
+    api
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=cogs')
+      .then((data) => setAccounts(data.accounts))
+      .catch(() => setAccounts([]))
+    // Only the items an invoice line may name. An inventory item here is the
+    // one mistake that would double-count every sale, so it is not offered.
+    api
+      .get<{ items: QboItem[] }>('/api/integrations/qbo/items?kind=non_stock&limit=200')
+      .then((data) => setItems(data.items))
+      .catch(() => setItems([]))
+  }, [])
+
+  const save = async (changes: Partial<BooksSettings>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const data = await api.put<{ settings: BooksSettings }>(
+        '/api/manufacturing/books',
+        changes,
+      )
+      setSettings(data.settings)
+      setSaved(true)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!settings) return null
+
+  const pickItem = (id: string, idField: keyof BooksSettings, nameField: keyof BooksSettings) => {
+    const item = items.find((candidate) => String(candidate.id) === id)
+    save({ [idField]: item?.id ?? null, [nameField]: item?.name ?? null } as Partial<BooksSettings>)
+  }
+
+  return (
+    <div className="space-y-3 rounded-md bg-ink-50 p-3">
+      <p className="text-sm font-medium text-ink-800">Orders in the books</p>
+
+      <Field
+        label="Remove stock when a line is printed"
+        hint="A finished print takes its units out of QuickBooks on its own. Turn this off and only Mark printed moves anything, which is the older rule that nothing but a person writes to your books."
+      >
+        <label className="flex items-center gap-2 text-sm text-ink-700">
+          <input
+            type="checkbox"
+            checked={settings.remove_stock_on_printed}
+            disabled={busy}
+            onChange={(e) => save({ remove_stock_on_printed: e.target.checked })}
+          />
+          Book it automatically
+        </label>
+      </Field>
+
+      <Field
+        label="Cost of goods sold account"
+        hint="Where the value of a printed unit goes when it leaves stock. The removal is a zero-total Purchase: inventory down, this account up, and no bank account touched."
+      >
+        <select
+          className={inputClass}
+          value={settings.cogs_account_id ?? ''}
+          disabled={busy}
+          onChange={(e) => {
+            const account = accounts.find((a) => a.id === e.target.value)
+            save({
+              cogs_account_id: account?.id ?? null,
+              cogs_account_name: account?.name ?? null,
+            })
+          }}
+        >
+          <option value="">Choose an account…</option>
+          {accounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name} ({account.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Invoice lines go on"
+        hint="A Service or Non-Inventory item. Every invoice line names it, with the product in the description — so the invoice records the money without moving stock a second time. Inventory items are not listed."
+      >
+        <select
+          className={inputClass}
+          value={settings.income_item_id ?? ''}
+          disabled={busy}
+          onChange={(e) => pickItem(e.target.value, 'income_item_id', 'income_item_name')}
+        >
+          <option value="">Choose an item…</option>
+          {items.map((item) => (
+            <option key={item.id} value={String(item.id)}>
+              {item.name} ({item.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Shipping goes on (optional)"
+        hint="Postage the buyer paid gets its own invoice line. Leave it blank and it goes on the item above."
+      >
+        <select
+          className={inputClass}
+          value={settings.shipping_item_id ?? ''}
+          disabled={busy}
+          onChange={(e) => pickItem(e.target.value, 'shipping_item_id', 'shipping_item_name')}
+        >
+          <option value="">Same item as the lines above</option>
+          {items.map((item) => (
+            <option key={item.id} value={String(item.id)}>
+              {item.name} ({item.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      {!items.length ? (
+        <p className="text-xs text-ink-500">
+          No Service or Non-Inventory items found. Create one in QuickBooks — an
+          "Etsy sales" service item is the usual answer — then reload this page.
+        </p>
+      ) : null}
+      {!settings.cogs_account_id ? (
+        <Alert tone="warning">
+          Until a cost of goods sold account is chosen, printed lines cannot take
+          their units out of stock. The lines say so where it happens.
+        </Alert>
+      ) : null}
+      {!settings.income_item_id ? (
+        <Alert tone="warning">
+          Until an invoice item is chosen, orders cannot be invoiced.
+        </Alert>
+      ) : null}
+      {saved ? <p className="text-xs text-emerald-700">Saved.</p> : null}
+      {error ? <Alert tone="error">{error}</Alert> : null}
+    </div>
+  )
+}
+
 export function QboPanel({ status, redirectUri, onChange }: PanelProps) {
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
@@ -640,11 +816,13 @@ export function QboPanel({ status, redirectUri, onChange }: PanelProps) {
           <dd className="text-ink-800">{status.detail.environment}</dd>
         </dl>
         <p className="text-xs text-ink-500">
-          Order handling is read-only: PrintFlow reads QtyOnHand and never posts
-          anything while importing or fulfilling orders. The one write is a
-          made-items sheet on the Manufacturing tab, and only when you press Post.
+          PrintFlow reads QtyOnHand to decide print-or-pull, and writes in three
+          places: a made-items sheet on the Manufacturing tab, stock leaving when
+          a line is printed, and an invoice when you raise one. Nothing else
+          touches your books.
         </p>
         <ManufacturingPosting />
+        <BooksPosting />
       </div>
     )
   }

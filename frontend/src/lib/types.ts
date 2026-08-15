@@ -72,6 +72,14 @@ export interface OrderLine {
   etsy_listing_id: number | null
   etsy_product_id: number | null
   assembled_at: string | null
+  /** When these units were taken out of QuickBooks stock, and how many. Null
+   *  for a line that has not been printed, or whose product QuickBooks does not
+   *  track. */
+  qbo_stock_removed_at: string | null
+  qbo_stock_qty: number | null
+  /** Why the last removal did not happen. A removal that quietly failed is the
+   *  failure worth designing against, so the line carries its own answer. */
+  qbo_stock_error: string | null
   is_bundle: boolean
   print_jobs: PrintJob[]
   children: OrderLine[]
@@ -135,6 +143,13 @@ export interface Order {
   /** Revenue less every fee and the label. Null when revenue is unknown. */
   net: string | null
   finance_synced_at: string | null
+  /** The QuickBooks invoice, when one has been raised. `doc_number` is what a
+   *  person searches for in QuickBooks; the id is what stops a second one. */
+  qbo_invoice_id: string | null
+  qbo_invoice_doc_number: string | null
+  qbo_invoice_at: string | null
+  qbo_invoice_total: string | null
+  qbo_invoice_error: string | null
   shipstation_order_id: number | null
   summary: OrderSummary
   lines: OrderLine[]
@@ -317,6 +332,10 @@ export interface QboItem {
   type: string | null
   qty_on_hand: number | null
   tracked: boolean
+  /** Whether an invoice line naming this item would change quantity on hand.
+   *  The income-item setting refuses one that would — the printed line has
+   *  already taken those units out. */
+  moves_stock?: boolean
 }
 
 export interface BambuddyArchive {

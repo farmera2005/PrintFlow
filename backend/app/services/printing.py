@@ -28,7 +28,7 @@ from ..models import (
     PrintFile,
     ProductVariation,
 )
-from ..services import credentials, variations
+from ..services import books, credentials, variations
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import recompute_order_by_id
 
@@ -377,7 +377,13 @@ async def reconcile(session: AsyncSession) -> dict[str, int]:
         .scalars()
         .all()
     )
-    stats = {"checked": len(open_jobs), "advanced": 0, "failed": 0, "done": 0}
+    stats = {
+        "checked": len(open_jobs),
+        "advanced": 0,
+        "failed": 0,
+        "done": 0,
+        "stock_removed": 0,
+    }
     if not open_jobs:
         return stats
 
@@ -429,8 +435,17 @@ async def reconcile(session: AsyncSession) -> dict[str, int]:
 
     await session.flush()
     for order_id in touched_orders:
-        if order_id is not None:
-            await recompute_order_by_id(session, order_id)
+        if order_id is None:
+            continue
+        await recompute_order_by_id(session, order_id)
+        # A plate coming off a machine is the moment those units stop being
+        # filament and start being goods, so it is the moment QuickBooks wants
+        # told. Only when the operator has left that switch on: this is the one
+        # place a poll writes to the books, and it is theirs to turn off.
+        order = await session.get(Order, order_id)
+        if order is not None:
+            booked = await books.sync_order_stock(session, order, actor="bambuddy")
+            stats["stock_removed"] += sum(1 for row in booked if row.get("booked"))
     return stats
 
 

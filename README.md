@@ -29,11 +29,12 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 7. At **Ready to Ship**, you click Create Label. ShipStation's own Etsy
    connection pushes the tracking number back to Etsy.
 
-**PrintFlow never writes to Etsy.** Order handling never writes to QuickBooks
-either — importing, deciding and fulfilling an order only ever reads quantity on
-hand. The single exception is the Manufacturing tab, and it only acts when you
-press Post. Labels are never bought automatically — they cost money, so they are
-always an explicit click.
+**PrintFlow never writes to Etsy.** It writes to QuickBooks in exactly three
+places, all described under [Orders in the books](#orders-in-the-books) and the
+Manufacturing tab: a made-items sheet when you press Post, a printed line taking
+its units out of stock, and an invoice when you raise one. Importing and
+deciding an order only ever *reads* quantity on hand. Labels are never bought
+automatically — they cost money, so they are always an explicit click.
 
 ## Checking products against Etsy
 
@@ -1061,7 +1062,7 @@ real money somewhere you did not choose. PrintFlow checks the account's type
 before posting, so a wrong choice is explained here rather than returned as a
 bare error code by QuickBooks.
 
-Guardrails, because this is the one place PrintFlow writes to your books:
+Guardrails, because this writes to your books:
 
 * Nothing posts without a person pressing Post. No background job posts.
 * The sheet shows exactly what will happen — both totals and the difference —
@@ -1072,6 +1073,102 @@ Guardrails, because this is the one place PrintFlow writes to your books:
   cannot produce two transactions.
 * A product with no QuickBooks item linked blocks the post rather than silently
   posting a sheet that moves nothing.
+
+## Orders in the books
+
+Two things happen to an order in QuickBooks: its units leave stock when they are
+printed, and its money is recorded when you invoice it. They are two halves of
+one arrangement, and the reason they are designed together is that either one
+done carelessly counts the same unit twice.
+
+### Stock out when a line is printed
+
+A printed line's units come out of QuickBooks as **one Purchase carrying two
+lines that cancel**:
+
+* an item line for the product's own QuickBooks item with a **negative**
+  quantity — quantity on hand falls, Inventory Asset is credited;
+* an account line for the same amount against the **cost of goods sold** account
+  from Settings — the value of those units lands where a sold unit's value
+  belongs.
+
+The document totals **zero**, so the payment account it names is never touched.
+That is the point of the second line: a Purchase carrying only the negative one
+would total below zero, which QuickBooks reads as money *arriving* in a bank
+account, and nothing arrived.
+
+QuickBooks relieves inventory at its own average cost whatever unit price it is
+handed, so an item with no recorded cost still moves the right quantity — the
+document simply carries no value. A guessed figure would be worse.
+
+**When it happens.** Pressing **Mark printed** always books it: that is a person
+asking. A print that finishes on its own books it too, while *Remove stock when
+a line is printed* is on under Settings. Turning that off restores the older
+rule that nothing but a person writes to your books — the button still works.
+
+**Once, ever.** The guard is a stored timestamp on the line, not its state. Line
+states here are *derived* and recomputed from scratch on every pass, so "this
+line is printed" is true again a minute later and again after that; only the
+column can stop the second booking. A variation with its own QuickBooks item
+draws down that item rather than its parent's, and a bundle is booked through
+its components rather than as itself.
+
+**Undoing it.** Cancelling a line whose units were already booked deletes the
+Purchase and puts the stock back on its own. For the other case — a line marked
+printed that was not — there is a **Put stock back** button on the line, because
+clearing the override cannot be trusted to mean "undo the books": it is just as
+often a tidy-up after a print that really did finish. Nothing reverses itself on
+a line's state changing, so re-queuing a plate never churns documents in your
+books.
+
+A removal that could not be made says so on the line, with a **Retry stock
+removal** button beside it — a book entry that quietly did not happen is the
+failure worth designing against.
+
+### An invoice, when you raise one
+
+**Invoice** appears on every order in the Orders list and on every board card,
+and in the drawer's Money tab with rather more detail. It is a button rather
+than something that happens on its own: an invoice is a document in somebody's
+books, and which orders get one is a decision about the business.
+
+It bills the buyer's **name and address from the order** — finding that customer
+in QuickBooks by display name, or creating them. Lines come from the order's
+top-level lines at the price Etsy recorded, plus postage the buyer paid. Bundle
+components are not itemised: the buyer bought a bundle, not its bill of
+materials. A line whose price cannot be found is left off rather than billed at
+zero, because a zero on an invoice looks like a decision somebody made.
+
+**Every line names the income item from Settings — a Service or Non-Inventory
+item — not the product's own.** This is the half that keeps the arrangement
+honest. An invoice line naming an *Inventory* item takes that unit out of stock
+and books its cost, and the printed line already did exactly that. What was
+actually sold is in the line's description, where a person reads it. Choosing an
+inventory item for this setting is refused, with that explanation, and the picker
+does not offer one.
+
+Between the two, each unit is deducted once and its cost recognised once.
+
+**Voiding.** An invoice can be voided from the Money tab, which leaves a
+zero-total document in QuickBooks — rather than deleting it and leaving a gap in
+the numbering that somebody has to explain — and frees the order to be invoiced
+again.
+
+### What to configure
+
+Under **Settings → QuickBooks → Orders in the books**:
+
+* **Cost of goods sold account** (required for stock removals). The removal also
+  reuses the "paid from" account under Manufacturing postings; since the document
+  totals zero, the same clearing account serves both.
+* **Invoice lines go on** (required for invoicing). A Service or Non-Inventory
+  item — an "Etsy sales" service item is the usual answer.
+* **Shipping goes on** (optional). Leave it blank and postage joins the item
+  above.
+
+Neither has a default. Which account and which item are right depends on your
+chart of accounts, and picking on your behalf would file real money somewhere
+nobody chose. Each unset setting says, where it matters, what it is blocking.
 
 ## Running it
 
@@ -1471,7 +1568,7 @@ quantity and say so on the line — intake never blocks on a third party.
 | Job                        | Default   | Notes                                    |
 | -------------------------- | --------- | ---------------------------------------- |
 | Etsy receipt poll          | 5 min     | Intake pipeline runs inline after ingest |
-| Bambuddy status reconcile  | 2 min     | Dispatches pending plates, then advances jobs |
+| Bambuddy status reconcile  | 2 min     | Dispatches pending plates, advances jobs, and books the stock a finished print used — the one background write to your books, and switchable off |
 | ShipStation order match    | 10 min    | Only orders missing a ShipStation id; backs off because ShipStation's Etsy import can lag an hour |
 | QBO token refresh          | 5 min check | Refreshes at <10 min remaining         |
 
