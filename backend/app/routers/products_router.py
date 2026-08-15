@@ -1271,16 +1271,36 @@ async def _apply_variations(
 
     retired = 0
     for key, variation in existing.items():
+        # Only ones Etsy told us about. "Etsy no longer offers this" is not a
+        # statement anybody can make about a combination Etsy never offered:
+        # a variation typed in by hand — for a listing whose options Etsy does
+        # not model as inventory — would otherwise be switched off by the next
+        # sync, silently, along with the QuickBooks item somebody put on it.
+        if variation.etsy_product_id is None:
+            continue
         if key not in seen and variation.active:
             variation.active = False
             retired += 1
 
     await session.flush()
+    reattached = await _reattach_open_lines(session, product)
 
-    # Orders already on the board were matched before these existed, so they
-    # carry no variation and would print the product's default plate. Re-attach
-    # them here: setting variations up after the first order arrives is the
-    # normal way round, not an edge case.
+    return {
+        "added": added,
+        "updated": updated,
+        "retired": retired,
+        "reattached": reattached,
+    }
+
+
+async def _reattach_open_lines(session: AsyncSession, product: Product) -> int:
+    """Point this product's open lines at whichever variation now describes them.
+
+    Orders already on the board were matched before these variations existed,
+    so they carry none and would print the product's default plate. Setting
+    variations up after the first order arrives is the normal way round, not an
+    edge case — so both the Etsy sync and a hand-made variation run this.
+    """
     reattached = 0
     open_lines = (
         (
@@ -1307,13 +1327,89 @@ async def _apply_variations(
         # product's default plate. Jobs already on the Bambuddy queue are left
         # alone by plan_jobs; only undispatched ones are corrected.
         await printing.plan_jobs(session, moved)
+    return reattached
 
-    return {
-        "added": added,
-        "updated": updated,
-        "retired": retired,
-        "reattached": reattached,
-    }
+
+class OptionPair(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    value: str = Field(min_length=1, max_length=500)
+
+
+class NewVariationRequest(BaseModel):
+    label: str | None = Field(default=None, max_length=300)
+    # At least one: a variation that pins nothing can never match an order.
+    # `automatch` requires a non-empty option set before it will consider one,
+    # precisely so that an empty variation does not swallow every line.
+    options: list[OptionPair] = Field(min_length=1, max_length=20)
+    qbo_item_id: str | None = None
+    qbo_item_name: str | None = None
+
+
+@router.post("/{product_id}/variations", status_code=201)
+async def create_variation(
+    product_id: uuid.UUID,
+    body: NewVariationRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Add a variation by hand, for what Etsy will not hand over.
+
+    Pulling from Etsy is the right way round and stays the default: Etsy states
+    exactly which combinations it sells, and typing option names by hand risks
+    a typo that silently prints the wrong plate. But it only works for listings
+    whose options Etsy models as inventory. A listing that describes its scales
+    in the title, or offers them as a made-to-order choice, has no combinations
+    to read — and until now that meant the product had no variations at all,
+    and nowhere to put a QuickBooks item.
+
+    Matching still works the same way: an order matches on the option values
+    when there is no Etsy id to match on, so a hand-made variation whose names
+    and values match Etsy's wording picks up orders exactly as a pulled one
+    does. Which is why the screen says to copy that wording exactly.
+    """
+    product = await _get(session, product_id)
+    options = [{"name": pair.name.strip(), "value": pair.value.strip()} for pair in body.options]
+    key = variations_service.option_key(options)
+    if not key:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Give the variation at least one option name and value — that is "
+            "what an order is matched on.",
+        )
+
+    for existing in product.variations:
+        if variations_service.option_key(existing.options) == key:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"“{existing.label}” already covers that combination.",
+            )
+
+    variation = ProductVariation(
+        product_id=product.id,
+        options=options,
+        label=(body.label or "").strip() or variations_service.label_for(options),
+        qbo_item_id=body.qbo_item_id,
+        qbo_item_name=body.qbo_item_name,
+    )
+    session.add(variation)
+    await session.flush()
+
+    # Same reason the Etsy sync does it: orders already on the board were
+    # matched before this existed and would otherwise never see it.
+    reattached = await _reattach_open_lines(session, product)
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product.id,
+        action="variation_added",
+        detail={"variation": variation.label, "options": options, "reattached": reattached},
+        actor=user.username,
+    )
+    await session.commit()
+    payload = _serialize(await _get(session, product_id))
+    payload["added"] = {"label": variation.label, "reattached": reattached}
+    return payload
 
 
 class VariationRequest(BaseModel):

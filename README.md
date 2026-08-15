@@ -135,6 +135,24 @@ combination. Nobody types option names: they have to match Etsy's exactly, and a
 typo there is silent — it prints the wrong plate and nobody finds out until the
 parcel is open.
 
+### When Etsy has none to give
+
+Pulling only works for a listing whose options Etsy models as inventory. A
+listing that names its scales in the title, or offers them made to order, has no
+combinations to read — and a product with no variations has nowhere to put a
+print file override or a QuickBooks item. **Add one by hand** is there for that:
+type the option name and value, optionally name the combination, and it behaves
+like a pulled one from then on. Orders match it on the option values, which is
+why the form insists you copy Etsy's wording exactly; where an order has already
+arrived, copy it from that.
+
+A hand-made variation is never retired by a later pull. The sync switches off
+combinations Etsy no longer offers, and "Etsy no longer offers this" is not a
+statement anybody can make about one Etsy never offered — switching it off would
+take its QuickBooks item out of use, silently. If Etsy *does* later offer the
+same combination, the row you typed is taken over rather than duplicated: it
+gains Etsy's id and keeps everything you set on it.
+
 Orders attach to a variation automatically, most specific first:
 
 1. Etsy's own variation id, when it is current;

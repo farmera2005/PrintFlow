@@ -14,13 +14,15 @@ from sqlalchemy import select
 
 from app.models import (
     BomLine,
+    EtsyProductLink,
     OrderLine,
     PrintJob,
     PrintFile,
     Product,
     ProductVariation,
 )
-from app.services import intake, variations
+from app.models import PROVIDER_ETSY
+from app.services import credentials, intake, variations
 
 pytestmark = pytest.mark.asyncio
 
@@ -826,3 +828,235 @@ class TestVariantProductApi:
         assert response.status_code == 200, response.text
         assert response.json() == {"deleted": 2, "kept": []}
         assert (await signed_in.get("/api/products")).json()["products"] == []
+
+
+# --------------------------------------------------------------------------
+# Variations added by hand
+# --------------------------------------------------------------------------
+
+
+class TestVariationsByHand:
+    """For a listing whose options Etsy will not hand over.
+
+    Pulling from Etsy is the right way round and stays the default. But it only
+    works for a listing whose options Etsy models as inventory — one that names
+    its scales in the title, or offers them made-to-order, has no combinations
+    to read. Before this, such a product had no variations at all, and so
+    nowhere to hang a QuickBooks item.
+    """
+
+    async def _etsy_connected(self, db):
+        """The sync endpoint asks Etsy for itself before anything is stubbed."""
+        await credentials.save(
+            db,
+            PROVIDER_ETSY,
+            {
+                "keystring": "k",
+                "shared_secret": "s",
+                "access_token": "42.token",
+                "refresh_token": "r",
+                "expires_at": 9_999_999_999,
+                "shop_id": 4242,
+            },
+        )
+        await db.commit()
+
+    async def _product(self, db, **fields):
+        product = Product(
+            sku="KIT", name="Playset", fulfillment="bundle", qbo_item_id=None, **fields
+        )
+        db.add(product)
+        await db.commit()
+        return product
+
+    async def test_adding_one(self, signed_in, db):
+        product = await self._product(db)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={"options": [{"name": "Scale", "value": "1:64"}]},
+        )
+
+        assert response.status_code == 201, response.text
+        variation = response.json()["variations"][0]
+        # Named after its options when nobody says otherwise.
+        assert variation["label"] == "Scale: 1:64"
+        assert variation["options"] == [{"name": "Scale", "value": "1:64"}]
+        assert variation["etsy_product_id"] is None
+
+    async def test_it_can_be_named(self, signed_in, db):
+        product = await self._product(db)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={
+                "label": "1:64 Scale",
+                "options": [{"name": "Scale", "value": "1:64"}],
+            },
+        )
+
+        assert response.json()["variations"][0]["label"] == "1:64 Scale"
+
+    async def test_it_can_carry_a_quickbooks_item_from_the_start(self, signed_in, db):
+        """Which is the whole point of being able to add one."""
+        product = await self._product(db)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={
+                "options": [{"name": "Scale", "value": "1:64"}],
+                "qbo_item_id": "501",
+                "qbo_item_name": "Playset 1:64",
+            },
+        )
+
+        assert response.json()["variations"][0]["qbo_item_id"] == "501"
+
+    async def test_the_same_combination_twice_is_refused(self, signed_in, db):
+        product = await self._product(db)
+        body = {"options": [{"name": "Scale", "value": "1:64"}]}
+        await signed_in.post(f"/api/products/{product.id}/variations", json=body)
+
+        # Case and order do not make it a different combination.
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={"options": [{"name": "scale", "value": "1:64"}]},
+        )
+
+        assert response.status_code == 409
+        assert "already covers" in response.json()["detail"]
+
+    async def test_no_options_is_refused(self, signed_in, db):
+        """A variation that pins nothing could never match an order."""
+        product = await self._product(db)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations", json={"options": []}
+        )
+
+        assert response.status_code == 422
+
+    async def test_an_order_finds_it_by_its_options(self, signed_in, db):
+        """No Etsy id to match on, so the option values are what does it."""
+        product = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(product)
+        await db.flush()
+        db.add(EtsyProductLink(product_id=product.id, etsy_listing_id=LISTING))
+        await db.commit()
+
+        await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={"options": [{"name": "Bin Fan", "value": "Yes"}]},
+        )
+        await intake.ingest_receipt(
+            db,
+            {
+                "receipt_id": 7788,
+                "transactions": [
+                    {
+                        "transaction_id": 1,
+                        "listing_id": LISTING,
+                        "quantity": 1,
+                        "variations": [
+                            {"formatted_name": "Bin Fan", "formatted_value": "Yes"}
+                        ],
+                    }
+                ],
+            },
+        )
+        await db.commit()
+
+        line = (await db.execute(select(OrderLine))).scalars().one()
+        assert line.variation_id is not None
+
+    async def test_an_etsy_sync_does_not_retire_it(self, signed_in, db, monkeypatch):
+        """The trap this feature would otherwise walk into.
+
+        The sync switches off any combination Etsy no longer offers. "Etsy no
+        longer offers this" is not a statement anybody can make about a
+        combination Etsy never offered — and switching it off would take its
+        QuickBooks item out of use, silently, on the next pull.
+        """
+        product = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(product)
+        await db.flush()
+        db.add(EtsyProductLink(product_id=product.id, etsy_listing_id=LISTING))
+        await db.commit()
+        await self._etsy_connected(db)
+
+        await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={
+                "options": [{"name": "Scale", "value": "1:64"}],
+                "qbo_item_id": "501",
+            },
+        )
+
+        # Etsy answers with a different combination entirely.
+        async def one_other(self, listing_id):
+            return {
+                "products": [
+                    {
+                        "product_id": VARIANT_YES,
+                        "property_values": [
+                            {"property_name": "Bin Fan", "values": ["Yes"]}
+                        ],
+                    }
+                ]
+            }
+
+        from app.integrations.etsy import EtsyClient
+
+        monkeypatch.setattr(EtsyClient, "listing_inventory", one_other)
+        response = await signed_in.post(
+            f"/api/products/{product.id}/variations/sync-etsy"
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["sync"]["retired"] == 0
+        by_hand = next(
+            v for v in body["variations"] if v["options"] == [{"name": "Scale", "value": "1:64"}]
+        )
+        assert by_hand["active"] is True
+        assert by_hand["qbo_item_id"] == "501"
+
+    async def test_a_combination_etsy_later_offers_is_taken_over(self, signed_in, db, monkeypatch):
+        """Not duplicated — the hand-made row gains Etsy's id and keeps its item."""
+        product = Product(sku="BIN", name="Bin", fulfillment="printed", qbo_item_id=None)
+        db.add(product)
+        await db.flush()
+        db.add(EtsyProductLink(product_id=product.id, etsy_listing_id=LISTING))
+        await db.commit()
+        await self._etsy_connected(db)
+
+        await signed_in.post(
+            f"/api/products/{product.id}/variations",
+            json={
+                "options": [{"name": "Bin Fan", "value": "Yes"}],
+                "qbo_item_id": "501",
+            },
+        )
+
+        async def same_one(self, listing_id):
+            return {
+                "products": [
+                    {
+                        "product_id": VARIANT_YES,
+                        "property_values": [
+                            {"property_name": "Bin Fan", "values": ["Yes"]}
+                        ],
+                    }
+                ]
+            }
+
+        from app.integrations.etsy import EtsyClient
+
+        monkeypatch.setattr(EtsyClient, "listing_inventory", same_one)
+        body = (
+            await signed_in.post(f"/api/products/{product.id}/variations/sync-etsy")
+        ).json()
+
+        assert len(body["variations"]) == 1
+        assert body["variations"][0]["etsy_product_id"] == VARIANT_YES
+        assert body["variations"][0]["qbo_item_id"] == "501"

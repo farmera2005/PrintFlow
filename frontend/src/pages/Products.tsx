@@ -956,6 +956,148 @@ function PrintFileRow({
   )
 }
 
+/** Add a variation by hand, for what Etsy will not hand over.
+ *
+ * Pulling from Etsy stays the right way round and the default — Etsy states
+ * exactly which combinations it sells, and a typo in an option name is silent.
+ * But it only works for a listing whose options Etsy models as inventory. One
+ * that names its scales in the title, or offers them made-to-order, has no
+ * combinations to read, and until now that left the product with no variations
+ * at all and nowhere to put a QuickBooks item.
+ *
+ * Orders match on the option values when there is no Etsy id to match on, so a
+ * variation typed here picks up orders exactly as a pulled one does — provided
+ * the wording matches. Which is why the form says so rather than hoping.
+ */
+function NewVariationForm({
+  product,
+  onSaved,
+}: {
+  product: Product
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const blank = [{ name: '', value: '' }]
+  const [open, setOpen] = useState(false)
+  const [label, setLabel] = useState('')
+  const [options, setOptions] = useState(blank)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const usable = options.filter((row) => row.name.trim() && row.value.trim())
+
+  const reset = () => {
+    setOpen(false)
+    setLabel('')
+    setOptions(blank)
+    setError(null)
+  }
+
+  const add = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onSaved(
+        await api.post<Product>(`/api/products/${product.id}/variations`, {
+          label: label.trim() || null,
+          options: usable.map((row) => ({
+            name: row.name.trim(),
+            value: row.value.trim(),
+          })),
+        }),
+      )
+      reset()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
+        Add one by hand
+      </Button>
+    )
+  }
+
+  return (
+    <div className="space-y-2 rounded-md bg-ink-50 p-3">
+      <p className="text-xs text-ink-500">
+        For a listing whose options Etsy does not hand over. The option names and
+        values have to match what Etsy sends on an order, word for word, or the
+        order will not find this — copy them from an order that has already
+        arrived where you can.
+      </p>
+
+      {options.map((row, index) => (
+        <div key={index} className="grid gap-2 sm:grid-cols-2">
+          <Field label={index === 0 ? 'Option' : ''}>
+            <input
+              className={inputClass}
+              placeholder="Scale"
+              value={row.name}
+              onChange={(e) =>
+                setOptions((rows) =>
+                  rows.map((r, i) => (i === index ? { ...r, name: e.target.value } : r)),
+                )
+              }
+            />
+          </Field>
+          <Field label={index === 0 ? 'Value' : ''}>
+            <input
+              className={inputClass}
+              placeholder="1:64"
+              value={row.value}
+              onChange={(e) =>
+                setOptions((rows) =>
+                  rows.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)),
+                )
+              }
+            />
+          </Field>
+        </div>
+      ))}
+
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => setOptions((rows) => [...rows, { name: '', value: '' }])}
+      >
+        Another option
+      </Button>
+
+      <Field
+        label="Name (optional)"
+        hint="What this combination is called on screen. Left blank, it is named after the options."
+      >
+        <input
+          className={inputClass}
+          placeholder="1:64 Scale"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+        />
+      </Field>
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy || usable.length === 0}
+          onClick={add}
+        >
+          {busy ? 'Adding…' : 'Add variation'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={reset} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function QboItemPicker({
   onClose,
   onPick,
@@ -1491,8 +1633,8 @@ function VariationsEditor({
         <p className="text-sm text-ink-500">
           None yet.{' '}
           {product.etsy_links.length
-            ? 'Pull them from Etsy — every combination the listing sells becomes a row.'
-            : 'Link an Etsy listing below first; variations come from the listing.'}
+            ? 'Pull them from Etsy — every combination the listing sells becomes a row. If the listing has none to give, add one below.'
+            : 'Link an Etsy listing below to pull them, or add one by hand.'}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -1690,6 +1832,8 @@ function VariationsEditor({
           ))}
         </ul>
       )}
+
+      <NewVariationForm product={product} onSaved={onSaved} />
 
       {pickingFile ? (
         <PrintFilePicker
