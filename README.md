@@ -663,13 +663,40 @@ things to act on. A machine reporting a fault says so in red; a Bambu machine
 reports "no fault" as the number 0, which is read as no fault rather than
 printed as one.
 
+### The queue on each machine
+
+Each card says how many jobs are lined up on that machine and what is next, and
+the machine's own page lists the whole line in the order it will be printed.
+
+**It is Bambuddy's queue, not PrintFlow's list.** That distinction is the whole
+point: the line holds plates dispatched from orders *and* whatever anybody sent
+from Bambuddy's own screen or from Print a file. A queue showing only the half
+PrintFlow put there would describe a machine as free while it works through six
+of somebody's test pieces. So every job is drawn, the ones PrintFlow recognises
+are labelled with their order number, and the rest say *not an order* — which is
+information, not a gap.
+
+The whole farm's queue is read in one request rather than one per machine, and
+a queue that cannot be read is a message rather than an error: a machine's
+temperature is not less true because its queue endpoint moved. Jobs Bambuddy has
+not assigned to a machine yet — it sends those to whichever comes free — get
+their own group under the cards, because a job nobody can see is a job nobody
+cancels.
+
+**Cancel** takes a job out of the machine's queue. Where that job came from an
+order, its plate is cancelled with it: a plate still marked queued for a job
+that is in no queue is a disagreement nobody notices until dispatch tries again.
+Cancelling something that never came from an order is fine and says so.
+
 ### One machine's own page
 
-Click a machine's name and it opens on its own, in three tabs, because the three
+Click a machine's name and it opens on its own, in four tabs, because the
 questions are different:
 
 * **Now** — the camera at full size refreshing every second, the progress bar,
   temperatures, fan, speed, light and door, and the PrintFlow plates on it.
+* **Queue** — the whole line on this machine, in order, with what each job is
+  for and a way to take it out.
 * **Machine** — what it *is* rather than what it is doing: model, serial,
   firmware, address, nozzle size and type, Wi-Fi signal, prints completed, and
   every filament tray (see below).

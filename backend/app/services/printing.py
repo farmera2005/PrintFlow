@@ -464,6 +464,34 @@ async def cancel_job(session: AsyncSession, job: PrintJob) -> PrintJob:
     return job
 
 
+async def cancel_by_queue_id(session: AsyncSession, queue_id: int) -> PrintJob | None:
+    """Mark the plate behind a queue item cancelled, if it was one of ours.
+
+    For cancelling from the machine's own queue, where the operator is looking
+    at Bambuddy's line rather than at an order. Bambuddy has already been told;
+    this only brings PrintFlow's record into line, because a plate still marked
+    queued for a job that is no longer in any queue is a disagreement nobody
+    notices until dispatch tries to reconcile it.
+
+    Returns None for an item that never came from an order — a test piece, or
+    something sent from Bambuddy's own screen. That is not a failure.
+    """
+    job = (
+        await session.execute(
+            select(PrintJob).where(PrintJob.bambuddy_queue_id == queue_id)
+        )
+    ).scalars().first()
+    if job is None or job.status in (JOB_DONE, JOB_CANCELLED):
+        return job
+    job.status = JOB_CANCELLED
+    job.completed_at = datetime.now(timezone.utc)
+    await session.flush()
+    order_id = await _order_id_for_job(session, job)
+    if order_id is not None:
+        await recompute_order_by_id(session, order_id)
+    return job
+
+
 async def _order_id_for_job(session: AsyncSession, job: PrintJob):
     line = await session.get(OrderLine, job.order_line_id)
     return line.order_id if line else None

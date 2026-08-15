@@ -1402,12 +1402,42 @@ def build_library_tree(
 
 
 def parse_queue_item(row: dict[str, Any]) -> dict[str, Any]:
+    """One waiting job, as much of it as this build will say.
+
+    Thin for years, because the only questions asked of the queue were "did my
+    plate finish" and "which one failed". A queue drawn per machine is read by
+    somebody standing in front of that machine, and they want the other half:
+    what it is, when it was put there, and what it is waiting behind.
+    """
+    # Same trick as a printer row: a build that nests the detail keeps the
+    # useful half inside, and only a summary at the top level.
+    nested = row.get("archive") if isinstance(row.get("archive"), dict) else {}
+    task = row.get("file") if isinstance(row.get("file"), dict) else {}
+    look = {**row, **nested, **task}
     return {
         "id": _first(row, "id", "queue_id", "queueId", "job_id", "jobId"),
         "status": _first(row, "status", "state", "print_status", "job_status"),
         "archive_id": _first(row, "archive_id", "archiveId", "archive"),
         "printer_id": _first(row, "printer_id", "printerId"),
         "error": _first(row, "error", "error_message", "message", "failure_reason"),
+        # What it is, in the words somebody would recognise on a shelf.
+        "name": _first_scalar(
+            look, "name", "filename", "file_name", "print_name", "task_name",
+            "subtask_name", "archive_name", "title", "job_name", "display_name",
+        ),
+        "file_path": _first_scalar(look, "file_path", "path", "full_path"),
+        "plate_number": _rounded(
+            _first_scalar(look, "plate_number", "plate", "plate_idx", "plate_index")
+        ),
+        # Where it sits in the line, when the build keeps an explicit order.
+        # Most do not, and the order the rows arrive in is then the answer.
+        "position": _rounded(
+            _first_scalar(look, "position", "order", "sort_order", "queue_position", "index")
+        ),
+        "created_at": _first_scalar(
+            look, "created_at", "createdAt", "queued_at", "added_at", "submitted_at"
+        ),
+        "started_at": _first_scalar(look, "started_at", "startedAt", "start_time"),
     }
 
 

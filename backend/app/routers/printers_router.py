@@ -14,7 +14,7 @@ from ..integrations import base as base_api
 from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import PROVIDER_BAMBUDDY, User
-from ..services import audit, farm
+from ..services import audit, farm, printing
 from ..services.credentials import IntegrationNotConfigured
 
 router = APIRouter(prefix="/api/printers", tags=["printers"])
@@ -219,6 +219,51 @@ async def print_on(
     )
     await session.commit()
     return {"printer_id": printer_id, "queued": queued, "copies": len(queued)}
+
+
+@router.delete("/{printer_id}/queue/{queue_id}")
+async def cancel_queued(
+    printer_id: int,
+    queue_id: int,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Take one job out of a machine's queue.
+
+    Bambuddy's queue, not PrintFlow's list — so this cancels whatever is
+    sitting there, including something sent from Bambuddy's own screen. Where
+    the item *is* one of PrintFlow's plates, the plate is cancelled with it:
+    leaving a plate marked queued for a job that is no longer in any queue is
+    the kind of disagreement nobody ever notices until dispatch tries again.
+    """
+    try:
+        client = await bambuddy_api.client_for(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Cancelling a queued job"):
+            await bambuddy_api.with_healing(
+                session, client, ("queue",), lambda: client.cancel(queue_id)
+            )
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    plate = await printing.cancel_by_queue_id(session, queue_id)
+    await audit.record(
+        session,
+        entity_type="printer",
+        entity_id=None,
+        action="queue_cancel",
+        detail={
+            "printer_id": printer_id,
+            "queue_id": queue_id,
+            "print_job_id": str(plate.id) if plate else None,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return {"queue_id": queue_id, "print_job_cancelled": plate is not None}
 
 
 @router.get("/cameras")

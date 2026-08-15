@@ -350,6 +350,33 @@ export interface FilamentSpool {
   remaining: number | null
 }
 
+/** One job waiting on a machine, as Bambuddy has it.
+ *
+ *  This is the machine's own line, not PrintFlow's list: it holds plates
+ *  dispatched from orders and whatever anybody sent from Bambuddy's own screen
+ *  or from Print a file. `from_order` says which is which. */
+export interface QueuedJob {
+  id: number | string | null
+  status: string | null
+  name: string | null
+  file_path: string | null
+  plate_number: number | null
+  /** Where it sits in the line. The build's own number where it keeps one,
+   *  otherwise the order the rows arrived in — which is the order it will be
+   *  worked through either way. */
+  position: number
+  created_at: string | null
+  started_at: string | null
+  error: string | null
+  archive_id: number | null
+  printer_id: number | string | null
+  /** Set when PrintFlow recognises this as one of its own plates. */
+  order_number: string | null
+  product_name: string | null
+  print_job_id: string | null
+  from_order: boolean
+}
+
 /** One machine on the farm, with whatever this Bambuddy will say about it.
  *
  *  Every reading is optional — builds differ on what they report, and a null is
@@ -400,6 +427,9 @@ export interface FarmPrinter extends BambuddyPrinter {
   camera_url: string | null
   /** The plates PrintFlow sent to this machine and has not finished with. */
   plates: QueueJob[]
+  /** Everything lined up on this machine, in the order it will be printed —
+   *  including jobs PrintFlow did not put there. */
+  queue: QueuedJob[]
 }
 
 /** Why there are no pictures, according to the instance itself. */
@@ -451,6 +481,11 @@ export interface FarmOverview {
   live: boolean
   /** Why one machine could not be asked, where the rest could. */
   detail_error: string | null
+  /** Queued jobs on no machine in particular — Bambuddy sends these to
+   *  whichever comes free — or on one the farm no longer lists. */
+  queue_unassigned: QueuedJob[]
+  /** Why the queue could not be read, where the machines could. */
+  queue_error: string | null
 }
 
 /** One entry in Bambuddy's file manager, folder or file. */

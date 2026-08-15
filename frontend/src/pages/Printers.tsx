@@ -8,6 +8,7 @@ import type {
   FarmSummary,
   FilamentSpool,
   QueueJob,
+  QueuedJob,
 } from '../lib/types'
 import {
   Alert,
@@ -277,6 +278,39 @@ export default function Printers() {
               </Card>
             ) : null}
 
+            {/* Queued on no machine in particular. Bambuddy sends these to
+                whichever comes free, so they belong to the farm rather than to
+                any card — and a job nobody can see is a job nobody cancels. */}
+            {farm.queue_unassigned?.length ? (
+              <Card className="p-3">
+                <h2 className="text-sm font-semibold text-ink-800">
+                  Queued, machine not decided
+                </h2>
+                <p className="text-xs text-ink-500">
+                  Bambuddy will send these to whichever machine comes free.
+                </p>
+                <div className="mt-2 divide-y divide-ink-100">
+                  {farm.queue_unassigned.map((job, index) => (
+                    <QueueRow
+                      key={String(job.id ?? index)}
+                      job={job}
+                      place={index + 1}
+                      busy={false}
+                      onCancel={null}
+                    />
+                  ))}
+                </div>
+              </Card>
+            ) : null}
+
+            {farm.queue_error ? (
+              <Alert tone="warning">
+                The machines answered but their queue did not:{' '}
+                {farm.queue_error} The cards below are still what each printer
+                is doing; only what is lined up behind it is missing.
+              </Alert>
+            ) : null}
+
             <UnplacedPlates plates={farm.unplaced} renderPlate={plate} />
 
             {finished.length ? (
@@ -307,6 +341,61 @@ export default function Printers() {
           onPrinted={load}
         />
       ) : null}
+    </div>
+  )
+}
+
+/** One job in a machine's line.
+ *
+ *  Deliberately says where each row came from. A queue that shows only the
+ *  jobs PrintFlow dispatched would describe a machine as free while it works
+ *  through six of somebody's test pieces — and one that shows them all without
+ *  saying which is which looks like a list of orders that lost their numbers. */
+function QueueRow({
+  job,
+  place,
+  onCancel,
+  busy,
+}: {
+  job: QueuedJob
+  /** 1 for the one printing or next up. */
+  place: number
+  onCancel: (() => void) | null
+  busy: boolean
+}) {
+  const running = ['printing', 'running', 'active', 'started', 'in_progress'].includes(
+    String(job.status ?? '').toLowerCase(),
+  )
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 text-xs">
+      <span
+        className={cx(
+          'w-5 shrink-0 text-center font-mono',
+          running ? 'text-amber-800' : 'text-ink-400',
+        )}
+        title={running ? 'Printing now' : `Number ${place} in the queue`}
+      >
+        {running ? '▶' : place}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-ink-800" title={job.name ?? ''}>
+        {job.name ?? job.file_path ?? `job ${job.id ?? '—'}`}
+      </span>
+      {job.plate_number ? (
+        <span className="shrink-0 text-ink-500">plate {job.plate_number}</span>
+      ) : null}
+      {job.from_order ? (
+        <Badge className="bg-sky-100 text-sky-800 ring-sky-300">
+          #{job.order_number ?? '—'}
+        </Badge>
+      ) : (
+        <Badge className="bg-ink-100 text-ink-600 ring-ink-300">not an order</Badge>
+      )}
+      {onCancel ? (
+        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
+          {busy ? '…' : 'Cancel'}
+        </Button>
+      ) : null}
+      {job.error ? <p className="w-full text-red-700">{String(job.error)}</p> : null}
     </div>
   )
 }
@@ -395,6 +484,18 @@ function PrinterCard({
           {bed ? <span>bed {bed}</span> : null}
           {chamber ? <span>chamber {chamber}</span> : null}
           {printer.nozzle_diameter ? <span>{printer.nozzle_diameter}mm</span> : null}
+        </p>
+      ) : null}
+
+      {/* How much work is lined up here. The number is what decides whether
+          this machine is the one to send the next thing to, and it counts
+          everything on it rather than only the plates from orders. */}
+      {printer.queue?.length ? (
+        <p className="truncate text-xs text-ink-600">
+          <span className="font-medium">{printer.queue.length}</span> in the queue
+          {printer.queue[0]?.name ? (
+            <span className="text-ink-500"> · next {printer.queue[0].name}</span>
+          ) : null}
         </p>
       ) : null}
 
@@ -685,7 +786,9 @@ function PrinterDetail({
   onClose: () => void
   onPrinted: () => void | Promise<void>
 }) {
-  const [tab, setTab] = useState<'now' | 'machine' | 'everything'>('now')
+  const [tab, setTab] = useState<'now' | 'queue' | 'machine' | 'everything'>('now')
+  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [queueError, setQueueError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
   const [chosen, setChosen] = useState<FileChoice | null>(null)
   const [sent, setSent] = useState<string | null>(null)
@@ -744,6 +847,7 @@ function PrinterDetail({
         {(
           [
             ['now', 'Now'],
+            ['queue', `Queue (${printer.queue?.length ?? 0})`],
             ['machine', 'Machine'],
             ['everything', `Everything (${Object.keys(printer.reported ?? {}).length})`],
           ] as const
@@ -832,6 +936,65 @@ function PrinterDetail({
               </p>
             )}
           </div>
+        </div>
+      ) : null}
+
+      {tab === 'queue' ? (
+        <div className="space-y-3">
+          <p className="text-xs text-ink-500">
+            What this machine will work through, in the order it will do it.
+            This is Bambuddy's own queue, so it includes anything sent from
+            Bambuddy or from Print a file as well as the plates PrintFlow
+            dispatched from orders.
+          </p>
+          {queueError ? <Alert tone="error">{queueError}</Alert> : null}
+          {printer.queue?.length ? (
+            <div className="divide-y divide-ink-100">
+              {printer.queue.map((job, index) => (
+                <QueueRow
+                  key={String(job.id ?? index)}
+                  job={job}
+                  place={index + 1}
+                  busy={cancelling === String(job.id)}
+                  onCancel={
+                    job.id === null
+                      ? null
+                      : async () => {
+                          // Cancelling takes the job out of Bambuddy's queue,
+                          // and where it came from an order the plate goes
+                          // with it — a plate still marked queued for a job
+                          // that is in no queue is a disagreement nobody
+                          // notices until dispatch tries again.
+                          if (
+                            !window.confirm(
+                              `Take ${job.name ?? 'this job'} out of ${
+                                printer.name ?? 'this machine'
+                              }'s queue?`,
+                            )
+                          )
+                            return
+                          setCancelling(String(job.id))
+                          setQueueError(null)
+                          try {
+                            await api.del(
+                              `/api/printers/${printer.id}/queue/${job.id}`,
+                            )
+                            await onPrinted()
+                          } catch (err) {
+                            setQueueError(errorMessage(err))
+                          } finally {
+                            setCancelling(null)
+                          }
+                        }
+                  }
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-ink-400">
+              Nothing queued on this machine.
+            </p>
+          )}
         </div>
       ) : null}
 

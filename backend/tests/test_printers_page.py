@@ -1767,3 +1767,196 @@ class TestPrintingTwiceByAccident:
         assert again.status_code == 200
         assert again.json().get("already_done") is not True
         assert len(bambu.enqueued) == 1
+
+
+# --------------------------------------------------------------------------
+# The line in front of each machine
+# --------------------------------------------------------------------------
+
+
+class TestQueueItem:
+    def test_a_build_that_names_the_file(self):
+        found = bambuddy_api.parse_queue_item(
+            {
+                "id": 12, "printer_id": 3, "status": "queued",
+                "filename": "bin.gcode.3mf", "plate": 2,
+                "created_at": "2026-08-12T09:00:00Z",
+            }
+        )
+        assert (found["id"], found["printer_id"]) == (12, 3)
+        assert found["name"] == "bin.gcode.3mf"
+        assert found["plate_number"] == 2
+
+    def test_a_build_that_nests_the_detail(self):
+        # Same trick as a printer row: the useful half is inside, and only a
+        # summary at the top level.
+        found = bambuddy_api.parse_queue_item(
+            {"id": 1, "archive": {"name": "lid.3mf"}, "file": {"plate_number": 4}}
+        )
+        assert (found["name"], found["plate_number"]) == ("lid.3mf", 4)
+
+    def test_a_build_that_says_almost_nothing(self):
+        found = bambuddy_api.parse_queue_item({"id": 9})
+        assert found["name"] is None and found["plate_number"] is None
+        # Absent rather than invented: the row is still drawn, by its id.
+        assert found["position"] is None
+
+
+class TestQueuePerMachine:
+    def _plate(self, queue_id, number="1042", name="Storage bin"):
+        return {
+            "id": "plate-1", "bambuddy_queue_id": queue_id,
+            "order_number": number, "product_name": name,
+        }
+
+    def test_jobs_are_split_by_the_machine_they_are_on(self):
+        grouped = farm._queue_line(
+            [
+                {"id": 1, "printer_id": 3, "status": "queued", "name": "a"},
+                {"id": 2, "printer_id": 5, "status": "queued", "name": "b"},
+                {"id": 3, "printer_id": 3, "status": "queued", "name": "c"},
+            ],
+            [],
+        )
+        assert [job["name"] for job in grouped["3"]] == ["a", "c"]
+        assert [job["name"] for job in grouped["5"]] == ["b"]
+
+    def test_the_order_the_rows_arrived_in_is_the_order_it_prints(self):
+        # Most builds keep no explicit position, and the list order is the
+        # answer — it is what Bambuddy will work through.
+        grouped = farm._queue_line(
+            [
+                {"id": 1, "printer_id": 3, "status": "queued", "name": "first"},
+                {"id": 2, "printer_id": 3, "status": "queued", "name": "second"},
+            ],
+            [],
+        )
+        assert [job["name"] for job in grouped["3"]] == ["first", "second"]
+
+    def test_a_build_that_states_a_position_is_believed_over_the_list_order(self):
+        grouped = farm._queue_line(
+            [
+                {"id": 1, "printer_id": 3, "status": "queued", "name": "later", "position": 9},
+                {"id": 2, "printer_id": 3, "status": "queued", "name": "sooner", "position": 1},
+            ],
+            [],
+        )
+        assert [job["name"] for job in grouped["3"]] == ["sooner", "later"]
+
+    def test_a_plate_from_an_order_says_which_order(self):
+        grouped = farm._queue_line(
+            [{"id": 77, "printer_id": 3, "status": "queued", "name": "bin.3mf"}],
+            [self._plate(77)],
+        )
+        job = grouped["3"][0]
+        assert job["from_order"] is True
+        assert (job["order_number"], job["product_name"]) == ("1042", "Storage bin")
+
+    def test_and_a_job_nobody_ordered_says_that_instead(self):
+        # A test piece, or something sent from Bambuddy's own screen. Showing
+        # only PrintFlow's half would call a busy machine free.
+        grouped = farm._queue_line(
+            [{"id": 88, "printer_id": 3, "status": "queued", "name": "jig.3mf"}], []
+        )
+        job = grouped["3"][0]
+        assert job["from_order"] is False and job["order_number"] is None
+
+    def test_finished_jobs_are_not_in_the_line_any_more(self):
+        grouped = farm._queue_line(
+            [
+                {"id": 1, "printer_id": 3, "status": "done", "name": "old"},
+                {"id": 2, "printer_id": 3, "status": "cancelled", "name": "gone"},
+                {"id": 3, "printer_id": 3, "status": "queued", "name": "next"},
+            ],
+            [],
+        )
+        assert [job["name"] for job in grouped["3"]] == ["next"]
+
+    def test_the_one_printing_is_still_in_the_line(self):
+        # It is what everything behind it is waiting for.
+        grouped = farm._queue_line(
+            [{"id": 1, "printer_id": 3, "status": "printing", "name": "now"}], []
+        )
+        assert [job["name"] for job in grouped["3"]] == ["now"]
+
+    def test_a_job_with_no_machine_yet_is_kept_rather_than_dropped(self):
+        # Bambuddy sends these to whichever machine comes free. A job nobody
+        # can see is a job nobody cancels.
+        grouped = farm._queue_line(
+            [{"id": 1, "printer_id": None, "status": "queued", "name": "floating"}], []
+        )
+        assert [job["name"] for job in grouped[None]] == ["floating"]
+
+    def test_an_empty_queue_is_not_an_error(self):
+        assert farm._queue_line([], []) == {}
+
+
+class TestQueueOnThePage:
+    async def test_each_card_carries_its_own_queue(self, signed_in, db, bambu):
+        bambu.queue = [
+            {"id": 1, "printer_id": 1, "status": "queued", "name": "one.3mf"},
+            {"id": 2, "printer_id": 2, "status": "queued", "name": "two.3mf"},
+            {"id": 3, "printer_id": 1, "status": "queued", "name": "three.3mf"},
+        ]
+        body = (await signed_in.get("/api/printers")).json()
+        queues = {row["name"]: row["queue"] for row in body["printers"]}
+        assert [job["name"] for job in queues["P1"]] == ["one.3mf", "three.3mf"]
+        assert [job["name"] for job in queues["P2"]] == ["two.3mf"]
+
+    async def test_a_queue_that_cannot_be_read_does_not_take_the_cards_with_it(
+        self, signed_in, db, bambu, monkeypatch
+    ):
+        async def broken():
+            raise IntegrationError("bambuddy", "HTTP 500")
+
+        monkeypatch.setattr(bambu, "list_queue", broken)
+        body = (await signed_in.get("/api/printers")).json()
+        assert [row["name"] for row in body["printers"]] == ["P1", "P2"]
+        assert "500" in body["queue_error"]
+        assert all(row["queue"] == [] for row in body["printers"])
+
+    async def test_cancelling_takes_it_out_of_bambuddys_queue(
+        self, signed_in, db, bambu
+    ):
+        bambu.queue = [{"id": 42, "printer_id": 1, "status": "queued", "name": "x"}]
+        response = await signed_in.delete("/api/printers/1/queue/42")
+        assert response.status_code == 200
+        assert bambu.queue == []
+
+    async def test_cancelling_a_plate_cancels_the_plate_too(
+        self, db, signed_in, fake_qbo, bambu
+    ):
+        # A plate still marked queued for a job that is in no queue is a
+        # disagreement nobody notices until dispatch tries again.
+        catalog = await seed_catalog(db)
+        await _made_on(db, catalog["part_y"], ["H2C"])
+        await _order(db, "PART-Y", 1)
+        await printing.dispatch_pending(db)
+        await db.commit()
+        job = (await db.execute(PrintJob.__table__.select())).first()
+
+        response = await signed_in.delete(
+            f"/api/printers/1/queue/{job.bambuddy_queue_id}"
+        )
+        assert response.json()["print_job_cancelled"] is True
+        again = (await db.execute(PrintJob.__table__.select())).first()
+        assert again.status == "cancelled"
+
+    async def test_cancelling_something_that_was_never_ours_is_fine(
+        self, signed_in, db, bambu
+    ):
+        # Somebody's test piece, sent from Bambuddy's own screen.
+        bambu.queue = [{"id": 99, "printer_id": 1, "status": "queued", "name": "jig"}]
+        response = await signed_in.delete("/api/printers/1/queue/99")
+        assert response.status_code == 200
+        assert response.json()["print_job_cancelled"] is False
+
+    async def test_cancelling_is_written_down(self, signed_in, db, bambu):
+        await signed_in.delete("/api/printers/1/queue/7")
+        rows = (
+            await db.execute(
+                AuditLog.__table__.select().where(AuditLog.action == "queue_cancel")
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].detail["queue_id"] == 7

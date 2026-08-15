@@ -113,6 +113,78 @@ def _summary(printers: list[dict[str, Any]], plates: list[dict[str, Any]]) -> di
     }
 
 
+# Queue statuses that mean "still to happen". A finished item is history and
+# clutters the line somebody is trying to read.
+QUEUE_OPEN = ("", "pending", "waiting", "queued", "scheduled", "idle", "sent",
+              "printing", "running", "active", "started", "in_progress", "prepare")
+
+
+def _queue_line(
+    items: list[dict[str, Any]], plates: list[dict[str, Any]]
+) -> dict[str | None, list[dict[str, Any]]]:
+    """Bambuddy's queue, split by machine and told what each item is for.
+
+    The queue is the machine's own line, not PrintFlow's: it holds the plates
+    dispatched from orders *and* whatever anybody sent from Bambuddy's own
+    screen or from Print a file. Showing only the half PrintFlow put there
+    would describe a machine as free while it works through six jobs.
+
+    So every item is drawn, and the ones PrintFlow recognises are labelled with
+    the order they belong to. An item with no label is not a mystery — it is
+    somebody's test piece, and saying so is the useful part.
+    """
+    by_queue_id = {
+        str(plate["bambuddy_queue_id"]): plate
+        for plate in plates
+        if plate.get("bambuddy_queue_id") is not None
+    }
+
+    grouped: dict[str | None, list[dict[str, Any]]] = {}
+    for position, item in enumerate(items):
+        state = str(item.get("status") or "").strip().lower()
+        if state not in QUEUE_OPEN:
+            continue
+        plate = by_queue_id.get(str(item.get("id")))
+        grouped.setdefault(_key(item.get("printer_id")), []).append(
+            {
+                **item,
+                # Where the build stated an order, honour it; otherwise the
+                # order the rows arrived in is the only answer there is, and
+                # it is the order Bambuddy will work through them.
+                "position": item.get("position") if item.get("position") is not None
+                else position,
+                "order_number": plate["order_number"] if plate else None,
+                "product_name": plate["product_name"] if plate else None,
+                "print_job_id": plate["id"] if plate else None,
+                # Whether this is one of ours at all. The alternative to saying
+                # so is a queue where half the rows look like they lost their
+                # order, rather than never having had one.
+                "from_order": plate is not None,
+            }
+        )
+    for line in grouped.values():
+        line.sort(key=lambda row: row["position"])
+    return grouped
+
+
+async def read_queue(
+    session: AsyncSession, client: Any, plates: list[dict[str, Any]]
+) -> tuple[dict[str | None, list[dict[str, Any]]], str | None]:
+    """The farm's queue, grouped by machine. One call, not one per machine.
+
+    A queue that cannot be read is a message rather than an error: the cards
+    are still worth drawing, and a machine's temperature is not less true
+    because its queue endpoint moved.
+    """
+    try:
+        items = await bambuddy_api.with_healing(
+            session, client, ("queue",), client.list_queue
+        )
+    except IntegrationError as exc:
+        return {}, str(exc)
+    return _queue_line(items, plates), None
+
+
 async def overview(session: AsyncSession) -> dict[str, Any]:
     """Every machine with its plates, plus the plates that have no machine.
 
@@ -127,6 +199,8 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
     error: str | None = None
     detailed = False
     detail_error: str | None = None
+    queues: dict[str | None, list[dict[str, Any]]] = {}
+    queue_error: str | None = None
     try:
         client = await bambuddy_api.client_for(session)
         found = await bambuddy_api.read_farm(session, client)
@@ -134,6 +208,7 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
         detailed = found["detailed"]
         detail_error = found["detail_error"]
         remember_cameras(printers)
+        queues, queue_error = await read_queue(session, client, plates)
     except IntegrationNotConfigured as exc:
         error = str(exc)
     except IntegrationError as exc:
@@ -147,7 +222,14 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
 
     known = {_key(row.get("id")) for row in printers}
     cards = [
-        {**row, "plates": by_printer.get(_key(row.get("id")), [])} for row in printers
+        {
+            **row,
+            "plates": by_printer.get(_key(row.get("id")), []),
+            # What this machine will actually work through, in the order it
+            # will do it — Bambuddy's line, not PrintFlow's list.
+            "queue": queues.get(_key(row.get("id")), []),
+        }
+        for row in printers
     ]
 
     # Plates with no machine, and plates on a machine the farm did not list —
@@ -171,4 +253,9 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
         # which is a different problem from an idle shop.
         "live": detailed,
         "detail_error": detail_error,
+        # Queued jobs on a machine the farm did not list, or on none at all.
+        # Bambuddy dispatches an item with no printer_id to whichever machine
+        # comes free, so this is a real state rather than an error.
+        "queue_unassigned": queues.get(None, []),
+        "queue_error": queue_error,
     }
