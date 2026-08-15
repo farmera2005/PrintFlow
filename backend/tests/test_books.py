@@ -870,6 +870,34 @@ class TestInvoiceOrder:
         assert len(invoice["Line"]) == 1
         assert "Shipping" not in [row["Description"] for row in invoice["Line"]]
 
+    async def test_a_bundle_variation_bills_its_own_item(self, db, monkeypatch):
+        """One listing sold in two scales is two things in QuickBooks.
+
+        "Playset, HO and 1:64 Scale" is one bundle with a Scale variation, and
+        the two scales are not the same item on anybody's books. The variation's
+        item wins over the bundle's for exactly that reason.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        bundle = await _product(
+            db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id="900"
+        )
+        scale = ProductVariation(
+            product_id=bundle.id, label="1:64 Scale", qbo_item_id="501"
+        )
+        db.add(scale)
+        await db.flush()
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, bundle, quantity=1, transaction_id=1, variation_id=scale.id)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
+
     async def test_an_existing_customer_is_reused(self, db, monkeypatch):
         """A second order from a repeat buyer must not make a second customer."""
         await _qbo_connected(db)

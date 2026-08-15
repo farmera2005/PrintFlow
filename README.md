@@ -1199,6 +1199,14 @@ you want depends on how many products it is:
   inventory item, and the invoice relieves it; assembling **to order**, use a
   Service item, because the components already left stock when they were
   printed and an inventory item here would take the assembled thing out as well.
+* **Link a variation to its own item**, where one listing is really several
+  things. *Playset — HO and 1:64 Scale* is one bundle with a Scale variation,
+  and the two scales are not the same item on anybody's books. Each variation
+  under a product can name its own item, and it wins over the product's. That
+  applies to bundles too: variations used to be hidden on a bundle, because a
+  bundle's options change its BOM — which is what option rules are for — and a
+  variation's other jobs, picking a print file and carrying its own stock, are
+  things a bundle does not do. Naming the invoice line is a job it does.
 * **Set the fallback item** once, and every such line goes on it.
 
 The Products list marks a product **no QuickBooks item** when it is something

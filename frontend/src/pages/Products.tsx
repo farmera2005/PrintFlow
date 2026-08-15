@@ -535,11 +535,14 @@ function ProductEditor({
 
         {product ? <EtsyLinksEditor product={product} onSaved={onSaved} /> : null}
 
-        {product && fulfillment !== 'bundle' ? (
-          // A bundle's options change its BOM, which is what option rules are
-          // for; variations are about the thing itself.
-          <VariationsEditor product={product} onSaved={onSaved} />
-        ) : null}
+        {/* Bundles included. This used to be hidden for them, on the grounds
+            that a bundle's options change its BOM — which is what option rules
+            above are for — and a variation's other jobs, picking a print file
+            and carrying its own stock, are things a bundle does not do.
+            A variation has a third job now: naming the invoice line. That one
+            very much applies to a bundle. One listing sold in HO and 1:64 is
+            two things in QuickBooks, and there was no way to say so. */}
+        {product ? <VariationsEditor product={product} onSaved={onSaved} /> : null}
 
         {!product ? (
           <Alert tone="info">
@@ -1351,7 +1354,13 @@ function VariationsEditor({
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [picking, setPicking] = useState<ProductVariation | null>(null)
+  // Two pickers, not one. They used to share a variable because no product
+  // offered both: a printed variation picked a file, a stocked one picked an
+  // item. A printed variation can now want its own item as well — its colour
+  // is its own thing in QuickBooks — so which picker is open has to be two
+  // questions rather than one answered by the product's fulfillment.
+  const [pickingFile, setPickingFile] = useState<ProductVariation | null>(null)
+  const [pickingItem, setPickingItem] = useState<ProductVariation | null>(null)
 
   const sync = async () => {
     setBusy(true)
@@ -1551,14 +1560,18 @@ function VariationsEditor({
                     >
                       Give it its own components
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() => makeProduct(variation, product.fulfillment)}
-                    >
-                      …or its own {product.fulfillment} product
-                    </Button>
+                    {/* On a bundle the two would be the same button, since a
+                        bundle's own product is one with components. */}
+                    {product.fulfillment !== 'bundle' ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => makeProduct(variation, product.fulfillment)}
+                      >
+                        …or its own {product.fulfillment} product
+                      </Button>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -1596,7 +1609,7 @@ function VariationsEditor({
                         size="sm"
                         variant="ghost"
                         disabled={busy}
-                        onClick={() => setPicking(variation)}
+                        onClick={() => setPickingFile(variation)}
                       >
                         Change
                       </Button>
@@ -1611,7 +1624,7 @@ function VariationsEditor({
                   ) : (
                     <>
                       <span className="text-ink-500">the product's file</span>
-                      <Button size="sm" variant="ghost" onClick={() => setPicking(variation)}>
+                      <Button size="sm" variant="ghost" onClick={() => setPickingFile(variation)}>
                         Use a different one
                       </Button>
                     </>
@@ -1619,9 +1632,18 @@ function VariationsEditor({
                 </div>
               ) : null}
 
-              {product.fulfillment === 'stocked' && !variation.variant_product_id ? (
+              {/* Offered whatever the product is. It used to be stocked-only,
+                  because drawing stock down was the only thing a variation's
+                  item did. It is also what an invoice line names, and that
+                  applies to every kind of product: one listing sold in two
+                  scales is two things in QuickBooks, and a bundle had no way
+                  to say so. A variant that is its own product carries its item
+                  on that product instead. */}
+              {!variation.variant_product_id ? (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="text-ink-500">Stock:</span>
+                  <span className="text-ink-500">
+                    {product.fulfillment === 'bundle' ? 'Invoices as:' : 'QuickBooks:'}
+                  </span>
                   <span className="text-ink-700">
                     {variation.qbo_item_name ??
                       (variation.qbo_item_id
@@ -1640,8 +1662,14 @@ function VariationsEditor({
                       Use the product's item
                     </Button>
                   ) : (
-                    <Button size="sm" variant="ghost" onClick={() => setPicking(variation)}>
-                      Track separately
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setPickingItem(variation)}
+                    >
+                      {product.fulfillment === 'bundle'
+                        ? 'Invoice this one separately'
+                        : 'Track separately'}
                     </Button>
                   )}
                 </div>
@@ -1651,16 +1679,16 @@ function VariationsEditor({
         </ul>
       )}
 
-      {picking && product.fulfillment === 'printed' ? (
+      {pickingFile ? (
         <PrintFilePicker
           choice={{
-            printer_id: picking.bambuddy_printer_id,
-            printer_models: picking.printer_models ?? [],
+            printer_id: pickingFile.bambuddy_printer_id,
+            printer_models: pickingFile.printer_models ?? [],
           }}
-          onClose={() => setPicking(null)}
+          onClose={() => setPickingFile(null)}
           onPick={async (picked: FileChoice) => {
-            const variation = picking
-            setPicking(null)
+            const variation = pickingFile
+            setPickingFile(null)
             await save(variation, {
               bambuddy_archive_id: picked.archive_id,
               bambuddy_archive_name: picked.name,
@@ -1674,12 +1702,12 @@ function VariationsEditor({
         />
       ) : null}
 
-      {picking && product.fulfillment === 'stocked' ? (
+      {pickingItem ? (
         <QboItemPicker
-          onClose={() => setPicking(null)}
+          onClose={() => setPickingItem(null)}
           onPick={async (item) => {
-            const variation = picking
-            setPicking(null)
+            const variation = pickingItem
+            setPickingItem(null)
             await save(variation, { qbo_item_id: item.id, qbo_item_name: item.name })
           }}
         />
