@@ -898,6 +898,59 @@ class TestInvoiceOrder:
         invoice = [body for entity, body in posted if entity == "invoice"][0]
         assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
 
+    async def test_a_variation_wins_over_the_product_it_became(self, db, monkeypatch):
+        """A variation promoted to its own product can still name its own item.
+
+        The line's product is the variant product by then, so leaving the
+        variation blank bills against that. Setting one on the variation says
+        the shop bills this combination as something other than what it makes,
+        and the more specific of the two wins.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        master = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle")
+        variant = await _product(db, sku="KIT-64", name="Bin kit 1:64", qbo_id="501")
+        scale = ProductVariation(
+            product_id=master.id,
+            label="1:64 Scale",
+            variant_product_id=variant.id,
+            qbo_item_id="900",
+        )
+        db.add(scale)
+        await db.flush()
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        # Intake points the line at the variant product and keeps the variation.
+        await _line(db, order, variant, quantity=1, transaction_id=1, variation_id=scale.id)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "900"
+
+    async def test_a_blank_variation_falls_back_to_its_own_product(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        master = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle")
+        variant = await _product(db, sku="KIT-64", name="Bin kit 1:64", qbo_id="501")
+        scale = ProductVariation(
+            product_id=master.id, label="1:64 Scale", variant_product_id=variant.id
+        )
+        db.add(scale)
+        await db.flush()
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, variant, quantity=1, transaction_id=1, variation_id=scale.id)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
+
     async def test_an_existing_customer_is_reused(self, db, monkeypatch):
         """A second order from a repeat buyer must not make a second customer."""
         await _qbo_connected(db)

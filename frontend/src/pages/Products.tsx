@@ -1632,48 +1632,60 @@ function VariationsEditor({
                 </div>
               ) : null}
 
-              {/* Offered whatever the product is. It used to be stocked-only,
-                  because drawing stock down was the only thing a variation's
-                  item did. It is also what an invoice line names, and that
-                  applies to every kind of product: one listing sold in two
-                  scales is two things in QuickBooks, and a bundle had no way
-                  to say so. A variant that is its own product carries its item
-                  on that product instead. */}
-              {!variation.variant_product_id ? (
-                <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="text-ink-500">
-                    {product.fulfillment === 'bundle' ? 'Invoices as:' : 'QuickBooks:'}
-                  </span>
-                  <span className="text-ink-700">
-                    {variation.qbo_item_name ??
-                      (variation.qbo_item_id
-                        ? `item ${variation.qbo_item_id}`
-                        : "the product's QuickBooks item")}
-                  </span>
-                  {variation.qbo_item_id ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() =>
-                        save(variation, { qbo_item_id: null, qbo_item_name: null })
-                      }
-                    >
-                      Use the product's item
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setPickingItem(variation)}
-                    >
-                      {product.fulfillment === 'bundle'
-                        ? 'Invoice this one separately'
-                        : 'Track separately'}
-                    </Button>
-                  )}
-                </div>
-              ) : null}
+              {/* Every variation, with no exceptions left. It was stocked-only
+                  when drawing stock down was the only thing a variation's item
+                  did; it is also what an invoice line names, and that applies
+                  to every kind of product — one listing sold in two scales is
+                  two things in QuickBooks. The last exception was a variation
+                  promoted to its own product, on the grounds that the item
+                  belongs on that product. It can, and it still does when this
+                  is left alone — but "go and edit a different product" is a
+                  worse answer than a field that is already here, and a shop
+                  may well bill the combination as something other than what it
+                  makes. Where they differ, the more specific one wins. */}
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-ink-500">
+                  {product.fulfillment === 'bundle' ? 'Invoices as:' : 'QuickBooks:'}
+                </span>
+                <span className="text-ink-700">
+                  {variation.qbo_item_name ??
+                    (variation.qbo_item_id
+                      ? `item ${variation.qbo_item_id}`
+                      : variation.variant_product_qbo_item_name ??
+                        (variation.variant_product_qbo_item_id
+                          ? `item ${variation.variant_product_qbo_item_id}`
+                          : variation.variant_product_id
+                            ? 'nothing — its own product has no item either'
+                            : "the product's QuickBooks item"))}
+                </span>
+                {variation.variant_product_id && !variation.qbo_item_id ? (
+                  <span className="text-ink-500">from its own product</span>
+                ) : null}
+                {variation.qbo_item_id ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() =>
+                      save(variation, { qbo_item_id: null, qbo_item_name: null })
+                    }
+                  >
+                    {variation.variant_product_id
+                      ? "Use its own product's item"
+                      : "Use the product's item"}
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setPickingItem(variation)}
+                  >
+                    {product.fulfillment === 'bundle'
+                      ? 'Invoice this one separately'
+                      : 'Track separately'}
+                  </Button>
+                )}
+              </div>
             </li>
           ))}
         </ul>

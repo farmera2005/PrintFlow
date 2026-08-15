@@ -114,6 +114,19 @@ def _serialize(product: Product) -> dict[str, Any]:
                     if variation.variant_product
                     else None
                 ),
+                # What that product would be billed and drawn down against, so
+                # the screen can say what a variation with no item of its own
+                # actually falls back to rather than leaving it to be guessed.
+                "variant_product_qbo_item_id": (
+                    variation.variant_product.qbo_item_id
+                    if variation.variant_product
+                    else None
+                ),
+                "variant_product_qbo_item_name": (
+                    variation.variant_product.qbo_item_name
+                    if variation.variant_product
+                    else None
+                ),
                 "active": variation.active,
             }
             for variation in sorted(

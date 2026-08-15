@@ -1201,12 +1201,23 @@ you want depends on how many products it is:
   printed and an inventory item here would take the assembled thing out as well.
 * **Link a variation to its own item**, where one listing is really several
   things. *Playset — HO and 1:64 Scale* is one bundle with a Scale variation,
-  and the two scales are not the same item on anybody's books. Each variation
-  under a product can name its own item, and it wins over the product's. That
-  applies to bundles too: variations used to be hidden on a bundle, because a
-  bundle's options change its BOM — which is what option rules are for — and a
-  variation's other jobs, picking a print file and carrying its own stock, are
-  things a bundle does not do. Naming the invoice line is a job it does.
+  and the two scales are not the same item on anybody's books. **Every**
+  variation can name its own item, whatever the product is and whether or not
+  it has been given a product of its own, and the most specific answer wins:
+
+  > the variation's item → the item of the product the line resolved to →
+  > the fallback from Settings.
+
+  Two gates used to stand in the way of that, both resting on the same
+  assumption. Variations were hidden on a bundle, because a bundle's options
+  change its BOM — which is what option rules are for — and a variation's other
+  jobs, picking a print file and carrying its own stock, are things a bundle
+  does not do. And a variation promoted to its own product had no item field,
+  on the grounds that the item belongs on that product. It still can go there,
+  and a variation left blank uses it — the screen says so, naming it — but
+  "go and edit a different product" is a worse answer than a field already in
+  front of you, and a shop may well bill a combination as something other than
+  what it makes.
 * **Set the fallback item** once, and every such line goes on it.
 
 The Products list marks a product **no QuickBooks item** when it is something

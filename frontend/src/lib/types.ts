@@ -314,6 +314,10 @@ export interface ProductVariation {
   variant_product_id: string | null
   variant_product_name: string | null
   variant_product_fulfillment: Fulfillment | null
+  /** What that product is billed and drawn down against — what this variation
+   *  falls back to when it names no item of its own. */
+  variant_product_qbo_item_id: string | null
+  variant_product_qbo_item_name: string | null
   active: boolean
 }
 

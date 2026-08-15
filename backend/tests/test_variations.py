@@ -747,6 +747,11 @@ class TestVariantProductApi:
         assert response.status_code == 201, response.text
         body = response.json()
         assert body["variations"][0]["variant_product_name"] == "Storage bin — Bin Fan: Yes"
+        # What that product would be billed against, so the screen can say what
+        # a variation naming no item of its own actually falls back to rather
+        # than leaving somebody to open the other product and look.
+        assert "variant_product_qbo_item_id" in body["variations"][0]
+        assert body["variations"][0]["variant_product_qbo_item_id"] is None
 
         listing = (await signed_in.get("/api/products")).json()["products"]
         variant = next(p for p in listing if p["parent_id"] == str(master.id))
