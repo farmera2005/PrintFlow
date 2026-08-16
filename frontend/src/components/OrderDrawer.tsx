@@ -11,7 +11,13 @@ import {
   formatDateTime,
   formatMoney,
 } from '../lib/format'
-import type { Order, OrderLine, OrderStatus, Product } from '../lib/types'
+import type {
+  InvoiceNumbering,
+  Order,
+  OrderLine,
+  OrderStatus,
+  Product,
+} from '../lib/types'
 import LabelDialog from './LabelDialog'
 import { Alert, Badge, Button, Modal, Spinner, cx, inputClass } from './ui'
 
@@ -331,6 +337,10 @@ function LineRow({
         {line.qbo_stock_removed_at ? (
           <p className="mt-1 text-xs text-emerald-800">
             {line.qbo_stock_qty ?? line.quantity} out of QuickBooks stock ·{' '}
+            {/* Which of the two events booked it. They are undone by different
+                things, so a line that says only "out of stock" leaves somebody
+                guessing what putting it back would mean. */}
+            {line.qbo_stock_reason === 'assembled' ? 'consumed assembling' : 'printed'} ·{' '}
             {formatDateTime(line.qbo_stock_removed_at)}
           </p>
         ) : null}
@@ -1119,6 +1129,24 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
 function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // What number this invoice will get, asked before anybody presses the button.
+  // QuickBooks numbers its own documents unless the company has been set to
+  // number them itself, and the two look identical until an invoice lands
+  // without a reference — so it is worth saying which it will be.
+  const [numbering, setNumbering] = useState<InvoiceNumbering | null>(null)
+  useEffect(() => {
+    if (order.qbo_invoice_id) return
+    let dropped = false
+    api
+      .get<InvoiceNumbering>('/api/books/invoice-number')
+      .then((data) => !dropped && setNumbering(data))
+      .catch(() => undefined)
+    return () => {
+      dropped = true
+    }
+  }, [order.qbo_invoice_id])
+
+  const discount = Number(order.discount_total ?? 0) > 0 ? order.discount_total : null
 
   const run = async (path: string, confirmText?: string) => {
     if (confirmText && !window.confirm(confirmText)) return
@@ -1176,6 +1204,25 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
             carries stock the invoice relieves it, and the printed line's removal
             is taken back so nothing is deducted twice.
           </p>
+          {discount ? (
+            <p className="text-xs text-ink-600">
+              Etsy took {formatMoney(discount, order.currency)} off this order.
+              That goes on as a discount line, so the invoice totals what the
+              buyer actually paid.
+            </p>
+          ) : null}
+          {numbering ? (
+            <p className="text-xs text-ink-500">
+              {numbering.next ? (
+                <>
+                  This will be invoice{' '}
+                  <span className="font-mono text-ink-800">{numbering.next}</span>.
+                </>
+              ) : (
+                numbering.why
+              )}
+            </p>
+          ) : null}
           <Button size="sm" variant="primary" disabled={busy} onClick={() => run('')}>
             {busy ? 'Creating…' : 'Create invoice'}
           </Button>

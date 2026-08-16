@@ -69,6 +69,11 @@ DEFAULT_BOOKS: dict[str, Any] = {
     "income_item_name": None,
     "shipping_item_id": None,
     "shipping_item_name": None,
+    # Where an Etsy discount lands. Optional: left unset, QuickBooks puts it
+    # against the company's own default discount account, which is right for
+    # most shops and is one fewer thing to choose.
+    "discount_account_id": None,
+    "discount_account_name": None,
     # Whether finishing a print books the stock removal on its own. Off means
     # only a person pressing Mark printed moves anything, which is the older
     # rule that nothing but a person writes to the books.

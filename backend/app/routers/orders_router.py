@@ -452,7 +452,13 @@ async def assemble_bundle(
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Assembly check-off, one per bundle line (§5)."""
+    """Assembly check-off, one per bundle line (§5).
+
+    Ticking it also takes the bundle's components out of QuickBooks stock —
+    they are inside the assembled item now, and the ones pulled from the shelf
+    rather than printed had never been booked out by anything. Unticking puts
+    back exactly what the assembly took. See services/books.book_assembly.
+    """
     line = await _get_line(session, order_id, line_id)
     has_children = (
         await session.execute(
@@ -474,8 +480,15 @@ async def assemble_bundle(
         action="assembled" if body.assembled else "assembly_undone",
         actor=user.username,
     )
+    booked = (
+        await books.book_assembly(session, line, actor=user.username, order=order)
+        if body.assembled
+        else await books.unbook_assembly(session, line, actor=user.username)
+    )
     await session.commit()
-    return await board.load_order_detail(session, order_id)
+    detail = await board.load_order_detail(session, order_id)
+    detail["books"] = booked
+    return detail
 
 
 # --------------------------------------------------------------------------
@@ -531,6 +544,20 @@ async def restore_line_stock(
     detail = await board.load_order_detail(session, order_id)
     detail["books"] = [{"line_id": str(line_id), **result}]
     return detail
+
+
+@router.get("/books/invoice-number")
+async def invoice_number(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """What the next invoice will be numbered, and who does the numbering.
+
+    Read-only and asked before the button is pressed, because "what number will
+    this get" is a question with two different answers depending on a setting
+    inside the company file — and the wrong assumption is only discovered when
+    an invoice turns up unnumbered.
+    """
+    return await books.invoice_numbering(session)
 
 
 @router.post("/orders/{order_id}/invoice")

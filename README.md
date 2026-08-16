@@ -1286,10 +1286,76 @@ is going to make it.
 Net: one deduction per unit, whichever way an order goes. The hand-over is
 audited, so a deleted Purchase is never a mystery.
 
+**The discount Etsy took.** Etsy discounts the whole basket rather than any one
+item, and a QuickBooks discount line says the same thing — so that is what it
+becomes, last on the invoice, applying to the subtotal above it. An order Etsy
+sold at $5 off is billed at $5 off; billing the full price and pocketing the
+difference would overstate revenue by exactly the discount, on a document that
+ends up on a tax return. QuickBooks refuses a discount line outright when
+discounts are switched off in the company settings, so PrintFlow checks first
+and stops with the name of the switch rather than passing on an Intuit error
+code.
+
+**Which number it gets.** There are two arrangements and QuickBooks picks
+between them by a setting inside your company file, so PrintFlow asks rather
+than assumes:
+
+* **QuickBooks numbers it** — the default, and the one to want. It applies the
+  next reference in its own sequence as the document saves, so PrintFlow and
+  somebody typing an invoice by hand cannot land on the same number. Nothing is
+  sent; what it assigned is read back onto the order.
+* **You number your own** — *Custom transaction numbers* is on, and QuickBooks
+  assigns nothing at all. An invoice sent without a reference simply has none,
+  which is a gap nothing else would have caught. So PrintFlow reads the most
+  recent invoice and carries the sequence on: `1042` → `1043`, `INV-1042` →
+  `INV-1043`, `0099` → `0100`. Only the trailing digits move and the padding is
+  kept, because a sequence that changes shape halfway through is one somebody
+  has to explain. With no invoices to count from it sends nothing rather than
+  inventing a reference.
+
+Either way the Money tab says which it will be **before** you press the button,
+since the two are indistinguishable until an invoice turns up unnumbered.
+
 **Voiding.** An invoice can be voided from the Money tab, which leaves a
 zero-total document in QuickBooks — rather than deleting it and leaving a gap in
 the numbering that somebody has to explain — and frees the order to be invoiced
 again.
+
+### Stock out when a bundle is assembled
+
+Printing is not the only way a part gets used up. A component the shop already
+had is **pulled from stock** — a decision PrintFlow makes without writing
+anything down — so until the bundle was built, those units sat in QuickBooks as
+available long after they had been screwed into something.
+
+Assembly is the moment a pile of parts stops being parts, so ticking **Assembly
+Complete** books whatever printing did not: one Purchase per component, the same
+zero-total shape as a printed line's, described as *consumed assembling order
+1042* so it can be told apart in QuickBooks from a unit that was sold. A
+component already booked out by printing is skipped — one deduction per unit is
+the rule the whole of this section is arranged around — and the bundle itself is
+never booked, because it is a container and its components carry the items.
+
+Unticking it puts back **only what the assembly took**. A component booked out
+when it was *printed* keeps its removal, because unticking a box is not a
+statement about a print that really happened. That distinction is why each line
+records *why* its units went, not just that they did.
+
+Assembly is a shop-floor action, so it never fails over bookkeeping: a component
+with no QuickBooks item is simply not booked, and the tick still lands.
+
+### Auditing what left stock
+
+The Manufacturing tab lists **Stock out, from orders** underneath the made-items
+sheets. A sheet and a stock removal are both Purchases in the same books — one
+puts stock in, the other takes it out — and only the sheets had a screen, so
+reconciling a month against QuickBooks meant opening every order in turn to find
+the other half.
+
+Each row gives the order, the product, how many units, whether it was printing
+or assembly that consumed them, when, and the QuickBooks Purchase. Failures are
+listed with the rest rather than hidden: a removal that did not happen is the
+row an auditor most wants, and it appears nowhere else.
 
 ### What to configure
 
@@ -1307,6 +1373,10 @@ Under **Settings → QuickBooks → Orders in the books**:
   would send an invoice for the wrong total.
 * **Shipping.** Which item postage the buyer paid goes on, or **None** — no
   item, no line, for a shop that accounts for postage elsewhere.
+* **Discount account** (optional). Where a discount Etsy took lands. Income
+  accounts are offered, because a discount is revenue not earned rather than a
+  cost incurred. Left unset — the sensible default — QuickBooks uses the
+  company's own discount account.
 
 Nothing has a default. Which account and which item are right depends on your
 chart of accounts, and picking on your behalf would file real money somewhere

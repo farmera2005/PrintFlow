@@ -6,7 +6,7 @@ system was a manufacturing sheet raising stock. That left two things happening
 in the shop that QuickBooks never heard about — units going out of the door, and
 the money they went out for.
 
-## Two writes, and how they hand over
+## Three writes, and how they hand over
 
 **A printed line takes its own units out of stock.** One QuickBooks Purchase
 carrying two lines that cancel each other out:
@@ -20,6 +20,15 @@ carrying two lines that cancel each other out:
 The document totals zero, so the payment account it names is untouched. That
 matters: a Purchase with only the negative line would total *below* zero, which
 QuickBooks reads as money arriving in a bank account, and nothing arrived.
+
+**An assembled bundle consumes its components.** Printing is not the only way a
+part gets used up: a component the shop already had is pulled from stock, which
+is a decision made here and written down nowhere, so those units stayed
+available in QuickBooks after they had been built into something. Marking the
+bundle assembled books whatever printing did not — the same shape of document,
+described as consumed rather than sold — and skips what was already booked.
+Undoing the assembly puts back only what the assembly took, which is why the
+row records *why* its units went rather than only that they did.
 
 **An invoice records the sale, line by line, against the items actually sold.**
 Each line names its own QuickBooks item — the product's, or the variation's
@@ -95,6 +104,14 @@ class BooksError(RuntimeError):
 
 def _key(*parts: str) -> str:
     return str(uuid.uuid5(NAMESPACE, "|".join(parts)))
+
+
+# What took a line's units out of stock. Stored on the row rather than worked
+# out again, because the two are undone by different things: clearing an
+# assembly must put back only what the assembly consumed, and a component that
+# was printed had its units booked out long before anybody assembled anything.
+REASON_PRINTED = "printed"
+REASON_ASSEMBLED = "assembled"
 
 
 # --------------------------------------------------------------------------
@@ -215,6 +232,7 @@ def build_removal(
     books: dict[str, Any],
     order_number: str,
     when: datetime,
+    reason: str = REASON_PRINTED,
 ) -> dict[str, Any]:
     """The exact Purchase body for one line's stock removal.
 
@@ -224,7 +242,11 @@ def build_removal(
     quantity = int(line.quantity)
     value = money(unit_cost * quantity)
     name = line.product.name if line.product else "item"
-    label = f"Sold {quantity} × {name} on order {order_number}"
+    label = (
+        f"Consumed {quantity} × {name} assembling order {order_number}"
+        if reason == REASON_ASSEMBLED
+        else f"Sold {quantity} × {name} on order {order_number}"
+    )
 
     lines: list[dict[str, Any]] = [
         {
@@ -262,8 +284,14 @@ def build_removal(
         "PaymentType": str(settings.get("payment_type") or "Cash"),
         "TxnDate": when.date().isoformat(),
         "PrivateNote": (
-            f"PrintFlow — {label}. Stock removed when the line was printed; "
-            "the invoice for this order records the sale and does not move stock."
+            f"PrintFlow — {label}. "
+            + (
+                "Stock removed when the bundle was assembled; these units are "
+                "inside the assembled item and are not sold separately."
+                if reason == REASON_ASSEMBLED
+                else "Stock removed when the line was printed; the invoice for "
+                "this order records the sale and does not move stock."
+            )
         ),
         "Line": lines,
     }
@@ -292,7 +320,12 @@ async def _unit_cost(session: AsyncSession, item_id: str) -> Decimal:
 
 
 async def remove_stock(
-    session: AsyncSession, line: OrderLine, *, actor: str, order: Order | None = None
+    session: AsyncSession,
+    line: OrderLine,
+    *,
+    actor: str,
+    order: Order | None = None,
+    reason: str = REASON_PRINTED,
 ) -> dict[str, Any]:
     """Take this line's units out of QuickBooks stock. Once, ever.
 
@@ -349,6 +382,7 @@ async def remove_stock(
         books=books,
         order_number=order_number,
         when=now,
+        reason=reason,
     )
 
     try:
@@ -367,6 +401,7 @@ async def remove_stock(
     line.qbo_stock_sync_token = str(created.get("SyncToken") or "0")
     line.qbo_stock_qty = int(line.quantity)
     line.qbo_stock_removed_at = now
+    line.qbo_stock_reason = reason
     line.qbo_stock_error = None
     await session.flush()
 
@@ -380,6 +415,7 @@ async def remove_stock(
             "qbo_item_id": item_id,
             "quantity": int(line.quantity),
             "qbo_purchase_id": line.qbo_stock_purchase_id,
+            "why": reason,
         },
         actor=actor,
     )
@@ -387,6 +423,7 @@ async def remove_stock(
         "booked": True,
         "failed": False,
         "reason": None,
+        "why": reason,
         "quantity": int(line.quantity),
         "qbo_purchase_id": line.qbo_stock_purchase_id,
     }
@@ -418,6 +455,7 @@ async def restore_stock(
     line.qbo_stock_purchase_id = None
     line.qbo_stock_sync_token = None
     line.qbo_stock_qty = None
+    line.qbo_stock_reason = None
     line.qbo_stock_error = None
     await session.flush()
 
@@ -430,6 +468,130 @@ async def restore_stock(
         actor=actor,
     )
     return {"restored": True, "quantity": quantity}
+
+
+async def _components_of(session: AsyncSession, line: OrderLine) -> list[OrderLine]:
+    """The child lines of a bundle, ready to be booked against."""
+    return list(
+        (
+            await session.execute(
+                select(OrderLine)
+                .where(OrderLine.parent_line_id == line.id)
+                .options(
+                    selectinload(OrderLine.product),
+                    selectinload(OrderLine.variation),
+                )
+                .order_by(OrderLine.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def book_assembly(
+    session: AsyncSession, line: OrderLine, *, actor: str, order: Order | None = None
+) -> list[dict[str, Any]]:
+    """Take a bundle's components out of stock, now that they are inside it.
+
+    Assembly is the moment a pile of parts stops being parts. Until this, the
+    only thing that took a component out of QuickBooks was printing it — which
+    covers the ones the shop made for this order and misses every one it pulled
+    off the shelf, because pulling from stock is a decision PrintFlow makes
+    without writing anything down.
+
+    So this books whatever the printing did not. A component already booked is
+    skipped rather than booked again — one deduction per unit is the rule the
+    whole of this module is arranged around — and the reason is stored on the
+    row, so undoing the assembly puts back what the assembly took and leaves
+    what the print took alone.
+
+    The bundle itself is not booked. It is a container; its components carry
+    the QuickBooks items, and booking both would take the same goods out twice.
+    """
+    results: list[dict[str, Any]] = []
+    for component in await _components_of(session, line):
+        if component.qbo_stock_removed_at is not None:
+            continue
+        outcome = await remove_stock(
+            session, component, actor=actor, order=order, reason=REASON_ASSEMBLED
+        )
+        if outcome["booked"] or outcome["failed"]:
+            results.append({"line_id": str(component.id), **outcome})
+    return results
+
+
+async def unbook_assembly(
+    session: AsyncSession, line: OrderLine, *, actor: str
+) -> list[dict[str, Any]]:
+    """Put back what assembling this bundle took out — and nothing else.
+
+    Clearing an assembly check-off says the bundle was not built after all, so
+    its components are parts again. Only the removals assembly made are undone:
+    a component that was booked out when it was *printed* stays booked, because
+    unticking a box is not a statement about a print that really happened.
+    """
+    results: list[dict[str, Any]] = []
+    for component in await _components_of(session, line):
+        if component.qbo_stock_reason != REASON_ASSEMBLED:
+            continue
+        outcome = await restore_stock(session, component, actor=actor)
+        results.append({"line_id": str(component.id), **outcome})
+    return results
+
+
+async def stock_movements(
+    session: AsyncSession, *, limit: int = 200, include_failed: bool = True
+) -> list[dict[str, Any]]:
+    """Every unit this order pipeline has taken out of QuickBooks stock.
+
+    The made-items sheets on the Manufacturing tab are only half the story of
+    what PrintFlow does to inventory: they put stock *in*, and these take it
+    out. Both are Purchases in the same books and both need to be answerable
+    for, so they belong on the same screen — otherwise the only record of a
+    removal is one line buried in one order's drawer, and reconciling a month
+    means opening every order.
+
+    Failures are included on purpose. A removal that did not happen is the one
+    an auditor most wants to see, and it is invisible everywhere else.
+    """
+    query = (
+        select(OrderLine)
+        .join(Order, Order.id == OrderLine.order_id)
+        .options(selectinload(OrderLine.product), selectinload(OrderLine.order))
+        .order_by(OrderLine.qbo_stock_removed_at.desc().nullslast())
+        .limit(max(1, min(limit, 1000)))
+    )
+    if include_failed:
+        query = query.where(
+            OrderLine.qbo_stock_removed_at.is_not(None)
+            | OrderLine.qbo_stock_error.is_not(None)
+        )
+    else:
+        query = query.where(OrderLine.qbo_stock_removed_at.is_not(None))
+
+    rows = (await session.execute(query)).scalars().all()
+    out: list[dict[str, Any]] = []
+    for line in rows:
+        out.append(
+            {
+                "line_id": str(line.id),
+                "order_id": str(line.order_id),
+                "order_number": line.order.order_number if line.order else None,
+                "product": (line.product.name if line.product else None) or line.title,
+                "sku": line.product.sku if line.product else None,
+                "qbo_item_id": line_item_id(line),
+                # What was actually booked, which is not always what the line
+                # says now: a line edited after the fact keeps the quantity the
+                # Purchase carried, because that is what QuickBooks holds.
+                "quantity": line.qbo_stock_qty,
+                "removed_at": line.qbo_stock_removed_at,
+                "reason": line.qbo_stock_reason,
+                "qbo_purchase_id": line.qbo_stock_purchase_id,
+                "error": line.qbo_stock_error,
+            }
+        )
+    return out
 
 
 async def sync_order_stock(
@@ -581,6 +743,93 @@ def invoice_item_for(line: OrderLine, books: dict[str, Any]) -> str | None:
     )
 
 
+async def company_rules(client: qbo_api.QboClient) -> dict[str, Any]:
+    """The two company settings that decide what an invoice body may contain.
+
+    Both are per-company, neither can be guessed, and both are wanted at the
+    same moment — so they come from one read of Preferences rather than two.
+
+    A company that cannot be asked is not a company that fails to invoice: the
+    answers fall back to what QuickBooks does by default, which is to number
+    its own documents and to refuse a discount line.
+    """
+    try:
+        preferences = await client.preferences()
+    except IntegrationError as exc:
+        log.info("Could not read QuickBooks preferences: %s", exc)
+        return {"custom_numbers": False, "allows_discount": False, "known": False}
+    return {
+        "custom_numbers": qbo_api.custom_transaction_numbers(preferences),
+        "allows_discount": qbo_api.allows_discount(preferences),
+        "known": True,
+    }
+
+
+async def invoice_numbering(
+    session: AsyncSession, client: qbo_api.QboClient | None = None
+) -> dict[str, Any]:
+    """Who will number the next invoice, and what that number will be.
+
+    Two arrangements, and QuickBooks decides which by a setting in the company
+    file rather than PrintFlow choosing:
+
+    * **QuickBooks numbers it** — the default. It applies the next reference in
+      its own sequence as the document is saved, which is the arrangement to
+      want: one sequence, owned by the books, with no chance of PrintFlow and
+      somebody typing an invoice by hand landing on the same number.
+    * **The company numbers its own** — "Custom transaction numbers" is on, and
+      QuickBooks assigns nothing. An invoice sent without a reference simply has
+      none, so PrintFlow works the next one out from the most recent invoice.
+
+    Read-only, and used both to decide what to send and to show the number on
+    the screen before anybody presses the button.
+    """
+    try:
+        client = client or await qbo_api.client_for(session)
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        return {"numbered_by": "unknown", "next": None, "last": None, "why": str(exc)}
+
+    rules = await company_rules(client)
+    if not rules["custom_numbers"]:
+        return {
+            "numbered_by": "quickbooks",
+            "next": None,
+            "last": None,
+            "why": (
+                "QuickBooks numbers its own invoices, so this one takes the next "
+                "number in the company's sequence as it is saved."
+                if rules["known"]
+                else "PrintFlow could not read this company's settings, so "
+                "QuickBooks will be left to number the invoice."
+            ),
+        }
+
+    try:
+        last = await client.last_invoice_doc_number()
+    except IntegrationError as exc:
+        return {
+            "numbered_by": "printflow",
+            "next": None,
+            "last": None,
+            "why": f"Could not read the last invoice number: {exc}",
+        }
+    following = qbo_api.next_doc_number(last)
+    return {
+        "numbered_by": "printflow",
+        "next": following,
+        "last": last,
+        "why": (
+            f"This company numbers its own invoices. The last one was {last}, "
+            f"so this will be {following}."
+            if following
+            else "This company numbers its own invoices, and PrintFlow could "
+            "not work out the next number from the last one"
+            + (f" ({last})." if last else " — there are no invoices yet.")
+            + " QuickBooks will be asked to save it without a reference."
+        ),
+    }
+
+
 def build_invoice(
     order: Order,
     lines: list[tuple[OrderLine, int, Decimal]],
@@ -589,6 +838,8 @@ def build_invoice(
     books: dict[str, Any],
     shipping: Decimal | None,
     item_for: dict[Any, str],
+    discount: Decimal | None = None,
+    doc_number: str | None = None,
 ) -> dict[str, Any]:
     """The exact Invoice body sent to QuickBooks. Pure.
 
@@ -631,11 +882,36 @@ def build_invoice(
             }
         )
 
+    # What the buyer did not pay. Etsy takes a sale-wide discount off the whole
+    # basket rather than off any one item, and a discount line is how
+    # QuickBooks says the same thing: it applies to the subtotal above it,
+    # which is why it goes last. Billing the full price and quietly pocketing
+    # the difference would overstate revenue by exactly the discount.
+    if discount and discount > 0:
+        detail: dict[str, Any] = {"PercentBased": False}
+        # Where the shop has named an account for it. Left out, QuickBooks uses
+        # the company's own default discount account.
+        if books.get("discount_account_id"):
+            detail["DiscountAccountRef"] = {"value": str(books["discount_account_id"])}
+        body_lines.append(
+            {
+                "DetailType": "DiscountLineDetail",
+                "Amount": float(money(discount)),
+                "Description": "Etsy discount",
+                "DiscountLineDetail": detail,
+            }
+        )
+
     body: dict[str, Any] = {
         "CustomerRef": {"value": str(customer_id)},
         "Line": body_lines,
         "PrivateNote": f"PrintFlow — Etsy order {order.order_number}.",
     }
+    # Only where the company numbers its own documents. Left out otherwise, so
+    # QuickBooks applies the next reference in its own sequence — which is the
+    # arrangement to want, and the one nothing here should be second-guessing.
+    if doc_number:
+        body["DocNumber"] = str(doc_number)[:21]
     if order.placed_at:
         body["TxnDate"] = order.placed_at.date().isoformat()
     if order.currency:
@@ -758,6 +1034,24 @@ async def invoice_order(
         catalogue = await client.get_items(
             [str(item) for item in item_for.values() if item]
         )
+        # What this company's settings allow, which decides two things about
+        # the body: whether PrintFlow has to supply the reference, and whether
+        # the discount can be a discount line at all.
+        rules = await company_rules(client)
+        doc_number = None
+        if rules["custom_numbers"]:
+            doc_number = qbo_api.next_doc_number(await client.last_invoice_doc_number())
+        discount = money(order.discount_total or 0)
+        if discount > 0 and not rules["allows_discount"]:
+            # Sending it anyway makes QuickBooks refuse the whole invoice, and
+            # dropping it silently overstates the sale by the discount. Neither
+            # is acceptable, so this stops and says which switch to flick.
+            raise BooksError(
+                f"This order has a {discount} discount from Etsy, and discounts "
+                "are switched off in QuickBooks — it would refuse the invoice. "
+                "Turn on Sales → Discount under Account and settings in "
+                "QuickBooks, then invoice this order again."
+            )
         body = build_invoice(
             order,
             billable,
@@ -765,6 +1059,8 @@ async def invoice_order(
             books=books,
             shipping=order.shipping_total,
             item_for={key: str(value) for key, value in item_for.items() if value},
+            discount=discount,
+            doc_number=doc_number,
         )
         created = await client.create_invoice(
             body, request_id=_key("invoice", str(order.id))
@@ -812,6 +1108,10 @@ async def invoice_order(
             "customer_id": customer_id,
             "lines": len(body["Line"]),
             "total": str(order.qbo_invoice_total),
+            "discount": str(discount) if discount > 0 else None,
+            # Whether the reference on this invoice is one PrintFlow worked out
+            # or one QuickBooks applied. Worth knowing when a number is queried.
+            "numbered_by": "printflow" if doc_number else "quickbooks",
             # What the invoice took over from the printed lines. Worth logging:
             # it is the only record that a Purchase was deleted on purpose.
             "stock_handed_over": len([row for row in handed_over if row.get("restored")]),
@@ -822,6 +1122,8 @@ async def invoice_order(
         "qbo_invoice_id": order.qbo_invoice_id,
         "doc_number": order.qbo_invoice_doc_number,
         "total": str(order.qbo_invoice_total),
+        "discount": str(discount) if discount > 0 else None,
+        "numbered_by": "printflow" if doc_number else "quickbooks",
         "customer_id": customer_id,
         "stock_handed_over": handed_over,
     }

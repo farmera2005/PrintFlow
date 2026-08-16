@@ -90,6 +90,8 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             # answer rather than the operator having to go and look.
             "qbo_stock_removed_at": line.qbo_stock_removed_at,
             "qbo_stock_qty": line.qbo_stock_qty,
+            # What took them out — printed, or consumed assembling a bundle.
+            "qbo_stock_reason": line.qbo_stock_reason,
             "qbo_stock_error": line.qbo_stock_error,
             "is_bundle": bool(kids),
             "print_jobs": [_job(job) for job in sorted(line.print_jobs, key=lambda j: j.created_at)],

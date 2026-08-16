@@ -823,6 +823,10 @@ class OrderLine(Base):
     # fact. QuickBooks refuses a write without the token it last issued.
     qbo_stock_sync_token: Mapped[str | None] = mapped_column(Text)
     qbo_stock_qty: Mapped[int | None] = mapped_column(Integer)
+    # What took these units out: `printed`, or `assembled` for a component
+    # consumed into a bundle. Undoing an assembly must put back only what the
+    # assembly took, and the row is the only thing that can say which it was.
+    qbo_stock_reason: Mapped[str | None] = mapped_column(Text)
     # Why the last attempt failed. Kept on the line so the drawer can show it
     # and offer to try again, rather than the removal quietly not happening.
     qbo_stock_error: Mapped[str | None] = mapped_column(Text)

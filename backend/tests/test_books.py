@@ -207,12 +207,19 @@ INCOME_ITEM = {"Id": "900", "Name": "Etsy sales", "Type": "Service"}
 SHIPPING_ITEM = {"Id": "901", "Name": "Shipping income", "Type": "Service"}
 
 
+# QuickBooks' own defaults: it numbers its own sales documents, and a discount
+# line is refused until somebody turns discounts on in the company settings.
+PLAIN_COMPANY = {"SalesFormsPrefs": {"CustomTxnNumbers": False, "AllowDiscount": False}}
+
+
 def _stub(
     *,
     items=(STOCK_ITEM, INCOME_ITEM, SHIPPING_ITEM),
     customers=(),
     posted=None,
     responses=None,
+    preferences=None,
+    invoices=None,
 ):
     """A QuickBooks that answers queries and records what was written to it.
 
@@ -250,10 +257,22 @@ def _stub(
             if "from customer" in lowered:
                 rows = [c for c in customers if not ids or c.get("DisplayName") in ids]
                 return httpx.Response(200, json={"QueryResponse": {"Customer": rows}})
-            if "from invoice" in lowered:
+            if "from preferences" in lowered:
                 return httpx.Response(
-                    200, json={"QueryResponse": {"Invoice": [replies["invoice"]]}}
+                    200,
+                    json={
+                        "QueryResponse": {
+                            "Preferences": [preferences or PLAIN_COMPANY]
+                        }
+                    },
                 )
+            if "from invoice" in lowered:
+                rows = (
+                    list(invoices)
+                    if invoices is not None
+                    else [replies["invoice"]]
+                )
+                return httpx.Response(200, json={"QueryResponse": {"Invoice": rows}})
             rows = [i for i in items if not ids or i.get("Id") in ids]
             return httpx.Response(200, json={"QueryResponse": {"Item": rows}})
 
@@ -1187,6 +1206,496 @@ class TestInvoiceOrder:
         assert order.qbo_invoice_id is None
         await books.invoice_order(db, order, actor="adam")
         assert order.qbo_invoice_id == "301"
+
+
+# --------------------------------------------------------------------------
+# Assembly: parts stop being parts
+# --------------------------------------------------------------------------
+
+
+async def _bundle_with_parts(db, *, part_items=("500", "501")):
+    """A bundle line with a component line under it, matched to real products."""
+    bundle = await _product(db, sku="KIT", name="Bin kit", fulfillment="bundle", qbo_id=None)
+    order = await _order(db)
+    parent = await _line(db, order, bundle, quantity=1, transaction_id=1, qty_to_print=0)
+    parts = []
+    for index, item in enumerate(part_items):
+        product = await _product(db, sku=f"PART{index}", name=f"Part {index}", qbo_id=item)
+        parts.append(
+            await _line(
+                db,
+                order,
+                product,
+                quantity=2,
+                transaction_id=10 + index,
+                parent_line_id=parent.id,
+            )
+        )
+    return order, parent, parts
+
+
+class TestAssembly:
+    """Assembly is the moment a pile of parts stops being parts.
+
+    Until it, the only thing that took a component out of QuickBooks was
+    *printing* it — which covers what the shop made for this order and misses
+    every part it pulled off the shelf, because pulling from stock is a
+    decision PrintFlow makes without writing anything down. So those units sat
+    in QuickBooks as available after they had been built into something.
+    """
+
+    async def test_assembling_takes_the_components_out_of_stock(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        _, parent, parts = await _bundle_with_parts(db)
+
+        booked = await books.book_assembly(db, parent, actor="adam")
+
+        assert [row["booked"] for row in booked] == [True, True]
+        for part in parts:
+            await db.refresh(part)
+            assert part.qbo_stock_removed_at is not None
+            assert part.qbo_stock_reason == "assembled"
+        # Two components, two Purchases — one document per line, as elsewhere.
+        assert len([b for entity, b in posted if entity == "purchase"]) == 2
+
+    async def test_the_bundle_itself_is_not_booked(self, db, monkeypatch):
+        """It is a container. Its components carry the QuickBooks items."""
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        _, parent, _ = await _bundle_with_parts(db)
+
+        await books.book_assembly(db, parent, actor="adam")
+
+        await db.refresh(parent)
+        assert parent.qbo_stock_removed_at is None
+
+    async def test_a_part_already_booked_by_printing_is_not_booked_again(
+        self, db, monkeypatch
+    ):
+        """One deduction per unit is the rule the whole module is arranged around."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        _, parent, parts = await _bundle_with_parts(db)
+        printed = await books.remove_stock(db, parts[0], actor="adam")
+        assert printed["booked"] is True
+        posted.clear()
+
+        booked = await books.book_assembly(db, parent, actor="adam")
+
+        assert [row["line_id"] for row in booked] == [str(parts[1].id)]
+        assert len([b for entity, b in posted if entity == "purchase"]) == 1
+        await db.refresh(parts[0])
+        assert parts[0].qbo_stock_reason == "printed"
+
+    async def test_the_document_says_it_was_assembled_rather_than_sold(
+        self, db, monkeypatch
+    ):
+        """Somebody reading these in QuickBooks has to be able to tell them apart."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        _, parent, _ = await _bundle_with_parts(db, part_items=("500",))
+
+        await books.book_assembly(db, parent, actor="adam")
+
+        purchase = [b for entity, b in posted if entity == "purchase"][0]
+        assert "assembling order" in purchase["Line"][0]["Description"]
+        assert "assembled" in purchase["PrivateNote"]
+
+    async def test_undoing_it_puts_back_what_it_took(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        _, parent, parts = await _bundle_with_parts(db)
+        await books.book_assembly(db, parent, actor="adam")
+
+        undone = await books.unbook_assembly(db, parent, actor="adam")
+
+        assert [row["restored"] for row in undone] == [True, True]
+        for part in parts:
+            await db.refresh(part)
+            assert part.qbo_stock_removed_at is None
+            assert part.qbo_stock_reason is None
+
+    async def test_and_leaves_what_printing_took(self, db, monkeypatch):
+        """Unticking a box is not a statement about a print that really happened.
+
+        The distinction is the whole reason the row records *why* its units
+        went, rather than only that they did.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        _, parent, parts = await _bundle_with_parts(db)
+        await books.remove_stock(db, parts[0], actor="adam")  # printed
+        await books.book_assembly(db, parent, actor="adam")   # the other one
+
+        await books.unbook_assembly(db, parent, actor="adam")
+
+        await db.refresh(parts[0])
+        await db.refresh(parts[1])
+        assert parts[0].qbo_stock_removed_at is not None
+        assert parts[1].qbo_stock_removed_at is None
+
+    async def test_a_part_with_no_quickbooks_item_is_not_a_failed_assembly(
+        self, db, monkeypatch
+    ):
+        """Assembly is a shop-floor action. It must not fail over bookkeeping."""
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        order, parent, _ = await _bundle_with_parts(db)
+        loose = await _product(db, sku="LOOSE", name="Loose part", qbo_id=None)
+        await _line(db, order, loose, quantity=1, transaction_id=99,
+                    parent_line_id=parent.id)
+
+        booked = await books.book_assembly(db, parent, actor="adam")
+
+        # The two that could be booked were; the one that could not says
+        # nothing, because "no QuickBooks item" is not news on every recompute.
+        assert len([row for row in booked if row["booked"]]) == 2
+        assert not [row for row in booked if row["failed"]]
+
+    async def test_the_button_books_it(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        order, parent, parts = await _bundle_with_parts(db)
+        await db.commit()
+
+        response = await signed_in.post(
+            f"/api/orders/{order.id}/lines/{parent.id}/assemble",
+            json={"assembled": True},
+        )
+
+        assert response.status_code == 200
+        assert [row["booked"] for row in response.json()["books"]] == [True, True]
+        await db.refresh(parts[0])
+        assert parts[0].qbo_stock_reason == "assembled"
+
+    async def test_and_unticking_it_gives_them_back(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        order, parent, parts = await _bundle_with_parts(db)
+        await db.commit()
+        await signed_in.post(
+            f"/api/orders/{order.id}/lines/{parent.id}/assemble",
+            json={"assembled": True},
+        )
+
+        response = await signed_in.post(
+            f"/api/orders/{order.id}/lines/{parent.id}/assemble",
+            json={"assembled": False},
+        )
+
+        assert [row["restored"] for row in response.json()["books"]] == [True, True]
+        await db.refresh(parts[0])
+        assert parts[0].qbo_stock_removed_at is None
+
+
+class TestStockMovements:
+    """The other half of the Manufacturing tab.
+
+    A made-items sheet and a stock removal are both Purchases in the same
+    books. Only the sheets had a screen, so reconciling a month against
+    QuickBooks meant opening every order in turn to find the rest.
+    """
+
+    async def test_it_lists_what_went_out_and_why(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        _, parent, parts = await _bundle_with_parts(db)
+        await books.remove_stock(db, parts[0], actor="adam")
+        await books.book_assembly(db, parent, actor="adam")
+
+        rows = await books.stock_movements(db)
+
+        assert {row["reason"] for row in rows} == {"printed", "assembled"}
+        assert all(row["qbo_purchase_id"] for row in rows)
+        assert {row["quantity"] for row in rows} == {2}
+
+    async def test_a_removal_that_failed_is_listed_too(self, db, monkeypatch):
+        """The row an auditor most wants, and it appears nowhere else."""
+        await _qbo_connected(db)
+        await _configured(db)
+
+        def refuse(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return _stub()(request)
+            return httpx.Response(400, json={"Fault": {"Error": [{"Message": "no"}]}})
+
+        _patch_qbo(monkeypatch, refuse)
+        product = await _product(db)
+        order = await _order(db)
+        line = await _line(db, order, product)
+        outcome = await books.remove_stock(db, line, actor="adam")
+        assert outcome["failed"] is True
+
+        rows = await books.stock_movements(db)
+
+        assert len(rows) == 1
+        assert rows[0]["removed_at"] is None
+        assert rows[0]["error"]
+
+    async def test_the_manufacturing_tab_can_ask_for_them(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        _, _, parts = await _bundle_with_parts(db)
+        await books.remove_stock(db, parts[0], actor="adam")
+        await db.commit()
+
+        body = (await signed_in.get("/api/manufacturing/stock-movements")).json()
+
+        assert len(body["movements"]) == 1
+        assert body["movements"][0]["reason"] == "printed"
+
+    async def test_nothing_booked_is_an_empty_list_rather_than_an_error(self, db):
+        assert await books.stock_movements(db) == []
+
+
+# --------------------------------------------------------------------------
+# Which number the invoice gets
+# --------------------------------------------------------------------------
+
+
+NUMBERS_ITSELF = {"SalesFormsPrefs": {"CustomTxnNumbers": True, "AllowDiscount": False}}
+
+
+class TestTheNextNumber:
+    """One on from the last, keeping whatever shape the shop's references have.
+
+    A reference is a string and shops give them shapes. Sorting or incrementing
+    them as numbers loses the shape, and a sequence that changes shape halfway
+    through is one somebody has to explain.
+    """
+
+    def test_a_plain_sequence(self):
+        assert qbo_api.next_doc_number("1042") == "1043"
+
+    def test_a_prefix_is_kept(self):
+        assert qbo_api.next_doc_number("INV-1042") == "INV-1043"
+
+    def test_padding_is_kept_until_it_is_needed(self):
+        assert qbo_api.next_doc_number("0042") == "0043"
+        # And gives way rather than truncating when the width runs out.
+        assert qbo_api.next_doc_number("0099") == "0100"
+
+    def test_nothing_to_count_from_is_not_a_guess(self):
+        """An invented reference is worse than letting QuickBooks decide."""
+        assert qbo_api.next_doc_number(None) is None
+        assert qbo_api.next_doc_number("") is None
+        assert qbo_api.next_doc_number("DRAFT") is None
+
+    def test_too_long_for_quickbooks_is_no_answer(self):
+        assert qbo_api.next_doc_number("X" * 20 + "9") is None
+
+
+class TestInvoiceNumbering:
+    TRANSACTIONS = [
+        {"transaction_id": 1, "price": {"amount": 1800, "divisor": 100}, "quantity": 2}
+    ]
+
+    async def _invoice(self, db, monkeypatch, **stub):
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted, **stub))
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, product, quantity=2, transaction_id=1)
+        result = await books.invoice_order(db, order, actor="adam")
+        return result, [body for entity, body in posted if entity == "invoice"][0]
+
+    async def test_quickbooks_numbers_its_own_by_default(self, db, monkeypatch):
+        """The arrangement to want: one sequence, owned by the books.
+
+        Sending a reference here would let PrintFlow and somebody typing an
+        invoice by hand land on the same number.
+        """
+        result, invoice = await self._invoice(db, monkeypatch)
+
+        assert "DocNumber" not in invoice
+        assert result["numbered_by"] == "quickbooks"
+        # And what it assigned comes back onto the order.
+        assert result["doc_number"] == "1005"
+
+    async def test_a_company_that_numbers_its_own_gets_the_next_one(
+        self, db, monkeypatch
+    ):
+        """Custom transaction numbers on means QuickBooks assigns nothing.
+
+        An invoice sent without a reference simply has none, which is a gap in
+        somebody's books that nothing else would have noticed.
+        """
+        result, invoice = await self._invoice(
+            db,
+            monkeypatch,
+            preferences=NUMBERS_ITSELF,
+            invoices=[{"Id": "300", "DocNumber": "INV-1042"}],
+        )
+
+        assert invoice["DocNumber"] == "INV-1043"
+        assert result["numbered_by"] == "printflow"
+
+    async def test_a_company_with_no_invoices_yet_is_left_to_quickbooks(
+        self, db, monkeypatch
+    ):
+        _, invoice = await self._invoice(
+            db, monkeypatch, preferences=NUMBERS_ITSELF, invoices=[]
+        )
+        assert "DocNumber" not in invoice
+
+    async def test_it_can_be_asked_before_the_button_is_pressed(self, db, monkeypatch):
+        """"What number will this get" has two answers, and only one is visible."""
+        await _qbo_connected(db)
+        _patch_qbo(
+            monkeypatch,
+            _stub(
+                preferences=NUMBERS_ITSELF,
+                invoices=[{"Id": "300", "DocNumber": "1042"}],
+            ),
+        )
+
+        answer = await books.invoice_numbering(db)
+
+        assert (answer["numbered_by"], answer["last"], answer["next"]) == (
+            "printflow", "1042", "1043",
+        )
+
+    async def test_and_says_so_when_quickbooks_is_doing_the_numbering(
+        self, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        _patch_qbo(monkeypatch, _stub())
+
+        answer = await books.invoice_numbering(db)
+
+        assert answer["numbered_by"] == "quickbooks"
+        assert answer["next"] is None
+        assert "QuickBooks numbers its own" in answer["why"]
+
+    async def test_no_quickbooks_at_all_is_an_answer_rather_than_an_error(self, db):
+        """The panel asks this on every open. It must not throw."""
+        answer = await books.invoice_numbering(db)
+        assert answer["numbered_by"] == "unknown"
+
+
+# --------------------------------------------------------------------------
+# The discount Etsy took
+# --------------------------------------------------------------------------
+
+
+DISCOUNTS_ON = {"SalesFormsPrefs": {"CustomTxnNumbers": False, "AllowDiscount": True}}
+
+
+class TestTheDiscount:
+    """Etsy takes a discount off the basket, not off any one item.
+
+    Billing the full price and pocketing the difference overstates revenue by
+    exactly the discount, on a document that goes to a real tax return. So it
+    goes on as a discount line, which is how QuickBooks says the same thing.
+    """
+
+    TRANSACTIONS = [
+        {"transaction_id": 1, "price": {"amount": 1800, "divisor": 100}, "quantity": 2}
+    ]
+
+    async def _invoice(self, db, monkeypatch, *, discount, **stub):
+        await _qbo_connected(db)
+        await _configured(db, **stub.pop("books", {}))
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted, **stub))
+        product = await _product(db)
+        order = await _order(
+            db, transactions=self.TRANSACTIONS, discount_total=discount
+        )
+        await _line(db, order, product, quantity=2, transaction_id=1)
+        result = await books.invoice_order(db, order, actor="adam")
+        return result, [body for entity, body in posted if entity == "invoice"][0]
+
+    async def test_it_reaches_quickbooks_as_a_discount_line(self, db, monkeypatch):
+        result, invoice = await self._invoice(
+            db, monkeypatch, discount=Decimal("5.00"), preferences=DISCOUNTS_ON
+        )
+
+        line = invoice["Line"][-1]
+        assert line["DetailType"] == "DiscountLineDetail"
+        assert line["Amount"] == 5.0
+        assert line["DiscountLineDetail"]["PercentBased"] is False
+        assert result["discount"] == "5.00"
+
+    async def test_it_goes_last_so_it_applies_to_everything_above_it(
+        self, db, monkeypatch
+    ):
+        """QuickBooks applies a discount line to the subtotal before it."""
+        _, invoice = await self._invoice(
+            db, monkeypatch, discount=Decimal("5.00"), preferences=DISCOUNTS_ON
+        )
+        kinds = [line["DetailType"] for line in invoice["Line"]]
+        assert kinds.index("DiscountLineDetail") == len(kinds) - 1
+        assert "SalesItemLineDetail" in kinds
+
+    async def test_an_order_with_no_discount_gets_no_line(self, db, monkeypatch):
+        result, invoice = await self._invoice(
+            db, monkeypatch, discount=None, preferences=DISCOUNTS_ON
+        )
+        assert all(
+            line["DetailType"] != "DiscountLineDetail" for line in invoice["Line"]
+        )
+        assert result["discount"] is None
+
+    async def test_the_account_is_named_where_the_shop_chose_one(self, db, monkeypatch):
+        _, invoice = await self._invoice(
+            db,
+            monkeypatch,
+            discount=Decimal("5.00"),
+            preferences=DISCOUNTS_ON,
+            books={"discount_account_id": "88", "discount_account_name": "Discounts"},
+        )
+        assert invoice["Line"][-1]["DiscountLineDetail"]["DiscountAccountRef"] == {
+            "value": "88"
+        }
+
+    async def test_left_unset_quickbooks_uses_its_own(self, db, monkeypatch):
+        """One fewer thing to choose, and right for most shops."""
+        _, invoice = await self._invoice(
+            db, monkeypatch, discount=Decimal("5.00"), preferences=DISCOUNTS_ON
+        )
+        assert "DiscountAccountRef" not in invoice["Line"][-1]["DiscountLineDetail"]
+
+    async def test_discounts_switched_off_stops_and_says_which_switch(
+        self, db, monkeypatch
+    ):
+        """QuickBooks refuses the whole invoice, and dropping it would lie.
+
+        Neither is acceptable, so this stops before the write and names the
+        setting rather than surfacing an Intuit error code.
+        """
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))  # discounts off by default
+        product = await _product(db)
+        order = await _order(
+            db, transactions=self.TRANSACTIONS, discount_total=Decimal("5.00")
+        )
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        with pytest.raises(BooksError, match="discounts are switched off"):
+            await books.invoice_order(db, order, actor="adam")
+
+        assert not [body for entity, body in posted if entity == "invoice"]
+        assert order.qbo_invoice_id is None
 
 
 # --------------------------------------------------------------------------

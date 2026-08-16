@@ -17,6 +17,7 @@ setting under Settings says so.
 from __future__ import annotations
 
 import base64
+import re
 import time
 from decimal import Decimal
 from typing import Any
@@ -279,6 +280,35 @@ class QboClient:
         )
         return data.get("Invoice") or {}
 
+    async def preferences(self) -> dict[str, Any]:
+        """The company's own settings, as QuickBooks holds them.
+
+        Two of them decide what an invoice body may contain: whether the
+        company numbers its own transactions, and whether it allows a discount
+        line at all. Both are per-company and neither can be guessed.
+        """
+        result = await self.query("select * from Preferences")
+        rows = result.get("Preferences") or []
+        return rows[0] if rows else {}
+
+    async def last_invoice_doc_number(self) -> str | None:
+        """The reference on the most recently created invoice.
+
+        QuickBooks has no "next number" to ask for — the sequence lives inside
+        the company file and is only applied as a document is saved. The most
+        recent invoice is the nearest thing there is, so it is what the next
+        number is worked out from.
+
+        Ordered by creation time rather than by DocNumber, because DocNumber is
+        a string: sorted as text, "1009" comes after "999".
+        """
+        result = await self.query(
+            "select * from Invoice orderby MetaData.CreateTime desc maxresults 1"
+        )
+        rows = result.get("Invoice") or []
+        number = str((rows[0] if rows else {}).get("DocNumber") or "").strip()
+        return number or None
+
     async def get_invoice(self, invoice_id: str) -> dict[str, Any] | None:
         result = await self.query(
             f"select * from Invoice where Id = '{escape_literal(str(invoice_id))}'"
@@ -379,6 +409,57 @@ class QboClient:
         where = f" where {' and '.join(clauses)}" if clauses else ""
         result = await self.query(f"select * from Item{where} maxresults {limit}")
         return list(result.get("Item") or [])
+
+
+def custom_transaction_numbers(preferences: dict[str, Any]) -> bool:
+    """Does this company number its own sales documents?
+
+    Off — the default — and QuickBooks assigns the next reference itself as the
+    document is saved, which is the arrangement PrintFlow wants: one sequence,
+    owned by the books. On, and QuickBooks assigns nothing; a document sent
+    without a DocNumber simply has no reference. So the answer decides whether
+    PrintFlow has to work the number out.
+    """
+    sales = preferences.get("SalesFormsPrefs") or {}
+    return bool(sales.get("CustomTxnNumbers"))
+
+
+def allows_discount(preferences: dict[str, Any]) -> bool:
+    """Will this company accept a discount line on a sales form?
+
+    QuickBooks rejects the whole invoice when discounts are switched off in the
+    company's settings, so this is asked before one is added rather than
+    discovered from a failed write.
+    """
+    sales = preferences.get("SalesFormsPrefs") or {}
+    return bool(sales.get("AllowDiscount"))
+
+
+def next_doc_number(previous: str | None) -> str | None:
+    """One on from the last reference, keeping whatever shape it had.
+
+    References are strings and shops give them shapes: `1042`, `INV-1042`,
+    `0042` with the zeros meaning something to whoever reads the file. Only the
+    trailing digits move, the padding is kept, and anything in front is left
+    alone — so a company numbering `INV-1042` gets `INV-1043` rather than a bare
+    number that breaks its own sequence.
+
+    None when there is nothing to count from, or nothing countable in it: an
+    invented reference is worse than letting QuickBooks decide.
+    """
+    if not previous:
+        return None
+    digits = re.search(r"(\d+)(?!.*\d)", previous)
+    if digits is None:
+        return None
+    body = digits.group(1)
+    nextn = str(int(body) + 1)
+    # Keep the width when it was padded, unless carrying over needs the room.
+    if len(nextn) < len(body):
+        nextn = nextn.rjust(len(body), "0")
+    candidate = previous[: digits.start(1)] + nextn + previous[digits.end(1) :]
+    # QuickBooks caps DocNumber at 21 characters and refuses anything longer.
+    return candidate if len(candidate) <= 21 else None
 
 
 def item_purchase_cost(item: dict[str, Any]) -> Decimal | None:

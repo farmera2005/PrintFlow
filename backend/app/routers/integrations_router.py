@@ -747,6 +747,10 @@ ACCOUNT_ROLES = {
     "offset": OFFSET_ACCOUNT_TYPES,
     # Where the cost of a unit goes when a printed line takes it out of stock.
     "cogs": settings_store.COGS_ACCOUNT_TYPES,
+    # Where a discount Etsy took off an order lands. Income, because a discount
+    # is revenue not earned rather than a cost incurred — QuickBooks' own
+    # default discount account is an income account for the same reason.
+    "discount": ("Income", "Other Income"),
 }
 
 

@@ -29,7 +29,7 @@ from ..models import (
     Product,
     User,
 )
-from ..services import audit, manufacturing, settings_store
+from ..services import audit, books, manufacturing, settings_store
 from ..services.credentials import IntegrationNotConfigured
 from ..services.manufacturing import SheetError
 
@@ -163,6 +163,8 @@ class BooksSettingsRequest(BaseModel):
     income_item_name: str | None = None
     shipping_item_id: str | None = None
     shipping_item_name: str | None = None
+    discount_account_id: str | None = None
+    discount_account_name: str | None = None
     remove_stock_on_printed: bool | None = None
 
 
@@ -222,6 +224,7 @@ async def write_books_settings(
         detail={
             "cogs_account": saved.get("cogs_account_name"),
             "income_item": saved.get("income_item_name"),
+            "discount_account": saved.get("discount_account_name"),
             "remove_stock_on_printed": saved.get("remove_stock_on_printed"),
         },
         actor=user.username,
@@ -253,6 +256,21 @@ async def list_sheets(
         .all()
     )
     return {"sheets": [_serialize(sheet) for sheet in rows]}
+
+
+@router.get("/stock-movements")
+async def list_stock_movements(
+    limit: int = 200,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Stock this pipeline has taken *out*, to sit beside the sheets that put it in.
+
+    A made-items sheet and a stock removal are both Purchases in the same
+    books. Only one of them had a screen, which meant the other could only be
+    reconciled by opening every order in turn.
+    """
+    return {"movements": await books.stock_movements(session, limit=limit)}
 
 
 class SheetRequest(BaseModel):

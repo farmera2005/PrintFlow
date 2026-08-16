@@ -77,6 +77,9 @@ export interface OrderLine {
    *  track. */
   qbo_stock_removed_at: string | null
   qbo_stock_qty: number | null
+  /** What took them out: `printed`, or `assembled` for a component consumed
+   *  into a bundle. Undoing an assembly puts back only what it took. */
+  qbo_stock_reason: 'printed' | 'assembled' | null
   /** Why the last removal did not happen. A removal that quietly failed is the
    *  failure worth designing against, so the line carries its own answer. */
   qbo_stock_error: string | null
@@ -523,6 +526,38 @@ export interface CameraReport {
 }
 
 /** The farm in one line, for the top of the page. */
+/** Who will number the next invoice, and what that number will be.
+ *
+ *  QuickBooks numbers its own sales documents unless the company has been set
+ *  to number them itself, in which case it assigns nothing and PrintFlow works
+ *  the next one out from the most recent invoice. */
+export interface InvoiceNumbering {
+  numbered_by: 'quickbooks' | 'printflow' | 'unknown'
+  /** The reference this invoice will carry, when PrintFlow is the one setting
+   *  it. Null when QuickBooks will apply its own. */
+  next: string | null
+  last: string | null
+  /** A sentence for the screen, whichever of the cases applies. */
+  why: string
+}
+
+/** One unit that left QuickBooks stock because of an order. */
+export interface StockMovement {
+  line_id: string
+  order_id: string
+  order_number: string | null
+  product: string | null
+  sku: string | null
+  qbo_item_id: string | null
+  quantity: number | null
+  removed_at: string | null
+  reason: 'printed' | 'assembled' | null
+  qbo_purchase_id: string | null
+  /** Set when the removal was attempted and refused. Included deliberately:
+   *  a removal that did not happen is the one an auditor wants to see. */
+  error: string | null
+}
+
 export interface FarmSummary {
   machines: number
   by_state: Record<string, number>

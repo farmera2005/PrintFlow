@@ -610,6 +610,9 @@ interface BooksSettings {
   income_item_name: string | null
   shipping_item_id: string | null
   shipping_item_name: string | null
+  /** Optional. Unset means QuickBooks' own default discount account. */
+  discount_account_id: string | null
+  discount_account_name: string | null
   remove_stock_on_printed: boolean
 }
 
@@ -628,6 +631,7 @@ interface BooksSettings {
 function BooksPosting() {
   const [settings, setSettings] = useState<BooksSettings | null>(null)
   const [accounts, setAccounts] = useState<QboAccount[]>([])
+  const [discountAccounts, setDiscountAccounts] = useState<QboAccount[]>([])
   const [items, setItems] = useState<QboItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -642,6 +646,12 @@ function BooksPosting() {
       .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=cogs')
       .then((data) => setAccounts(data.accounts))
       .catch(() => setAccounts([]))
+    // A discount is revenue not earned, so the accounts offered are income
+    // ones. Optional: left unset, QuickBooks uses the company's own.
+    api
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=discount')
+      .then((data) => setDiscountAccounts(data.accounts))
+      .catch(() => setDiscountAccounts([]))
     // Only the items an invoice line may name. An inventory item here is the
     // one mistake that would double-count every sale, so it is not offered.
     api
@@ -759,6 +769,31 @@ function BooksPosting() {
           {items.map((item) => (
             <option key={item.id} value={String(item.id)}>
               {item.name} ({item.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Discount account"
+        hint="Where a discount Etsy took off an order lands. Etsy discounts the whole basket rather than any one item, so it goes on as a discount line and the invoice totals what the buyer actually paid. Leave this on the QuickBooks default unless your books want it somewhere particular."
+      >
+        <select
+          className={inputClass}
+          value={settings.discount_account_id ?? ''}
+          disabled={busy}
+          onChange={(e) => {
+            const account = discountAccounts.find((a) => a.id === e.target.value)
+            save({
+              discount_account_id: account?.id ?? null,
+              discount_account_name: account?.name ?? null,
+            })
+          }}
+        >
+          <option value="">QuickBooks' own discount account</option>
+          {discountAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name} ({account.type})
             </option>
           ))}
         </select>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import { formatDateTime } from '../lib/format'
+import type { StockMovement } from '../lib/types'
 import {
   Alert,
   Badge,
@@ -212,6 +213,8 @@ export default function Manufacturing() {
         </Card>
       )}
 
+      <StockMovements />
+
       {selected ? (
         <SheetEditor
           sheet={selected}
@@ -221,6 +224,101 @@ export default function Manufacturing() {
         />
       ) : null}
     </div>
+  )
+}
+
+/** Stock this pipeline took *out*, beside the sheets that put it in.
+ *
+ *  A made-items sheet and a stock removal are both Purchases in the same books.
+ *  Only the sheets had a screen, which meant reconciling a month against
+ *  QuickBooks meant opening every order in turn to find the other half.
+ *
+ *  Failures are listed with the rest rather than hidden. A removal that did not
+ *  happen is the row an auditor most wants, and it appears nowhere else. */
+function StockMovements() {
+  const [rows, setRows] = useState<StockMovement[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    api
+      .get<{ movements: StockMovement[] }>('/api/manufacturing/stock-movements')
+      .then((data) => setRows(data.movements))
+      .catch((err) => setError(errorMessage(err)))
+  }, [])
+
+  if (error) return <Alert tone="error">{error}</Alert>
+  if (rows === null || rows.length === 0) return null
+
+  const failed = rows.filter((row) => row.error && !row.removed_at).length
+  const shown = open ? rows : rows.slice(0, 8)
+
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h2 className="text-sm font-semibold text-ink-900">Stock out, from orders</h2>
+        <p className="text-xs text-ink-600">
+          Units these orders took out of QuickBooks — one expense each, the
+          mirror of a sheet posting stock in.
+        </p>
+        {failed ? (
+          <Badge className="bg-red-100 text-red-800">
+            {failed} did not go through
+          </Badge>
+        ) : null}
+      </div>
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs uppercase tracking-wide text-ink-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Order</th>
+                <th className="px-3 py-2 font-medium">Product</th>
+                <th className="px-3 py-2 text-right font-medium">Qty</th>
+                <th className="px-3 py-2 font-medium">Why</th>
+                <th className="px-3 py-2 font-medium">When</th>
+                <th className="px-3 py-2 font-medium">QuickBooks</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((row) => (
+                <tr key={row.line_id} className="border-t border-ink-100 align-top">
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {row.order_number ?? '—'}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className="text-ink-800">{row.product ?? 'Unmatched line'}</span>
+                    {row.sku ? (
+                      <span className="ml-1 font-mono text-xs text-ink-500">{row.sku}</span>
+                    ) : null}
+                    {row.error ? (
+                      <span className="block text-xs text-red-700">{row.error}</span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {row.quantity === null ? '—' : `−${row.quantity}`}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-ink-600">
+                    {row.reason === 'assembled' ? 'Assembled' : row.reason ? 'Printed' : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-ink-600">
+                    {row.removed_at ? formatDateTime(row.removed_at) : 'Not booked'}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-ink-600">
+                    {row.qbo_purchase_id ?? '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      {rows.length > shown.length || open ? (
+        <Button size="sm" variant="ghost" onClick={() => setOpen((was) => !was)}>
+          {open ? 'Show fewer' : `Show all ${rows.length}`}
+        </Button>
+      ) : null}
+    </section>
   )
 }
 
