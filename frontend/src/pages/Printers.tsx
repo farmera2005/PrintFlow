@@ -539,7 +539,14 @@ function PrinterCard({
         <p className="text-xs text-red-700">{String(printer.error)}</p>
       ) : null}
 
-      <PrinterControls printer={printer} onDone={onControl} />
+      {/* Against the right edge, reading as a toolbar rather than as another
+          line of the card's content. */}
+      <PrinterControls
+        printer={printer}
+        onDone={onControl}
+        compact
+        className="justify-end"
+      />
 
       <div className="mt-auto border-t border-ink-200 pt-2">
         {printer.plates.length ? (
@@ -552,6 +559,42 @@ function PrinterCard({
   )
 }
 
+function ControlGlyph({ action }: { action: string }) {
+  const paths: Record<string, JSX.Element> = {
+    pause: <path d="M9 5v14M15 5v14" />,
+    resume: <path d="M7 4.5 19 12 7 19.5Z" />,
+    stop: <rect x="6" y="6" width="12" height="12" rx="1.5" />,
+  }
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill={action === 'stop' || action === 'resume' ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+    >
+      {paths[action] ?? <circle cx="12" cy="12" r="7" />}
+    </svg>
+  )
+}
+
+/** Pause and Resume are one slot, because they are never both available.
+ *
+ *  Two buttons of which one is permanently dead is a button's worth of card
+ *  spent saying nothing. The slot shows whichever applies, and falls back to
+ *  Pause when neither does, so the position never moves — the point of not
+ *  hiding a control that does not apply is that Stop must not slide under the
+ *  cursor between the glance and the click.
+ */
+function runSlot(controls: PrinterControl[]): PrinterControl | null {
+  const pause = controls.find((c) => c.action === 'pause')
+  const resume = controls.find((c) => c.action === 'resume')
+  return [pause, resume].find((c) => c?.enabled) ?? pause ?? resume ?? null
+}
+
 /** Pause, Resume, Stop — and whatever else this Bambuddy turned out to offer.
  *
  *  Which buttons exist is the instance's answer, read off its own API document,
@@ -559,23 +602,33 @@ function PrinterCard({
  *  does nothing. Which are pressable is what the machine is doing: Resume on a
  *  printing machine is a question with no answer.
  *
- *  The ones that do not apply stay put, greyed, with the reason on them. The
- *  alternative — showing only what applies — is a row that rearranges itself
- *  between the glance and the click, on a page that refreshes every fifteen
- *  seconds, next to a button that ends a print.
+ *  What does not apply stays put, greyed, with the reason on it. Showing only
+ *  what applies would rearrange the row between the glance and the click, on a
+ *  page that refreshes every fifteen seconds, next to a button that ends a
+ *  print.
+ *
+ *  Two shapes, because the two places are different questions. On a card it is
+ *  a glance across ten machines, so it is three small glyphs and a ⋯ for the
+ *  rest — words there would be fifty labels competing with the readings that
+ *  are the reason to look. On the machine's own page there is one machine and
+ *  room to read, so everything is spelled out.
  */
 function PrinterControls({
   printer,
   onDone,
+  compact,
   className,
 }: {
   printer: FarmPrinter
   onDone: () => Promise<void> | void
+  /** The card. Glyphs and an overflow, rather than a row of labels. */
+  compact?: boolean
   className?: string
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [asking, setAsking] = useState<PrinterControl | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
   // What the last press actually did, since most of these change nothing on
   // screen for a second or two and a button that looks inert gets pressed again.
   // It goes again shortly after: the card is left up for hours, and "Pause sent"
@@ -586,11 +639,20 @@ function PrinterControls({
     const timer = setTimeout(() => setSaid(null), 6000)
     return () => clearTimeout(timer)
   }, [said])
+  // Anywhere else on the page closes the overflow. A menu that only closes by
+  // pressing the button that opened it is a menu left open across the farm.
+  useEffect(() => {
+    if (!open) return
+    const shut = () => setOpen(false)
+    window.addEventListener('click', shut)
+    return () => window.removeEventListener('click', shut)
+  }, [open])
 
   if (!printer.controls?.length || printer.id === null) return null
 
   const send = async (control: PrinterControl) => {
     setAsking(null)
+    setOpen(false)
     setBusy(control.action)
     setFailed(null)
     setSaid(null)
@@ -604,48 +666,144 @@ function PrinterControls({
       setBusy(null)
     }
   }
+  const press = (control: PrinterControl) =>
+    control.confirm ? setAsking(control) : send(control)
+
+  const here = (rows: (PrinterControl | null | undefined)[]) =>
+    rows.filter((row): row is PrinterControl => !!row)
+  // The two headline slots. A build offering neither simply has neither.
+  const headline = here([runSlot(printer.controls), printer.controls.find((c) => c.action === 'stop')])
+  // Everything that is not one of the three headline controls. On the card it
+  // goes behind ⋯; on the machine's own page it is simply the rest of the row.
+  const rest = printer.controls.filter((c) => c.group !== 'primary')
+  const confirmation = (
+    <Modal open={asking !== null} title={asking?.label ?? ''} onClose={() => setAsking(null)}>
+      <p className="text-sm text-ink-700">{asking?.confirm}</p>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={() => setAsking(null)}>
+          Leave it
+        </Button>
+        <Button
+          variant={asking?.danger ? 'danger' : 'primary'}
+          onClick={() => asking && send(asking)}
+        >
+          {asking?.label}
+        </Button>
+      </div>
+    </Modal>
+  )
+
+  if (!compact) {
+    return (
+      <div className={cx('flex flex-col gap-1.5', className)}>
+        <div className="flex flex-wrap gap-1.5">
+          {[...headline, ...rest].map((control) => (
+            <Button
+              key={control.action}
+              size="sm"
+              // Red only while it can actually be pressed. A pink Stop on an
+              // idle machine pulls the eye towards the one thing it cannot do.
+              variant={control.danger && control.enabled ? 'danger' : 'secondary'}
+              disabled={!control.enabled || busy !== null}
+              title={control.why ?? `${control.label} this machine`}
+              onClick={() => press(control)}
+            >
+              {busy === control.action ? <Spinner /> : null}
+              {control.label}
+            </Button>
+          ))}
+        </div>
+        {failed ? <p className="text-xs text-red-700">{failed}</p> : null}
+        {said && !failed ? <p className="text-xs text-ink-500">{said}</p> : null}
+        {confirmation}
+      </div>
+    )
+  }
+
+  // The card: a single segmented control, small enough to sit on the same line
+  // as whatever else the card has to say.
+  // The ends are rounded on the segments themselves rather than by clipping the
+  // group: `overflow-hidden` here would also crop the overflow menu, which is
+  // positioned inside it.
+  const segment =
+    'inline-flex h-7 w-8 items-center justify-center text-ink-600 transition ' +
+    'first:rounded-l-md last:rounded-r-md hover:bg-ink-100 ' +
+    'disabled:cursor-not-allowed disabled:text-ink-300 ' +
+    'disabled:hover:bg-transparent focus:outline-none focus-visible:ring-2 ' +
+    'focus-visible:ring-inset focus-visible:ring-ink-500'
 
   return (
-    <div className={cx('flex flex-col gap-1', className)}>
-      <div className="flex flex-wrap gap-1">
-        {printer.controls.map((control) => (
-          <Button
+    <div className={cx('flex flex-wrap items-center gap-x-2 gap-y-1', className)}>
+      <div className="inline-flex divide-x divide-ink-200 rounded-md ring-1 ring-ink-200">
+        {headline.map((control) => (
+          <button
             key={control.action}
-            size="sm"
-            // Red only while it can actually be pressed. A farm of ten idle
-            // machines is otherwise ten pink Stop buttons pulling the eye
-            // towards the one thing none of them can do.
-            variant={control.danger && control.enabled ? 'danger' : 'secondary'}
+            type="button"
+            className={cx(
+              segment,
+              control.danger && control.enabled && 'text-red-600 hover:bg-red-50',
+            )}
             disabled={!control.enabled || busy !== null}
             title={control.why ?? `${control.label} this machine`}
-            onClick={() => (control.confirm ? setAsking(control) : send(control))}
+            aria-label={control.label}
+            onClick={() => press(control)}
           >
-            {busy === control.action ? <Spinner /> : null}
-            {control.label}
-          </Button>
+            {busy === control.action ? (
+              <Spinner className="h-3.5 w-3.5" />
+            ) : (
+              <ControlGlyph action={control.action} />
+            )}
+          </button>
         ))}
+        {rest.length ? (
+          <div className="relative">
+            <button
+              type="button"
+              className={cx(segment, 'rounded-r-md', open && 'bg-ink-100')}
+              disabled={busy !== null}
+              title="More controls"
+              aria-label="More controls"
+              aria-expanded={open}
+              onClick={(event) => {
+                // The window listener above would shut it again on the way out.
+                event.stopPropagation()
+                setOpen((was) => !was)
+              }}
+            >
+              <span className="text-sm leading-none tracking-tight">···</span>
+            </button>
+            {open ? (
+              <div
+                className="absolute right-0 z-20 mt-1 min-w-40 overflow-hidden rounded-md bg-white py-1 shadow-lg ring-1 ring-ink-200"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {rest.map((control) => (
+                  <button
+                    key={control.action}
+                    type="button"
+                    className={cx(
+                      'block w-full px-3 py-1.5 text-left text-xs text-ink-700',
+                      'hover:bg-ink-50 disabled:cursor-not-allowed disabled:text-ink-400',
+                      'disabled:hover:bg-transparent',
+                    )}
+                    disabled={!control.enabled}
+                    title={control.why ?? undefined}
+                    onClick={() => press(control)}
+                  >
+                    {control.label}
+                    {control.why ? (
+                      <span className="block text-[11px] text-ink-400">{control.why}</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
-      {failed ? <p className="text-xs text-red-700">{failed}</p> : null}
-      {said && !failed ? <p className="text-xs text-ink-500">{said}</p> : null}
-
-      <Modal
-        open={asking !== null}
-        title={asking?.label ?? ''}
-        onClose={() => setAsking(null)}
-      >
-        <p className="text-sm text-ink-700">{asking?.confirm}</p>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setAsking(null)}>
-            Leave it
-          </Button>
-          <Button
-            variant={asking?.danger ? 'danger' : 'primary'}
-            onClick={() => asking && send(asking)}
-          >
-            {asking?.label}
-          </Button>
-        </div>
-      </Modal>
+      {failed ? <span className="text-xs text-red-700">{failed}</span> : null}
+      {said && !failed ? <span className="text-xs text-ink-500">{said}</span> : null}
+      {confirmation}
     </div>
   )
 }

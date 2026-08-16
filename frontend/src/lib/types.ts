@@ -487,6 +487,10 @@ export interface PrinterControl {
   /** What to send back: POST /api/printers/{id}/control/{action}. */
   action: string
   label: string
+  /** `primary` acts on the print in front of you and earns a place on the
+   *  card; `more` lives behind one button, so ten machines are not fifty
+   *  buttons. Anything PrintFlow does not recognise is `more`. */
+  group: 'primary' | 'more'
   enabled: boolean
   /** Why not, when it is not. Null when it is. */
   why: string | null

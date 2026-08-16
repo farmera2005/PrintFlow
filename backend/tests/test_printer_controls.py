@@ -216,6 +216,27 @@ class TestWhenItApplies:
         assert controls.for_state({}, "printing") == []
 
 
+class TestHowProminent:
+    """Ten machines showing five controls each is fifty buttons.
+
+    Which is why the card gets only the three that act on the print in front of
+    you and everything else goes behind one more button. The split is decided
+    here rather than in the page so that a control PrintFlow has never heard of
+    lands somewhere sensible by rule instead of by whichever screen drew it.
+    """
+
+    def test_the_three_that_act_on_the_print_are_the_headline(self):
+        groups = {row["action"]: row["group"] for row in controls.for_state(OFFERED, "idle")}
+        assert groups == {
+            "pause": "primary", "resume": "primary", "stop": "primary", "home": "more"
+        }
+
+    def test_a_control_nobody_recognises_does_not_push_stop_off_the_card(self):
+        """PrintFlow cannot know a strange verb is urgent, so it does not guess."""
+        row = controls.for_state({"bed-level": "/x"}, "idle")[0]
+        assert row["group"] == "more"
+
+
 # --------------------------------------------------------------------------
 # Asked once, then remembered
 # --------------------------------------------------------------------------

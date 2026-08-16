@@ -29,21 +29,30 @@ FREE = ("idle", "failed")
 # button, when it applies, whether it needs asking twice, and — when it does not
 # apply — what to say instead of leaving a dead button unexplained.
 #
+# `group` decides how prominent it is. Only the three that act on the print in
+# front of you are `primary` and earn a place on a card; everything else is
+# `more` and lives behind one button, because a farm of ten machines showing
+# five controls each is fifty buttons for a screen whose job is to tell you at a
+# glance which machine to walk to.
+#
 # A control that is not in this table is not dropped. A build offering one
 # PrintFlow has never heard of gets a button under its own name, available
 # whenever the machine is on; that is the whole point of reading the spec rather
-# than hardcoding three verbs.
+# than hardcoding three verbs. It goes under `more`: PrintFlow cannot know it is
+# urgent, and guessing that it is would put it in front of Stop.
 KNOWN: dict[str, dict[str, Any]] = {
     "pause": {
         "label": "Pause",
         "states": ("printing",),
         "why": "Nothing is printing",
+        "group": "primary",
         "position": 1,
     },
     "resume": {
         "label": "Resume",
         "states": ("paused",),
         "why": "Nothing is paused",
+        "group": "primary",
         "position": 2,
     },
     "stop": {
@@ -54,6 +63,7 @@ KNOWN: dict[str, dict[str, Any]] = {
         # Pause on a card the operator is reading quickly.
         "confirm": "Stop the print on {printer}? The plate will be lost.",
         "danger": True,
+        "group": "primary",
         "position": 3,
     },
     "home": {
@@ -116,6 +126,7 @@ def rule_for(action: str) -> dict[str, Any]:
         # Unrecognised, so PrintFlow cannot say what it does — which is reason
         # enough to ask before doing it.
         "confirm": "Send {action} to {printer}?",
+        "group": "more",
         "position": 50,
     }
 
@@ -153,6 +164,7 @@ def for_state(
             {
                 "action": action,
                 "label": rule["label"],
+                "group": rule.get("group", "more"),
                 "enabled": enabled,
                 "why": None if enabled
                 else "The machine is offline" if state == "offline"

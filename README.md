@@ -684,9 +684,18 @@ printed as one.
 
 ### Telling a machine what to do
 
-Under the readings on each card — and at the top of the machine's own **Now**
-tab — is a row of buttons: **Pause**, **Resume**, **Stop**, and whatever else
+Each card carries a small toolbar, and the machine's own **Now** tab has the
+same controls spelled out: **Pause**, **Resume**, **Stop**, and whatever else
 your Bambuddy turns out to offer.
+
+On a card it is three buttons — a play/pause glyph, a stop glyph, and a **⋯** —
+because the Printers screen is a glance across the whole farm, and ten machines
+showing five labelled buttons each is fifty labels competing with the readings
+you came to look at. Pause and Resume share the first slot, since they are never
+both available and two buttons of which one is always dead is a button's worth
+of card spent saying nothing. Everything past Pause, Resume and Stop lives
+behind the ⋯. On the machine's own page there is one machine and room to read,
+so it is all written out.
 
 **Which buttons exist is your instance's answer, not PrintFlow's.** They are
 read off its own OpenAPI document, the same way every other endpoint is, and
@@ -694,16 +703,19 @@ there is no default for any of them. A build with no pause endpoint gets no
 Pause button rather than one that posts into thin air, because a button that
 looks like it worked is worse than no button — the operator walks away believing
 the machine stopped. It also means the list is not limited to three: a build that
-offers to home the bed, flick the chamber light or run a calibration gets a
-button for each, under its own name. Spelling is normalised on the way in, so a
-build that says `cancel` or `abort` still produces one **Stop**.
+offers to home the bed, flick the chamber light or run a calibration gets an
+entry for each under the ⋯, named as the build names it. Spelling is normalised
+on the way in, so a build that says `cancel` or `abort` still produces one
+**Stop**.
 
 **Which buttons are pressable is what the machine is doing.** Pause only while
 something is printing, Resume only while something is paused, Stop while either;
 anything that moves the head or the filament only while the machine is free.
-What does not apply stays on the card, greyed, with the reason in its tooltip —
-"Nothing is paused" — rather than disappearing. A row that rearranges itself
-between the glance and the click is a row where **Stop** moves under the cursor.
+What does not apply is greyed with the reason on it — "Nothing is paused" —
+rather than disappearing, and the number of slots never changes: the shared
+Pause/Resume slot falls back to a greyed **Pause** when neither applies. A
+toolbar that grows and shrinks between the glance and the click is one where
+**Stop** moves under the cursor.
 
 Two exceptions are worth knowing:
 
