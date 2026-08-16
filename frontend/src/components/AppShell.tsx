@@ -7,6 +7,7 @@ import {
   ActivityIcon,
   BoardIcon,
   CollapseIcon,
+  CalculatorIcon,
   ManufacturingIcon,
   MenuIcon,
   PrinterIcon,
@@ -22,6 +23,7 @@ const NAV = [
   { to: '/products', label: 'Products', Icon: ProductsIcon },
   { to: '/printers', label: 'Printers', Icon: PrinterIcon },
   { to: '/manufacturing', label: 'Manufacturing', Icon: ManufacturingIcon },
+  { to: '/calculator', label: 'Calculator', Icon: CalculatorIcon },
   { to: '/sync-log', label: 'Sync Log', Icon: ActivityIcon },
   { to: '/settings', label: 'Settings', Icon: SettingsIcon },
 ]

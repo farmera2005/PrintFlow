@@ -15,6 +15,7 @@ KEY_PUBLIC_BASE_URL = "public_base_url"
 KEY_HTTPS_REDIRECT = "https_redirect"
 KEY_MANUFACTURING = "manufacturing"
 KEY_BOOKS = "books"
+KEY_CALCULATOR = "calculator"
 
 # How a made-items sheet posts to QuickBooks.
 #
@@ -76,6 +77,31 @@ DEFAULT_BOOKS: dict[str, Any] = {
 
 BOOKS_FIELDS = tuple(DEFAULT_BOOKS)
 
+# What the shop charges itself for everything it prints, typed once.
+#
+# No defaults for the rates. A machine rate somebody did not choose would put a
+# number in front of them that looks worked out and is not, and the whole point
+# of the calculator is a figure they can defend. The filament list starts with
+# the two spools every shop has, because a starting row explains the field
+# better than placeholder text does — and both are theirs to edit or delete.
+DEFAULT_CALCULATOR: dict[str, Any] = {
+    # Per hour the printer runs: the machine's own price over its life, plus
+    # nozzles, belts and the afternoon spent fixing it.
+    "machine_per_hour": "",
+    "printer_watts": "",
+    "electricity_per_kwh": "",
+    "labour_per_hour": "",
+    # Some prints fail, and the ones that work pay for the ones that did not.
+    "failure_percent": "",
+    "markup_percent": "",
+    "filaments": [
+        {"name": "PLA", "price_per_kg": ""},
+        {"name": "PETG", "price_per_kg": ""},
+    ],
+}
+
+CALCULATOR_FIELDS = tuple(DEFAULT_CALCULATOR)
+
 # What `cogs_account_id` is allowed to be. QuickBooks will accept an expense
 # account on the line, and a shop that books its printing to "Materials" rather
 # than to Cost of Goods Sold is not wrong — so both are offered.
@@ -121,6 +147,7 @@ _DEFAULTS: dict[str, Any] = {
     KEY_HTTPS_REDIRECT: False,
     KEY_MANUFACTURING: DEFAULT_MANUFACTURING,
     KEY_BOOKS: DEFAULT_BOOKS,
+    KEY_CALCULATOR: DEFAULT_CALCULATOR,
 }
 
 
@@ -209,6 +236,31 @@ async def set_books_settings(
             current[key] = values[key]
     current["remove_stock_on_printed"] = bool(current.get("remove_stock_on_printed"))
     await set_setting(session, KEY_BOOKS, current)
+    return current
+
+
+async def get_calculator_settings(session: AsyncSession) -> dict[str, Any]:
+    stored = await get_setting(session, KEY_CALCULATOR) or {}
+    merged = dict(DEFAULT_CALCULATOR)
+    if isinstance(stored, dict):
+        for key in CALCULATOR_FIELDS:
+            if key in stored:
+                merged[key] = stored[key]
+    if not isinstance(merged.get("filaments"), list):
+        merged["filaments"] = list(DEFAULT_CALCULATOR["filaments"])
+    return merged
+
+
+async def set_calculator_settings(
+    session: AsyncSession, values: dict[str, Any]
+) -> dict[str, Any]:
+    current = await get_calculator_settings(session)
+    for key in CALCULATOR_FIELDS:
+        if key in values:
+            current[key] = values[key]
+    if not isinstance(current.get("filaments"), list):
+        current["filaments"] = []
+    await set_setting(session, KEY_CALCULATOR, current)
     return current
 
 

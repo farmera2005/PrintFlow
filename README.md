@@ -965,6 +965,43 @@ detail, verbatim, the same diagnostic the file picker carries and for the same
 reason. No two self-hosted builds spell a temperature the same way, and a blank
 card cannot be diagnosed from outside. It can be shown.
 
+## Calculator
+
+**What a printed part costs to make**, and what it would have to sell for. Five
+costs kept apart on purpose — a total nobody can take apart is a total nobody
+argues with, and the argument is the point: a part that looks expensive is
+usually expensive for one reason, and the breakdown says which.
+
+| Line | What it is |
+| --- | --- |
+| Filament | Grams off the spool at what the spool cost. |
+| Electricity | How long the machine ran, at what it draws and what a unit costs. Small per part; not small per month. |
+| Machine time | The printer wearing out — its own price over its life, plus nozzles, belts and the afternoon spent fixing it. Usually the largest line after filament, and the one shops forget. |
+| Labour | Slicing, plate changes, supports off, sanding. Charged by the minute, because that is how it is spent. |
+| Extras | Packaging, an insert, a magnet. |
+
+Then two things that are not costs of a *successful* print but are costs of
+printing: a **failure allowance**, applied to everything above it because a
+failure wastes the machine hour as surely as the filament, and a **markup** that
+turns the cost into a price. The price panel shows what is kept and the margin,
+and says plainly that it is before Etsy's cut and before postage.
+
+Rates are typed once — machine, power, labour, failure, markup are the same for
+everything you print — and remembered. None of them has a default: a machine
+rate nobody chose would look worked out and would not be, and the point of the
+calculator is a figure you can defend. Spool prices can be saved by name so the
+filament price is picked rather than looked up.
+
+The arithmetic runs on the server in Decimal, beside every other figure here
+that is money, and every line is rounded to cents *before* anything is added —
+so the column on screen adds up to the total on screen. It writes nothing: not
+to QuickBooks, not to an order, not even to the estimate. Sending a rate with a
+part answers "what would this cost at a different rate" without changing what
+the shop is set to.
+
+The figure at the bottom is the other thing being spent: how long a machine is
+tied up. An eight-hour part at a good margin can still be the wrong print.
+
 ## Bills of materials, from QuickBooks
 
 A bundle's BOM lists what it consumes. Components can be picked from the

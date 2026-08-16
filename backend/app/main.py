@@ -18,6 +18,7 @@ from .routers import (
     auth_router,
     backup_router,
     integrations_router,
+    calculator_router,
     manufacturing_router,
     orders_router,
     print_jobs_router,
@@ -73,6 +74,7 @@ app.include_router(security_router.router)
 app.include_router(integrations_router.router)
 app.include_router(products_router.router)
 app.include_router(manufacturing_router.router)
+app.include_router(calculator_router.router)
 app.include_router(orders_router.router)
 app.include_router(print_jobs_router.router)
 app.include_router(printers_router.router)

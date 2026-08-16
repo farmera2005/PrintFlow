@@ -40,6 +40,17 @@ export function OrdersIcon(props: IconProps) {
   )
 }
 
+export function CalculatorIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4" y="3" width="16" height="18" rx="2" />
+      <path d="M8 7h8" />
+      <path d="M8 12h.01M12 12h.01M16 12h.01" />
+      <path d="M8 16h.01M12 16h.01M16 16h.01" />
+    </Svg>
+  )
+}
+
 export function ManufacturingIcon(props: IconProps) {
   return (
     <Svg {...props}>
