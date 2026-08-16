@@ -1274,8 +1274,10 @@ you want depends on how many products it is:
   what it makes.
 * **Set the fallback item** once, and every such line goes on it.
 
-The Products list marks a product **no QuickBooks item** when it is something
-the shop sells — linked to an Etsy listing — and has none. Components reached
+The Products list marks a product **no QuickBooks item** only when it has none
+*anywhere* and is something the shop sells — linked to an Etsy listing. A
+product billed by option shows **N by option** instead, because that is having
+items assigned: it is how a listing sold in several scales is invoiced at all. Components reached
 through a bundle's BOM are not marked: nothing invoices them on their own, so
 having no item is ordinary rather than a gap. Finding this out on the list is
 better than finding it out at the moment of invoicing.

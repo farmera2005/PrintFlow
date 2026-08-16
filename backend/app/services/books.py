@@ -730,11 +730,12 @@ async def invoice_order(
         one = len(nameless) == 1
         raise BooksError(
             f"{'This product has' if one else 'These products have'} no "
-            f"QuickBooks item, and no fallback is set for lines like "
+            f"QuickBooks item to bill against, and no fallback is set for "
             f"{'it' if one else 'them'}: {which}. Open "
-            f"{'it' if one else 'them'} on the Products tab and link "
-            f"{'an item' if one else 'items'}, or set one fallback item for "
-            "everything under Settings → QuickBooks → Orders in the books."
+            f"{'it' if one else 'them'} on the Products tab and either map the "
+            "options to items under “Sold as, by option”, or link the product "
+            "to one item. Failing both, set a fallback for everything under "
+            "Settings → QuickBooks → Orders in the books."
         )
 
     try:

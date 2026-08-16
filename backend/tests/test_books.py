@@ -1481,6 +1481,56 @@ class TestOptionItems:
         invoice = [body for entity, body in posted if entity == "invoice"][0]
         assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
 
+    async def test_a_mapping_alone_is_enough_to_invoice(self, db, monkeypatch):
+        """No item on the product, no fallback in Settings, and it still bills.
+
+        Which is what makes a mapping count as having an item assigned: the
+        product screen says so, and this is the behaviour it is describing.
+        """
+        await _qbo_connected(db)
+        await _configured(db, income_item_id=None)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+
+        product = await _product(db, qbo_id=None, fulfillment="bundle")
+        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        order = await _order(
+            db,
+            transactions=[
+                {"transaction_id": 1, "price": {"amount": 4450, "divisor": 100}}
+            ],
+        )
+        line = await _line(db, order, product, quantity=1, transaction_id=1)
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        await books.invoice_order(db, order, actor="adam")
+
+        invoice = [body for entity, body in posted if entity == "invoice"][0]
+        assert invoice["Line"][0]["SalesItemLineDetail"]["ItemRef"]["value"] == "501"
+
+    async def test_an_unmapped_option_still_needs_somewhere_to_go(self, db, monkeypatch):
+        """The mapping covers what it covers, and says so rather than guessing."""
+        await _qbo_connected(db)
+        await _configured(db, income_item_id=None)
+        _patch_qbo(monkeypatch, _stub())
+
+        product = await _product(db, qbo_id=None, fulfillment="bundle")
+        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        order = await _order(
+            db,
+            transactions=[
+                {"transaction_id": 1, "price": {"amount": 4450, "divisor": 100}}
+            ],
+        )
+        line = await _line(db, order, product, quantity=1, transaction_id=1)
+        line.variations = [{"name": "Scale", "value": "N"}]
+        await db.flush()
+
+        with pytest.raises(BooksError) as raised:
+            await books.invoice_order(db, order, actor="adam")
+        assert "Sold as, by option" in str(raised.value)
+
     async def test_the_stock_removal_uses_the_same_item(self, db, monkeypatch):
         """Billed as one item and drawn down from another is two mistakes."""
         await _qbo_connected(db)

@@ -296,14 +296,33 @@ export default function Products() {
                       : 'no print file'}
                   </Badge>
                 ) : null}
-                {product.qbo_item_id ? (
-                  <Badge>QBO linked</Badge>
-                ) : sellable(product) ? (
-                  // Only on something the shop actually sells. A component
-                  // with no item is ordinary — nothing invoices it — but a
-                  // listing with none is an invoice that cannot be raised
-                  // until a fallback is set, and finding that out at the
-                  // moment of invoicing is finding out too late.
+                {product.qbo_item_id ? <Badge>QBO linked</Badge> : null}
+                {/* Items chosen by what the buyer picked count every bit as
+                    much as one on the product — they are how a listing sold in
+                    several scales is billed at all. Shown alongside a product
+                    item rather than instead of it: the product's is what an
+                    option nobody mapped falls back to. */}
+                {product.option_items.length ? (
+                  <Badge
+                    className="bg-sky-100 text-sky-800 ring-sky-300"
+                    title={product.option_items
+                      .map(
+                        (row) =>
+                          `${row.option_name}: ${row.option_value} → ${row.qbo_item_name ?? row.qbo_item_id}`,
+                      )
+                      .join('\n')}
+                  >
+                    {product.option_items.length} by option
+                  </Badge>
+                ) : null}
+                {/* Only when there is no item anywhere, and only on something
+                    the shop actually sells. A component with none is ordinary —
+                    nothing invoices it — but a listing with none is an invoice
+                    that cannot be raised until a fallback is set, and finding
+                    that out at the moment of invoicing is finding out too late. */}
+                {!product.qbo_item_id &&
+                !product.option_items.length &&
+                sellable(product) ? (
                   <Badge
                     className="bg-amber-100 text-amber-800 ring-amber-300"
                     title="An invoice line for this product has no item to name. It will fall back to the item set under Settings → QuickBooks, or block the invoice if there is none."
@@ -484,11 +503,20 @@ function ProductEditor({
             assembles to order wants a service item, because its components
             were already taken out of stock when they were printed. Getting
             this the wrong way round shows up as a playset going negative. */}
-        {fulfillment === 'bundle' && !qboItem ? (
+        {/* Only where it is still true. A product billed by option has its
+            items already — this one is what an option nobody mapped falls back
+            to, which is a different and much smaller worry. */}
+        {fulfillment === 'bundle' && !qboItem && !product?.option_items.length ? (
           <p className="-mt-1 text-xs text-ink-500">
             Without one, an invoice for this bundle falls back to the item set
             under Settings → QuickBooks → Orders in the books, and will not be
             raised at all if there is no fallback either.
+          </p>
+        ) : null}
+        {fulfillment === 'bundle' && !qboItem && product?.option_items.length ? (
+          <p className="-mt-1 text-xs text-ink-500">
+            Not needed while every option a buyer can pick is mapped below — this
+            is only what an unmapped one would fall back to.
           </p>
         ) : null}
 
