@@ -1371,13 +1371,13 @@ class TestOptionItems:
     that look like one.
     """
 
-    async def _mapped(self, db, product, *pairs):
-        for position, (name, value, item) in enumerate(pairs):
+    async def _mapped(self, db, product, *rules):
+        """rules: (options, item), where options is [(name, value), ...]."""
+        for position, (options, item) in enumerate(rules):
             db.add(
                 ProductOptionItem(
                     product_id=product.id,
-                    option_name=name,
-                    option_value=value,
+                    options=[{"name": n, "value": v} for n, v in options],
                     qbo_item_id=item,
                     position=position,
                 )
@@ -1392,7 +1392,7 @@ class TestOptionItems:
     async def test_the_option_the_buyer_picked_decides(self, db):
         product = await _product(db, qbo_id="500")
         await self._mapped(
-            db, product, ("Scale", "HO", "601"), ("Scale", "1:64", "602")
+            db, product, ([("Scale", "HO")], "601"), ([("Scale", "1:64")], "602")
         )
         order = await _order(db)
         line = await _line(db, order, product)
@@ -1404,7 +1404,7 @@ class TestOptionItems:
     async def test_case_and_spacing_do_not_matter(self, db):
         """These strings are typed by hand in Etsy's listing editor."""
         product = await _product(db, qbo_id="500")
-        await self._mapped(db, product, ("Scale", "1:64", "602"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "602"))
         order = await _order(db)
         line = await _line(db, order, product)
         line.variations = [{"name": "  scale ", "value": "1:64"}]
@@ -1414,7 +1414,7 @@ class TestOptionItems:
 
     async def test_an_option_nobody_mapped_falls_back_to_the_product(self, db):
         product = await _product(db, qbo_id="500")
-        await self._mapped(db, product, ("Scale", "HO", "601"))
+        await self._mapped(db, product, ([("Scale", "HO")], "601"))
         order = await _order(db)
         line = await _line(db, order, product)
         line.variations = [{"name": "Scale", "value": "N"}]
@@ -1430,7 +1430,7 @@ class TestOptionItems:
         """
         product = await _product(db, qbo_id="500")
         await self._mapped(
-            db, product, ("Scale", "1:64", "602"), ("Loadout", "Yes", "603")
+            db, product, ([("Scale", "1:64")], "602"), ([("Loadout", "Yes")], "603")
         )
         order = await _order(db)
         line = await _line(db, order, product)
@@ -1442,10 +1442,84 @@ class TestOptionItems:
 
         assert books.line_item_id(await _reloaded(db, line)) == "602"
 
+    async def test_a_mapping_can_pin_two_options_at_once(self, db):
+        """A shop's items are not always split along one option.
+
+        "1:64 with the overhead loadout" can be its own item on the books, and
+        a mapping that could only name one option could not say so.
+        """
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db, product, ([("Scale", "1:64"), ("Loadout", "Yes")], "604")
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [
+            {"name": "Scale", "value": "1:64"},
+            {"name": "Loadout", "value": "Yes"},
+        ]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "604"
+
+    async def test_every_option_it_names_has_to_be_chosen(self, db):
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db, product, ([("Scale", "1:64"), ("Loadout", "Yes")], "604")
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        # The loadout was not taken, so this mapping does not describe the sale.
+        line.variations = [{"name": "Scale", "value": "1:64"}]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "500"
+
+    async def test_the_more_specific_mapping_wins(self, db):
+        """Otherwise a general rule could never have an exception.
+
+        Both match a buyer who took 1:64 with the loadout. If the broad one won
+        on position, adding the exception would silently do nothing.
+        """
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db,
+            product,
+            ([("Scale", "1:64")], "602"),
+            ([("Scale", "1:64"), ("Loadout", "Yes")], "604"),
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [
+            {"name": "Scale", "value": "1:64"},
+            {"name": "Loadout", "value": "Yes"},
+        ]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "604"
+
+    async def test_and_the_broad_one_still_covers_everything_else(self, db):
+        product = await _product(db, qbo_id="500")
+        await self._mapped(
+            db,
+            product,
+            ([("Scale", "1:64")], "602"),
+            ([("Scale", "1:64"), ("Loadout", "Yes")], "604"),
+        )
+        order = await _order(db)
+        line = await _line(db, order, product)
+        line.variations = [
+            {"name": "Scale", "value": "1:64"},
+            {"name": "Loadout", "value": "No"},
+        ]
+        await db.flush()
+
+        assert books.line_item_id(await _reloaded(db, line)) == "602"
+
     async def test_a_variation_item_still_wins(self, db):
         """One exact combination named deliberately beats one option."""
         product = await _product(db, qbo_id="500")
-        await self._mapped(db, product, ("Scale", "1:64", "602"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "602"))
         variation = ProductVariation(
             product_id=product.id, label="1:64", qbo_item_id="900"
         )
@@ -1465,7 +1539,7 @@ class TestOptionItems:
         _patch_qbo(monkeypatch, _stub(posted=posted))
 
         product = await _product(db, qbo_id="500")
-        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "501"))
         order = await _order(
             db,
             transactions=[
@@ -1493,7 +1567,7 @@ class TestOptionItems:
         _patch_qbo(monkeypatch, _stub(posted=posted))
 
         product = await _product(db, qbo_id=None, fulfillment="bundle")
-        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "501"))
         order = await _order(
             db,
             transactions=[
@@ -1516,7 +1590,7 @@ class TestOptionItems:
         _patch_qbo(monkeypatch, _stub())
 
         product = await _product(db, qbo_id=None, fulfillment="bundle")
-        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "501"))
         order = await _order(
             db,
             transactions=[
@@ -1539,7 +1613,7 @@ class TestOptionItems:
         _patch_qbo(monkeypatch, _stub(posted=posted))
 
         product = await _product(db, qbo_id="500")
-        await self._mapped(db, product, ("Scale", "1:64", "501"))
+        await self._mapped(db, product, ([("Scale", "1:64")], "501"))
         order = await _order(db)
         line = await _line(db, order, product, quantity=2)
         line.variations = [{"name": "Scale", "value": "1:64"}]
@@ -1566,8 +1640,7 @@ class TestOptionItemsApi:
             response = await signed_in.post(
                 f"/api/products/{product.id}/option-items",
                 json={
-                    "option_name": "Scale",
-                    "option_value": value,
+                    "options": [{"name": "Scale", "value": value}],
                     "qbo_item_id": item,
                     "qbo_item_name": f"Playset {value}",
                 },
@@ -1580,12 +1653,18 @@ class TestOptionItemsApi:
 
     async def test_the_same_option_twice_is_refused(self, signed_in, db):
         product = await self._product(signed_in, db)
-        body = {"option_name": "Scale", "option_value": "HO", "qbo_item_id": "601"}
+        body = {
+            "options": [{"name": "Scale", "value": "HO"}],
+            "qbo_item_id": "601",
+        }
         await signed_in.post(f"/api/products/{product.id}/option-items", json=body)
 
         response = await signed_in.post(
             f"/api/products/{product.id}/option-items",
-            json={"option_name": "scale", "option_value": " ho ", "qbo_item_id": "602"},
+            json={
+                "options": [{"name": "scale", "value": " ho "}],
+                "qbo_item_id": "602",
+            },
         )
 
         assert response.status_code == 409
@@ -1593,10 +1672,13 @@ class TestOptionItemsApi:
 
     async def test_reordering_decides_ties(self, signed_in, db):
         product = await self._product(signed_in, db)
-        for name, value, item in (("Scale", "HO", "601"), ("Loadout", "Yes", "603")):
+        for options, item in (
+            ([{"name": "Scale", "value": "HO"}], "601"),
+            ([{"name": "Loadout", "value": "Yes"}], "603"),
+        ):
             await signed_in.post(
                 f"/api/products/{product.id}/option-items",
-                json={"option_name": name, "option_value": value, "qbo_item_id": item},
+                json={"options": options, "qbo_item_id": item},
             )
         rows = (await signed_in.get(f"/api/products/{product.id}")).json()["option_items"]
 
@@ -1609,11 +1691,89 @@ class TestOptionItemsApi:
             "601",
         ]
 
+    async def test_a_mapping_can_be_added_for_a_combination(self, signed_in, db):
+        product = await self._product(signed_in, db)
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={
+                "options": [
+                    {"name": "Scale", "value": "1:64"},
+                    {"name": "Loadout", "value": "Yes"},
+                ],
+                "qbo_item_id": "604",
+                "qbo_item_name": "Playset 1:64 with loadout",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        row = response.json()["option_items"][0]
+        assert row["options"] == [
+            {"name": "Scale", "value": "1:64"},
+            {"name": "Loadout", "value": "Yes"},
+        ]
+
+    async def test_the_same_combination_twice_is_refused(self, signed_in, db):
+        """Order and case do not make it a different combination."""
+        product = await self._product(signed_in, db)
+        await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={
+                "options": [
+                    {"name": "Scale", "value": "1:64"},
+                    {"name": "Loadout", "value": "Yes"},
+                ],
+                "qbo_item_id": "604",
+            },
+        )
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={
+                "options": [
+                    {"name": "loadout", "value": " YES "},
+                    {"name": "SCALE", "value": "1:64"},
+                ],
+                "qbo_item_id": "605",
+            },
+        )
+
+        assert response.status_code == 409
+        assert "and" in response.json()["detail"]
+
+    async def test_a_broader_mapping_is_not_a_duplicate(self, signed_in, db):
+        """"1:64" and "1:64 with the loadout" are two different answers."""
+        product = await self._product(signed_in, db)
+        await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={
+                "options": [
+                    {"name": "Scale", "value": "1:64"},
+                    {"name": "Loadout", "value": "Yes"},
+                ],
+                "qbo_item_id": "604",
+            },
+        )
+
+        response = await signed_in.post(
+            f"/api/products/{product.id}/option-items",
+            json={
+                "options": [{"name": "Scale", "value": "1:64"}],
+                "qbo_item_id": "602",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        assert len(response.json()["option_items"]) == 2
+
     async def test_removing_one(self, signed_in, db):
         product = await self._product(signed_in, db)
         await signed_in.post(
             f"/api/products/{product.id}/option-items",
-            json={"option_name": "Scale", "option_value": "HO", "qbo_item_id": "601"},
+            json={
+                "options": [{"name": "Scale", "value": "HO"}],
+                "qbo_item_id": "601",
+            },
         )
         rows = (await signed_in.get(f"/api/products/{product.id}")).json()["option_items"]
 

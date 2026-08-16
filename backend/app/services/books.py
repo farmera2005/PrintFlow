@@ -103,32 +103,40 @@ def _key(*parts: str) -> str:
 
 
 def option_item(line: OrderLine) -> str | None:
-    """The item mapped to one of the options this buyer actually chose.
+    """The item mapped to what this buyer actually chose.
 
     A listing sold in two scales is two items on the books, and the scale the
-    buyer picked is what says which. The mappings live on the product and are
-    set by hand — nothing here derives them, because which of a shop's items a
-    combination is sold as is a decision about their books.
+    buyer picked is what says which. A mapping can pin several options at once,
+    because a shop's items are not always split along one of them: *1:64 with
+    the loadout* can be its own item while *1:64* alone is another.
+
+    A mapping matches when **every** option it names is among the buyer's
+    choices — a subset, which is how a variation is matched too — so one that
+    pins a single option still covers every combination containing it.
+
+    **Most specific wins.** A mapping naming two options beats one naming a
+    single option it contains; otherwise a general rule could never have an
+    exception, and adding the exception would silently do nothing. Mappings that
+    are equally specific fall back to the operator's order.
 
     Read from the line's own chosen options rather than from a matched
-    variation, so it works for a line no variation described. Where a buyer's
-    choices match more than one mapping — a scale and a loadout both naming an
-    item — the first as the operator ordered them wins.
+    variation, so it works for a line no variation described. The mappings are
+    set by hand — nothing here derives them, because which of a shop's items a
+    combination is sold as is a decision about their books.
     """
     if line.product is None or not line.product.option_items:
         return None
-    chosen = {
-        (variations.normalize(option.get("name")), variations.normalize(option.get("value")))
-        for option in (line.variations or [])
-        if isinstance(option, dict) and option.get("name") and option.get("value")
-    }
+    chosen = variations.option_key(line.variations or [])
     if not chosen:
         return None
-    for rule in sorted(line.product.option_items, key=lambda row: row.position):
-        if (
-            variations.normalize(rule.option_name),
-            variations.normalize(rule.option_value),
-        ) in chosen:
+
+    best = sorted(
+        line.product.option_items,
+        key=lambda row: (-len(variations.option_key(row.options or [])), row.position),
+    )
+    for rule in best:
+        wanted = variations.option_key(rule.options or [])
+        if wanted and wanted <= chosen:
             return str(rule.qbo_item_id)
     return None
 

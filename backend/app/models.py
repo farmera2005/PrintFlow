@@ -472,10 +472,17 @@ class ProductOptionItem(Base):
     shelf to make the thing, this one says what the thing is sold as. A colour
     usually changes the first and not the second; a scale usually changes both.
 
-    `position` decides which wins when a buyer's choices match more than one:
-    the first, as the screen lists them. That is a real case — a scale and a
-    loadout can both name an item — and it is the operator's to order rather
-    than something to be inferred.
+    A mapping can pin **several** options at once, because a shop's items are
+    not always split along one of them: *Scale 1:64 with the loadout* can be its
+    own item while *Scale 1:64* on its own is another. It matches when every
+    option it names is among the buyer's choices — a subset, the same rule a
+    variation is matched by — so a mapping pinning one option still covers every
+    combination containing it.
+
+    Which is why the more specific one wins: a mapping naming two options beats
+    one naming a single option it contains, or a general rule could never have
+    an exception. `position` orders mappings that are equally specific, and that
+    order is the operator's rather than something inferred.
     """
 
     __tablename__ = "product_option_items"
@@ -484,11 +491,14 @@ class ProductOptionItem(Base):
     product_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Matched against Etsy's formatted_name / formatted_value, trimmed and
-    # case-insensitively — the same forgiveness the BOM option rules get,
-    # because these strings are typed by hand in the Etsy listing editor.
-    option_name: Mapped[str] = mapped_column(Text, nullable=False)
-    option_value: Mapped[str] = mapped_column(Text, nullable=False)
+    # [{"name": "Scale", "value": "1:64"}, …] — the same shape a variation
+    # stores, so the same comparison serves both. Matched against Etsy's
+    # formatted_name / formatted_value, trimmed and case-insensitively, which is
+    # the forgiveness these strings need: they are typed by hand in the Etsy
+    # listing editor.
+    options: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonType, nullable=False, default=list
+    )
     qbo_item_id: Mapped[str] = mapped_column(Text, nullable=False)
     qbo_item_name: Mapped[str | None] = mapped_column(Text)
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -496,11 +506,8 @@ class ProductOptionItem(Base):
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
-    __table_args__ = (
-        UniqueConstraint(
-            "product_id", "option_name", "option_value", name="uq_option_item_choice"
-        ),
-    )
+    # No unique constraint on the combination: it would have to compare a JSON
+    # array ignoring order and case, which the router does properly instead.
 
     product: Mapped[Product] = relationship(back_populates="option_items")
 

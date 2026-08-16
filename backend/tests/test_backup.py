@@ -650,8 +650,7 @@ async def _one_of_everything(db) -> dict[str, int]:
             ProductVariation(product_id=product.id, label="Large", options=[]),
             ProductOptionItem(
                 product_id=product.id,
-                option_name="Scale",
-                option_value="1:64",
+                options=[{"name": "Scale", "value": "1:64"}],
                 qbo_item_id="601",
             ),
             PrintFile(

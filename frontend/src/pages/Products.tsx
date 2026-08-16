@@ -308,7 +308,9 @@ export default function Products() {
                     title={product.option_items
                       .map(
                         (row) =>
-                          `${row.option_name}: ${row.option_value} → ${row.qbo_item_name ?? row.qbo_item_id}`,
+                          `${row.options
+                            .map((o) => `${o.name}: ${o.value}`)
+                            .join(' and ')} → ${row.qbo_item_name ?? row.qbo_item_id}`,
                       )
                       .join('\n')}
                   >
@@ -1213,12 +1215,16 @@ function OptionItemsEditor({
   const observed = useObservedOptions(product.id)
   const [optionName, setOptionName] = useState('')
   const [optionValue, setOptionValue] = useState('')
+  // Conditions staged so far. A mapping can pin several — "1:64 *and* the
+  // loadout" — and every one of them has to be among the buyer's choices.
+  const [pending, setPending] = useState<{ name: string; value: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [picking, setPicking] = useState(false)
 
   const values = observed?.find((o) => o.name === optionName)?.values ?? []
-  const ready = Boolean(optionName.trim() && optionValue.trim())
+  const typed = Boolean(optionName.trim() && optionValue.trim())
+  const ready = pending.length > 0 || typed
 
   const call = async (run: Promise<Product>) => {
     setBusy(true)
@@ -1232,16 +1238,22 @@ function OptionItemsEditor({
     }
   }
 
+  /** Whatever is staged, plus whatever is half-typed in the row below it. */
+  const conditions = () =>
+    typed
+      ? [...pending, { name: optionName.trim(), value: optionValue.trim() }]
+      : pending
+
   const add = async (item: QboItem) => {
     setPicking(false)
     await call(
       api.post<Product>(`/api/products/${product.id}/option-items`, {
-        option_name: optionName.trim(),
-        option_value: optionValue.trim(),
+        options: conditions(),
         qbo_item_id: item.id,
         qbo_item_name: item.name,
       }),
     )
+    setPending([])
     setOptionValue('')
   }
 
@@ -1269,7 +1281,9 @@ function OptionItemsEditor({
             >
               <span className="text-ink-500">When</span>
               <span className="font-medium text-ink-800">
-                {row.option_name}: {row.option_value}
+                {row.options
+                  .map((option) => `${option.name}: ${option.value}`)
+                  .join(' and ')}
               </span>
               <span className="text-ink-500">bill as</span>
               <span className="font-medium text-ink-800">
@@ -1329,14 +1343,40 @@ function OptionItemsEditor({
 
       {product.option_items.length > 1 ? (
         <p className="text-xs text-ink-500">
-          A buyer can pick two things that both name an item — a scale and a
-          loadout. The first one here that matches is the one it is billed as;
-          the arrows are how you say which.
+          A buyer can match more than one of these. The mapping naming the most
+          options wins — so "1:64 and the loadout" beats plain "1:64", and a
+          general rule can still have an exception. Between mappings that name
+          the same number, the first here wins, and the arrows say which.
         </p>
       ) : null}
 
+      {/* Conditions staged so far, above the row that adds the next one. */}
+      {pending.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-ink-500">When</span>
+          {pending.map((row, index) => (
+            <span key={index} className="flex items-center gap-1">
+              {index ? <span className="text-ink-500">and</span> : null}
+              <span className="font-medium text-ink-800">
+                {row.name}: {row.value}
+              </span>
+              <button
+                type="button"
+                className="text-ink-400 hover:text-ink-700"
+                aria-label={`Drop ${row.name}: ${row.value}`}
+                onClick={() =>
+                  setPending((rows) => rows.filter((_, i) => i !== index))
+                }
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       <div className="grid gap-2 sm:grid-cols-2">
-        <Field label="Option">
+        <Field label={pending.length ? 'And also' : 'Option'}>
           <select
             className={inputClass}
             value={optionName}
@@ -1398,9 +1438,44 @@ function OptionItemsEditor({
 
       {error ? <Alert tone="error">{error}</Alert> : null}
 
-      <Button size="sm" disabled={busy || !ready} onClick={() => setPicking(true)}>
-        {busy ? 'Saving…' : 'Choose the QuickBooks item…'}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={busy || !ready} onClick={() => setPicking(true)}>
+          {busy ? 'Saving…' : 'Choose the QuickBooks item…'}
+        </Button>
+        {/* For a combination: pin this one and keep going. Only offered once
+            there is something to pin, so it never looks like a required step. */}
+        {typed ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setPending((rows) => [
+                ...rows,
+                { name: optionName.trim(), value: optionValue.trim() },
+              ])
+              setOptionName('')
+              setOptionValue('')
+            }}
+          >
+            …and another option
+          </Button>
+        ) : null}
+        {pending.length ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setPending([])
+              setOptionName('')
+              setOptionValue('')
+            }}
+          >
+            Start over
+          </Button>
+        ) : null}
+      </div>
 
       {picking ? (
         <QboItemPicker onClose={() => setPicking(false)} onPick={add} />

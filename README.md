@@ -1238,11 +1238,22 @@ you want depends on how many products it is:
   many as it has options worth telling apart. Several QuickBooks items on one
   product is the normal case, not an edge one.
 
+  A mapping can pin **more than one option at once**, because a shop's items are
+  not always split along a single one: *1:64 with the overhead loadout* can be
+  its own item while *1:64* on its own is another. Add the first condition,
+  press *…and another option*, then choose the item. It matches when every
+  option it names is among the buyer's choices, so one pinning a single option
+  still covers every combination containing it.
+
+  Which is why **the most specific wins**: a mapping naming two options beats
+  one naming a single option it contains, or a general rule could never have an
+  exception and adding the exception would silently do nothing. Mappings naming
+  the same number of options fall back to the order on screen, and the arrows
+  are how you set it.
+
   The option names and values are offered from what past orders carried and what
-  the listing sells, so there is nothing to type. Where a buyer picks two things
-  that both name an item — a scale *and* a loadout — the first mapping listed
-  wins, and the arrows are how you say which that is. Nothing derives these:
-  which of your items a combination is sold as is a decision about your books.
+  the listing sells, so there is nothing to type. Nothing derives these: which of
+  your items a combination is sold as is a decision about your books.
 
   Not to be confused with the *Etsy options* rules above it, which answer a
   different question about the same option — those say what comes off the shelf

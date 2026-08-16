@@ -38,6 +38,13 @@ from ..services.credentials import IntegrationNotConfigured
 router = APIRouter(prefix="/api/products", tags=["products"])
 
 
+def _option_words(options: list[dict[str, Any]] | None) -> str:
+    """A set of chosen options as a person would say it."""
+    return " and ".join(
+        f"{option.get('name')}: {option.get('value')}" for option in options or []
+    )
+
+
 def _serialize(product: Product) -> dict[str, Any]:
     return {
         "id": product.id,
@@ -140,8 +147,7 @@ def _serialize(product: Product) -> dict[str, Any]:
         "option_items": [
             {
                 "id": row.id,
-                "option_name": row.option_name,
-                "option_value": row.option_value,
+                "options": row.options or [],
                 "qbo_item_id": row.qbo_item_id,
                 "qbo_item_name": row.qbo_item_name,
                 "position": row.position,
@@ -1347,9 +1353,15 @@ async def _reattach_open_lines(session: AsyncSession, product: Product) -> int:
     return reattached
 
 
+class OptionPair(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    value: str = Field(min_length=1, max_length=500)
+
+
 class OptionItemRequest(BaseModel):
-    option_name: str = Field(min_length=1, max_length=200)
-    option_value: str = Field(min_length=1, max_length=500)
+    # Several at once: a shop's items are not always split along one option.
+    # Every one named has to be among the buyer's choices for it to match.
+    options: list[OptionPair] = Field(min_length=1, max_length=20)
     qbo_item_id: str = Field(min_length=1, max_length=100)
     qbo_item_name: str | None = None
 
@@ -1369,28 +1381,33 @@ async def add_option_item(
     about their books, and deriving it would put a real sale on the wrong item.
     """
     product = await _get(session, product_id)
-    name = body.option_name.strip()
-    value = body.option_value.strip()
-    wanted = (variations_service.normalize(name), variations_service.normalize(value))
+    options = [
+        {"name": pair.name.strip(), "value": pair.value.strip()} for pair in body.options
+    ]
+    wanted = variations_service.option_key(options)
+    if not wanted:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Give the mapping at least one option name and value — that is what "
+            "an order is matched on.",
+        )
 
     for existing in product.option_items:
-        if (
-            variations_service.normalize(existing.option_name),
-            variations_service.normalize(existing.option_value),
-        ) == wanted:
+        if variations_service.option_key(existing.options or []) == wanted:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"“{existing.option_name}: {existing.option_value}” is already "
-                f"sold as {existing.qbo_item_name or existing.qbo_item_id}.",
+                f"“{_option_words(existing.options)}” is already sold as "
+                f"{existing.qbo_item_name or existing.qbo_item_id}.",
             )
 
     row = ProductOptionItem(
         product_id=product.id,
-        option_name=name,
-        option_value=value,
+        options=options,
         qbo_item_id=body.qbo_item_id.strip(),
         qbo_item_name=(body.qbo_item_name or "").strip() or None,
         # Last, so adding one never changes what the ones above it already do.
+        # Being last does not make it lose: a mapping pinning more options wins
+        # on specificity, and position only orders the equally specific.
         position=max((item.position for item in product.option_items), default=-1) + 1,
     )
     session.add(row)
@@ -1401,7 +1418,10 @@ async def add_option_item(
         entity_type="product",
         entity_id=product.id,
         action="option_item_added",
-        detail={"option": f"{name}: {value}", "qbo_item": row.qbo_item_name or row.qbo_item_id},
+        detail={
+            "options": _option_words(options),
+            "qbo_item": row.qbo_item_name or row.qbo_item_id,
+        },
         actor=user.username,
     )
     await session.commit()
@@ -1456,16 +1476,11 @@ async def delete_option_item(
         entity_type="product",
         entity_id=product_id,
         action="option_item_removed",
-        detail={"option": f"{row.option_name}: {row.option_value}"},
+        detail={"options": _option_words(row.options)},
         actor=user.username,
     )
     await session.commit()
     return _serialize(await _get(session, product_id))
-
-
-class OptionPair(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    value: str = Field(min_length=1, max_length=500)
 
 
 class NewVariationRequest(BaseModel):

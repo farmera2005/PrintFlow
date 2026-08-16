@@ -329,11 +329,14 @@ export interface ProductVariation {
 /** "When the buyer picks this, bill it as that." Set by hand, never derived. */
 export interface OptionItem {
   id: string
-  option_name: string
-  option_value: string
+  /** Every one of these has to be among the buyer's choices for it to match,
+   *  so a mapping can pin a combination — 1:64 *with* the loadout — and not
+   *  only a single option. */
+  options: { name: string; value: string }[]
   qbo_item_id: string
   qbo_item_name: string | null
-  /** Which mapping wins when a buyer's choices match more than one. First wins. */
+  /** Orders mappings that are equally specific. The one pinning more options
+   *  wins regardless, or a general rule could never have an exception. */
   position: number
 }
 
