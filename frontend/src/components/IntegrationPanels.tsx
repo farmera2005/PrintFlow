@@ -613,6 +613,14 @@ interface BooksSettings {
   /** Optional. Unset means QuickBooks' own default discount account. */
   discount_account_id: string | null
   discount_account_name: string | null
+  /** Where an order's two bills land, and what pays them. */
+  shipping_expense_account_id: string | null
+  shipping_expense_account_name: string | null
+  fee_expense_account_id: string | null
+  fee_expense_account_name: string | null
+  /** Optional. Unset falls back to the Manufacturing paid-from account. */
+  expense_payment_account_id: string | null
+  expense_payment_account_name: string | null
   remove_stock_on_printed: boolean
 }
 
@@ -632,6 +640,8 @@ function BooksPosting() {
   const [settings, setSettings] = useState<BooksSettings | null>(null)
   const [accounts, setAccounts] = useState<QboAccount[]>([])
   const [discountAccounts, setDiscountAccounts] = useState<QboAccount[]>([])
+  const [expenseAccounts, setExpenseAccounts] = useState<QboAccount[]>([])
+  const [paymentAccounts, setPaymentAccounts] = useState<QboAccount[]>([])
   const [items, setItems] = useState<QboItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -652,6 +662,16 @@ function BooksPosting() {
       .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=discount')
       .then((data) => setDiscountAccounts(data.accounts))
       .catch(() => setDiscountAccounts([]))
+    // Postage bought and a marketplace's cut are both costs of selling, so the
+    // same expense accounts are offered for each.
+    api
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=offset')
+      .then((data) => setExpenseAccounts(data.accounts))
+      .catch(() => setExpenseAccounts([]))
+    api
+      .get<{ accounts: QboAccount[] }>('/api/integrations/qbo/accounts?role=payment')
+      .then((data) => setPaymentAccounts(data.accounts))
+      .catch(() => setPaymentAccounts([]))
     // Only the items an invoice line may name. An inventory item here is the
     // one mistake that would double-count every sale, so it is not offered.
     api
@@ -792,6 +812,77 @@ function BooksPosting() {
         >
           <option value="">QuickBooks' own discount account</option>
           {discountAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name} ({account.type})
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <p className="text-xs text-ink-500">
+        An order also <em>costs</em> something, and those are two separate bills
+        arriving at different times: the carrier's, once a label is priced, and
+        Etsy's, once its ledger settles. Each is expensed from the order's Money
+        tab, on its own, against the account chosen here.
+      </p>
+
+      {(
+        [
+          [
+            'shipping_expense_account_id',
+            'shipping_expense_account_name',
+            'Shipping label expense',
+            "Where postage bought for an order lands — what ShipStation charged, not what the buyer paid for shipping. That one is income and is billed on the invoice.",
+          ],
+          [
+            'fee_expense_account_id',
+            'fee_expense_account_name',
+            'Etsy fee expense',
+            "Where Etsy's cut lands: its commission, Offsite Ads, and payment processing, as one expense with a line for each.",
+          ],
+        ] as const
+      ).map(([idField, nameField, label, hint]) => (
+        <Field key={idField} label={label} hint={hint}>
+          <select
+            className={inputClass}
+            value={settings[idField] ?? ''}
+            disabled={busy}
+            onChange={(e) => {
+              const account = expenseAccounts.find((a) => a.id === e.target.value)
+              save({
+                [idField]: account?.id ?? null,
+                [nameField]: account?.name ?? null,
+              } as Partial<BooksSettings>)
+            }}
+          >
+            <option value="">Choose an account…</option>
+            {expenseAccounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name} ({account.type})
+              </option>
+            ))}
+          </select>
+        </Field>
+      ))}
+
+      <Field
+        label="Expenses are paid from"
+        hint="Which account the money left. Unlike a stock removal — which totals zero and never touches the account it names — these are real money going out. Left unset, the paid-from account under Manufacturing postings is used, which is right for most shops."
+      >
+        <select
+          className={inputClass}
+          value={settings.expense_payment_account_id ?? ''}
+          disabled={busy}
+          onChange={(e) => {
+            const account = paymentAccounts.find((a) => a.id === e.target.value)
+            save({
+              expense_payment_account_id: account?.id ?? null,
+              expense_payment_account_name: account?.name ?? null,
+            })
+          }}
+        >
+          <option value="">The Manufacturing paid-from account</option>
+          {paymentAccounts.map((account) => (
             <option key={account.id} value={account.id}>
               {account.name} ({account.type})
             </option>

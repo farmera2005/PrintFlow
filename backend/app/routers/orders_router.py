@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -544,6 +545,123 @@ async def restore_line_stock(
     detail = await board.load_order_detail(session, order_id)
     detail["books"] = [{"line_id": str(line_id), **result}]
     return detail
+
+
+class FeesRequest(BaseModel):
+    """Etsy's cut, typed by a person.
+
+    Strings rather than floats: these are money and go straight into a
+    QuickBooks document, where 0.1 + 0.2 must not be 0.30000000000000004.
+    """
+
+    etsy_fees: str | float | int | None = None
+    marketing_fees: str | float | int | None = None
+    processing_fees: str | float | int | None = None
+
+
+def _fee_amount(raw: Any, field: str) -> Decimal | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = Decimal(str(raw).strip().lstrip("$"))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"{field} is not a number."
+        ) from exc
+    if value < 0:
+        # Etsy's ledger states fees as money leaving; PrintFlow stores the size
+        # of the bite. A minus sign here is somebody copying the ledger's sign.
+        value = -value
+    return value.quantize(Decimal("0.0001"))
+
+
+@router.put("/orders/{order_id}/fees")
+async def set_fees(
+    order_id: uuid.UUID,
+    body: FeesRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Type Etsy's fees in by hand.
+
+    Etsy's ledger settles days after a sale, and until it does an order shows
+    no cost at all — so a shop closing its month either waits or works it out
+    on paper. This is the third option. What is typed is marked as typed, and
+    *Check Etsy for fees* then leaves this order alone rather than replacing a
+    figure somebody may already have expensed. Clearing every box hands the
+    order back to the sweep.
+    """
+    order = await _get_order(session, order_id)
+    values = {
+        field: _fee_amount(getattr(body, field), field)
+        for field in ("etsy_fees", "marketing_fees", "processing_fees")
+    }
+    for field, value in values.items():
+        setattr(order, field, value)
+    entered = any(value is not None for value in values.values())
+    order.fees_source = "manual" if entered else None
+    if not entered:
+        # Emptied on purpose: drop the lines behind the old totals too, rather
+        # than leaving a breakdown that no longer adds up to anything.
+        order.fee_lines = None
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="fees_entered" if entered else "fees_cleared",
+        detail={
+            "order_number": order.order_number,
+            **{field: str(value) if value is not None else None
+               for field, value in values.items()},
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
+@router.post("/orders/{order_id}/expenses/{kind}")
+async def create_expense(
+    order_id: uuid.UUID,
+    kind: str,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Expense what this order cost: the carrier's postage, or Etsy's cut.
+
+    A button rather than something that happens on its own, for the same reason
+    the invoice is one: it is a document in somebody's books.
+    """
+    if kind not in (books.SHIPPING_EXPENSE, books.FEE_EXPENSE):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No expense called '{kind}'.")
+    order = await _get_order(session, order_id)
+    try:
+        await books.post_expense(session, order, kind, actor=user.username)
+    except BooksError as exc:
+        await session.commit()  # keep the recorded reason, not the write
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
+@router.post("/orders/{order_id}/expenses/{kind}/void")
+async def remove_expense(
+    order_id: uuid.UUID,
+    kind: str,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Take one of an order's expenses back out of QuickBooks."""
+    if kind not in (books.SHIPPING_EXPENSE, books.FEE_EXPENSE):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No expense called '{kind}'.")
+    order = await _get_order(session, order_id)
+    try:
+        await books.void_expense(session, order, kind, actor=user.username)
+    except BooksError as exc:
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
 
 
 @router.get("/books/invoice-number")

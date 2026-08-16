@@ -317,6 +317,15 @@ async def sync_fees(
 
     now = datetime.now(timezone.utc)
     for order in orders:
+        if order.fees_source == "manual":
+            # Somebody typed these, and may already have expensed them. A sweep
+            # quietly replacing a figure a person put there — and QuickBooks
+            # has — is how the books and the screen stop agreeing. Clearing the
+            # entry hands the order back to the sweep. Skipped here rather than
+            # after the work, because none of the work below is wanted.
+            stats["kept_by_hand"] = stats.get("kept_by_hand", 0) + 1
+            continue
+
         receipt = order.raw or {}
         payments: list[dict[str, Any]] = []
         try:
@@ -347,6 +356,7 @@ async def sync_fees(
             setattr(order, field, value)
         order.finance_synced_at = now
         if found["fee_lines"]:
+            order.fees_source = "etsy"
             stats["priced"] += 1
             stats["fee_lines"] += len(found["fee_lines"])
 

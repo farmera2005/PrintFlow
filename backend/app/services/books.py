@@ -47,6 +47,12 @@ Net: one deduction per unit, whichever way the order goes. That hand-over is
 the whole design, and changing either half without the other is how books stop
 balancing.
 
+## And two bills, which hand over with nothing
+
+An order also *costs*: the carrier's postage and Etsy's cut. Those are plain
+expenses — money that really left an account — so they touch none of the above
+and need no hand-over. They are at the bottom of this file, deliberately apart.
+
 ## Rules that exist because this writes to real books
 
 * Every write is once-only, and the proof is a column rather than a state.
@@ -1164,3 +1170,255 @@ async def void_invoice(
         actor=actor,
     )
     return {"voided": True, "qbo_invoice_id": invoice_id, "doc_number": doc_number}
+
+
+# --------------------------------------------------------------------------
+# What the order cost: two bills, expensed
+# --------------------------------------------------------------------------
+#
+# Both of these are ordinary money going out, which makes them a different
+# animal from everything above. A stock removal totals zero and never touches
+# the account it names; these do touch it, because the carrier really was paid
+# and Etsy really did take its cut. So they are plain Purchases: one expense
+# line per thing being paid for, against the account the shop chose, out of the
+# account the shop chose.
+
+
+# One per kind of bill, because they arrive at different times from different
+# people and each needs its own once-only proof on the order.
+SHIPPING_EXPENSE = "shipping"
+FEE_EXPENSE = "fees"
+
+_EXPENSES: dict[str, dict[str, str]] = {
+    SHIPPING_EXPENSE: {
+        "id": "qbo_shipping_expense_id",
+        "token": "qbo_shipping_expense_sync_token",
+        "at": "qbo_shipping_expense_at",
+        "total": "qbo_shipping_expense_total",
+        "error": "qbo_shipping_expense_error",
+        "account": "shipping_expense_account_id",
+        "label": "shipping",
+    },
+    FEE_EXPENSE: {
+        "id": "qbo_fee_expense_id",
+        "token": "qbo_fee_expense_sync_token",
+        "at": "qbo_fee_expense_at",
+        "total": "qbo_fee_expense_total",
+        "error": "qbo_fee_expense_error",
+        "account": "fee_expense_account_id",
+        "label": "Etsy fees",
+    },
+}
+
+
+def fee_parts(order: Order) -> list[tuple[str, Decimal]]:
+    """Etsy's cut, split the way Etsy splits it.
+
+    Three lines rather than one total, because they are three different costs
+    and a shop deciding whether Offsite Ads pays for itself cannot tell from a
+    single figure called "Etsy".
+    """
+    named = (
+        ("Etsy fees", order.etsy_fees),
+        ("Marketing fees", order.marketing_fees),
+        ("Processing fees", order.processing_fees),
+    )
+    return [(label, money(value)) for label, value in named if value and money(value) > 0]
+
+
+def build_expense(
+    parts: list[tuple[str, Decimal]],
+    *,
+    expense_account_id: str,
+    payment_account_id: str,
+    payment_type: str,
+    vendor_id: Any = None,
+    when: datetime,
+    note: str,
+) -> dict[str, Any]:
+    """The exact Purchase body for one of an order's bills. Pure.
+
+    Every line is an account line rather than an item line: nothing here is
+    stock. Postage bought and a marketplace's commission are costs, and putting
+    them on an item would move a quantity of something nobody has.
+    """
+    return {
+        "AccountRef": {"value": str(payment_account_id)},
+        "PaymentType": str(payment_type or "Cash"),
+        "TxnDate": when.date().isoformat(),
+        "PrivateNote": note[:4000],
+        "Line": [
+            {
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Amount": float(money(amount)),
+                "Description": label,
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": str(expense_account_id)}
+                },
+            }
+            for label, amount in parts
+        ],
+        **(
+            {"EntityRef": {"value": str(vendor_id), "type": "Vendor"}}
+            if vendor_id
+            else {}
+        ),
+    }
+
+
+async def _expense_accounts(session: AsyncSession, kind: str) -> tuple[str, str, str, Any]:
+    """Where this expense goes and what it is paid from. Raises if unchosen."""
+    fields = _EXPENSES[kind]
+    books = await get_books_settings(session)
+    expense_account = books.get(fields["account"])
+    if not expense_account:
+        raise BooksError(
+            f"No account is set for {fields['label']}. Choose one under "
+            "Settings → QuickBooks → Orders in the books."
+        )
+    settings = await get_manufacturing_settings(session)
+    # The shop's own choice, or the account everything else clears through.
+    payment_account = books.get("expense_payment_account_id") or settings.get("account_id")
+    if not payment_account:
+        raise BooksError(
+            "No account is set for the money to come out of. Choose one under "
+            "Settings → QuickBooks — either an expenses one under Orders in "
+            "the books, or the paid-from account under Manufacturing postings."
+        )
+    return (
+        str(expense_account),
+        str(payment_account),
+        str(settings.get("payment_type") or "Cash"),
+        settings.get("vendor_id"),
+    )
+
+
+async def post_expense(
+    session: AsyncSession, order: Order, kind: str, *, actor: str
+) -> dict[str, Any]:
+    """Put one of an order's bills into QuickBooks. Once per order, per bill.
+
+    Raises BooksError with a sentence worth showing: somebody pressed a button
+    for this, so nothing fails quietly.
+    """
+    fields = _EXPENSES[kind]
+    if getattr(order, fields["id"]):
+        raise BooksError(
+            f"The {fields['label']} for this order is already expensed in "
+            "QuickBooks."
+        )
+
+    if kind == SHIPPING_EXPENSE:
+        cost = money(order.label_cost or 0)
+        if cost <= 0:
+            raise BooksError(
+                "This order has no label cost to expense. It appears once "
+                "ShipStation has priced a label for it."
+            )
+        parts = [(f"Shipping label — order {order.order_number}", cost)]
+        note = (
+            f"PrintFlow — postage for Etsy order {order.order_number}"
+            + (f", {order.tracking_number}" if order.tracking_number else "")
+            + "."
+        )
+    else:
+        parts = fee_parts(order)
+        if not parts:
+            raise BooksError(
+                "This order has no Etsy fees to expense. Either press Check "
+                "Etsy for fees, or type them in below — Etsy's ledger settles "
+                "days after the sale, so it is often the typing that comes first."
+            )
+        note = f"PrintFlow — Etsy's cut of order {order.order_number}."
+
+    expense_account, payment_account, payment_type, vendor = await _expense_accounts(
+        session, kind
+    )
+    body = build_expense(
+        parts,
+        expense_account_id=expense_account,
+        payment_account_id=payment_account,
+        payment_type=payment_type,
+        vendor_id=vendor,
+        when=order.label_created_at or order.placed_at or datetime.now(timezone.utc),
+        note=note,
+    )
+
+    try:
+        client = await qbo_api.client_for(session)
+        created = await client.create_purchase(
+            body, request_id=_key("expense", kind, str(order.id))
+        )
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        setattr(order, fields["error"], str(exc))
+        await session.flush()
+        raise BooksError(
+            f"QuickBooks would not take the {fields['label']} expense: {exc}. "
+            "Nothing was saved as expensed — check QuickBooks before trying again."
+        ) from exc
+
+    total = money(sum((amount for _, amount in parts), Decimal("0")))
+    setattr(order, fields["id"], str(created.get("Id") or "") or None)
+    setattr(order, fields["token"], str(created.get("SyncToken") or "0"))
+    setattr(order, fields["at"], datetime.now(timezone.utc))
+    setattr(order, fields["total"], total)
+    setattr(order, fields["error"], None)
+    await session.flush()
+
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action=f"qbo_{kind}_expense_created",
+        detail={
+            "order_number": order.order_number,
+            "qbo_purchase_id": getattr(order, fields["id"]),
+            "total": str(total),
+            "lines": [{"label": label, "amount": str(amount)} for label, amount in parts],
+        },
+        actor=actor,
+    )
+    return {
+        "kind": kind,
+        "qbo_purchase_id": getattr(order, fields["id"]),
+        "total": str(total),
+    }
+
+
+async def void_expense(
+    session: AsyncSession, order: Order, kind: str, *, actor: str
+) -> dict[str, Any]:
+    """Delete one of an order's expenses, freeing it to be expensed again.
+
+    Deleted rather than zeroed: a Purchase has no void in QuickBooks that keeps
+    it visible, which is the same reason voiding a made sheet deletes its
+    document.
+    """
+    fields = _EXPENSES[kind]
+    purchase_id = getattr(order, fields["id"])
+    if not purchase_id:
+        raise BooksError(f"This order has no {fields['label']} expense.")
+
+    try:
+        client = await qbo_api.client_for(session)
+        await client.void_purchase(purchase_id, getattr(order, fields["token"]) or "0")
+    except (IntegrationError, IntegrationNotConfigured) as exc:
+        setattr(order, fields["error"], str(exc))
+        await session.flush()
+        raise BooksError(
+            f"QuickBooks would not remove the {fields['label']} expense: {exc}"
+        ) from exc
+
+    for key in ("id", "token", "at", "total", "error"):
+        setattr(order, fields[key], None)
+    await session.flush()
+
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action=f"qbo_{kind}_expense_voided",
+        detail={"order_number": order.order_number, "qbo_purchase_id": purchase_id},
+        actor=actor,
+    )
+    return {"kind": kind, "voided": True, "qbo_purchase_id": purchase_id}

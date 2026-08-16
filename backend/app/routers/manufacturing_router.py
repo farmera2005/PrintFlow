@@ -165,6 +165,12 @@ class BooksSettingsRequest(BaseModel):
     shipping_item_name: str | None = None
     discount_account_id: str | None = None
     discount_account_name: str | None = None
+    shipping_expense_account_id: str | None = None
+    shipping_expense_account_name: str | None = None
+    fee_expense_account_id: str | None = None
+    fee_expense_account_name: str | None = None
+    expense_payment_account_id: str | None = None
+    expense_payment_account_name: str | None = None
     remove_stock_on_printed: bool | None = None
 
 
@@ -225,6 +231,8 @@ async def write_books_settings(
             "cogs_account": saved.get("cogs_account_name"),
             "income_item": saved.get("income_item_name"),
             "discount_account": saved.get("discount_account_name"),
+            "shipping_expense_account": saved.get("shipping_expense_account_name"),
+            "fee_expense_account": saved.get("fee_expense_account_name"),
             "remove_stock_on_printed": saved.get("remove_stock_on_printed"),
         },
         actor=user.username,

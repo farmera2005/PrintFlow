@@ -279,7 +279,10 @@ def _stub(
         entity = request.url.path.rstrip("/").rsplit("/", 1)[-1]
         body = json.loads(request.content or b"{}")
         if posted is not None:
-            posted.append((entity, body))
+            # A delete is a POST with ?operation=delete, so the path alone
+            # cannot tell one from a create. Whoever is asserting needs to know.
+            operation = request.url.params.get("operation") or ""
+            posted.append((f"{entity}:{operation}" if operation else entity, body))
         key = entity.capitalize() if entity != "customer" else "Customer"
         return httpx.Response(200, json={key: replies[entity]})
 
@@ -532,7 +535,7 @@ class TestRemoveStock:
         assert line.qbo_stock_purchase_id is None
         # The reversal is a delete of the Purchase, which is the only reversal
         # QuickBooks offers for one.
-        assert posted[-1][0] == "purchase"
+        assert posted[-1][0] == "purchase:delete"
         assert posted[-1][1]["Id"] == "180"
 
 
@@ -839,7 +842,7 @@ class TestInvoiceOrder:
         assert [row["restored"] for row in result["stock_handed_over"]] == [True]
         assert line.qbo_stock_removed_at is None
         # The Purchase was deleted, not merely forgotten about here.
-        assert posted[-1][0] == "purchase"
+        assert posted[-1][0] == "purchase:delete"
         assert posted[-1][1]["Id"] == "180"
 
     async def test_a_line_billed_on_a_service_item_keeps_its_removal(
@@ -1795,7 +1798,7 @@ class TestThroughTheApi:
         line = (await db.execute(select(OrderLine))).scalars().one()
         await db.refresh(line)
         assert line.qbo_stock_removed_at is None
-        assert [entity for entity, _ in self.posted][-1] == "purchase"
+        assert [entity for entity, _ in self.posted][-1] == "purchase:delete"
 
     async def test_putting_back_what_was_never_taken_is_refused(self, ready):
         response = await ready.delete(
@@ -2292,3 +2295,291 @@ class TestOptionItemsApi:
 
         assert response.status_code == 200
         assert response.json()["option_items"] == []
+
+
+# --------------------------------------------------------------------------
+# What the order cost
+# --------------------------------------------------------------------------
+
+
+async def _expense_accounts(db):
+    await _configured(
+        db,
+        shipping_expense_account_id="90",
+        shipping_expense_account_name="Postage",
+        fee_expense_account_id="91",
+        fee_expense_account_name="Marketplace fees",
+    )
+
+
+class TestShippingExpense:
+    """Postage bought is money that actually left, unlike a stock removal.
+
+    Which makes it a plain Purchase: one expense line, against the account the
+    shop chose, out of the account the shop chose. The number is what
+    ShipStation charged — not what the buyer paid for shipping, which is income
+    and is billed on the invoice.
+    """
+
+    async def test_it_expenses_what_the_label_cost(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        order = await _order(db, label_cost=Decimal("7.41"), label_currency="USD")
+
+        result = await books.post_expense(
+            db, order, books.SHIPPING_EXPENSE, actor="adam"
+        )
+
+        assert result["total"] == "7.41"
+        assert order.qbo_shipping_expense_id == "180"
+        purchase = [body for entity, body in posted if entity == "purchase"][0]
+        assert purchase["Line"][0]["Amount"] == 7.41
+        assert purchase["Line"][0]["AccountBasedExpenseLineDetail"]["AccountRef"] == {
+            "value": "90"
+        }
+        # A real payment, so the account it comes out of is the one that matters.
+        assert purchase["AccountRef"] == {"value": "42"}
+
+    async def test_nothing_is_expensed_on_an_item(self, db, monkeypatch):
+        """Postage is a cost, not stock. An item line would move a quantity."""
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        order = await _order(db, label_cost=Decimal("7.41"))
+
+        await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+        purchase = [body for entity, body in posted if entity == "purchase"][0]
+        assert all(
+            line["DetailType"] == "AccountBasedExpenseLineDetail"
+            for line in purchase["Line"]
+        )
+
+    async def test_an_order_with_no_label_has_nothing_to_expense(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db)
+
+        with pytest.raises(BooksError, match="no label cost"):
+            await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+    async def test_it_will_not_be_expensed_twice(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db, label_cost=Decimal("7.41"))
+        await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+        with pytest.raises(BooksError, match="already expensed"):
+            await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+    async def test_no_account_chosen_says_which_one(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)  # no expense accounts
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db, label_cost=Decimal("7.41"))
+
+        with pytest.raises(BooksError, match="No account is set for shipping"):
+            await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+    async def test_removing_it_frees_the_order_to_be_expensed_again(
+        self, db, monkeypatch
+    ):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        order = await _order(db, label_cost=Decimal("7.41"))
+        await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+        await books.void_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+        assert order.qbo_shipping_expense_id is None
+        assert "purchase:delete" in [entity for entity, _ in posted]
+        # And it can be done again, which is the point of freeing it.
+        await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+        assert order.qbo_shipping_expense_id is not None
+
+
+class TestFeeExpense:
+    async def test_each_kind_of_fee_is_its_own_line(self, db, monkeypatch):
+        """A shop deciding whether Offsite Ads pays for itself cannot tell from
+        a single figure called "Etsy"."""
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        order = await _order(
+            db,
+            etsy_fees=Decimal("2.55"),
+            marketing_fees=Decimal("1.20"),
+            processing_fees=Decimal("0.95"),
+        )
+
+        result = await books.post_expense(db, order, books.FEE_EXPENSE, actor="adam")
+
+        purchase = [body for entity, body in posted if entity == "purchase"][0]
+        assert [line["Description"] for line in purchase["Line"]] == [
+            "Etsy fees", "Marketing fees", "Processing fees",
+        ]
+        assert result["total"] == "4.70"
+
+    async def test_a_fee_that_is_zero_gets_no_line(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        order = await _order(db, etsy_fees=Decimal("2.55"), marketing_fees=Decimal("0"))
+
+        await books.post_expense(db, order, books.FEE_EXPENSE, actor="adam")
+
+        purchase = [body for entity, body in posted if entity == "purchase"][0]
+        assert len(purchase["Line"]) == 1
+
+    async def test_no_fees_yet_says_where_they_come_from(self, db, monkeypatch):
+        """Etsy settles days later, so "none yet" is the ordinary case."""
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db)
+
+        with pytest.raises(BooksError, match="type them in"):
+            await books.post_expense(db, order, books.FEE_EXPENSE, actor="adam")
+
+    async def test_the_two_bills_are_expensed_independently(self, db, monkeypatch):
+        """They arrive at different times from different people."""
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db, label_cost=Decimal("7.41"), etsy_fees=Decimal("2.55"))
+
+        await books.post_expense(db, order, books.SHIPPING_EXPENSE, actor="adam")
+
+        assert order.qbo_shipping_expense_id is not None
+        assert order.qbo_fee_expense_id is None
+        await books.post_expense(db, order, books.FEE_EXPENSE, actor="adam")
+        assert order.qbo_fee_expense_id is not None
+
+
+class TestFeesByHand:
+    """Etsy's ledger settles days after a sale.
+
+    Until it does an order shows no cost at all, so a shop closing its month
+    either waits or works the figures out on paper. Typing them is the third
+    option — and what is typed must not then be replaced by a machine.
+    """
+
+    async def test_typing_them_marks_them_as_typed(self, signed_in, db):
+        order = await _order(db)
+        await db.commit()
+
+        body = (
+            await signed_in.put(
+                f"/api/orders/{order.id}/fees",
+                json={"etsy_fees": "2.55", "processing_fees": "0.95"},
+            )
+        ).json()
+
+        assert body["etsy_fees"] == "2.55"
+        assert body["fees_source"] == "manual"
+
+    async def test_a_ledger_minus_sign_is_read_as_the_same_figure(self, signed_in, db):
+        """Etsy states fees as money leaving; PrintFlow stores the bite."""
+        order = await _order(db)
+        await db.commit()
+
+        body = (
+            await signed_in.put(
+                f"/api/orders/{order.id}/fees", json={"etsy_fees": "-2.55"}
+            )
+        ).json()
+
+        assert body["etsy_fees"] == "2.55"
+
+    async def test_rubbish_is_refused_rather_than_stored_as_zero(self, signed_in, db):
+        order = await _order(db)
+        await db.commit()
+
+        response = await signed_in.put(
+            f"/api/orders/{order.id}/fees", json={"etsy_fees": "about three quid"}
+        )
+
+        assert response.status_code == 422
+
+    async def test_clearing_every_box_hands_it_back_to_etsy(self, signed_in, db):
+        order = await _order(db)
+        await db.commit()
+        await signed_in.put(f"/api/orders/{order.id}/fees", json={"etsy_fees": "2.55"})
+
+        body = (
+            await signed_in.put(
+                f"/api/orders/{order.id}/fees",
+                json={"etsy_fees": "", "marketing_fees": "", "processing_fees": ""},
+            )
+        ).json()
+
+        assert body["fees_source"] is None
+        assert body["etsy_fees"] is None
+
+    async def test_the_sweep_leaves_a_typed_figure_alone(self, db, monkeypatch):
+        """A machine replacing a number somebody typed — and may already have
+        expensed — is how the books and the screen stop agreeing."""
+        from app.services import finance
+
+        order = await _order(db, etsy_fees=Decimal("2.55"), fees_source="manual")
+        await db.commit()
+
+        class Ledger:
+            shop_id = 1
+
+            async def iter_ledger_entries(self, **_kwargs):
+                return [
+                    {"ledger_entry_id": 1, "amount": -9.99, "description": "Listing fee",
+                     "reference_id": str(order.etsy_receipt_id)}
+                ]
+
+            async def receipt_payments(self, **_kwargs):
+                return []
+
+        async def client_for(_session):
+            return Ledger()
+
+        monkeypatch.setattr("app.services.finance.etsy_api.client_for", client_for)
+
+        stats = await finance.sync_fees(db)
+
+        await db.refresh(order)
+        assert order.etsy_fees == Decimal("2.5500")
+        assert stats["kept_by_hand"] == 1
+
+    async def test_typed_fees_expense_like_any_other(self, signed_in, db, monkeypatch):
+        await _qbo_connected(db)
+        await _expense_accounts(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db)
+        await db.commit()
+        await signed_in.put(f"/api/orders/{order.id}/fees", json={"etsy_fees": "2.55"})
+
+        body = (
+            await signed_in.post(f"/api/orders/{order.id}/expenses/fees")
+        ).json()
+
+        assert body["qbo_fee_expense_total"] == "2.55"
+
+    async def test_an_expense_nobody_offers_is_a_404(self, signed_in, db):
+        order = await _order(db)
+        await db.commit()
+        response = await signed_in.post(f"/api/orders/{order.id}/expenses/lunch")
+        assert response.status_code == 404
+
+    async def test_signing_in_is_required(self, client, db):
+        order = await _order(db)
+        await db.commit()
+        assert (
+            await client.post(f"/api/orders/{order.id}/expenses/shipping")
+        ).status_code == 401
+        assert (await client.put(f"/api/orders/{order.id}/fees", json={})).status_code == 401

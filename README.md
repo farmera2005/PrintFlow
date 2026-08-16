@@ -1204,10 +1204,14 @@ Guardrails, because this writes to your books:
 
 ## Orders in the books
 
-Two things happen to an order in QuickBooks: its units leave stock when they are
-printed, and the sale is recorded when you invoice it. They are designed
-together because **both of them move stock**, and left to themselves they would
-move the same units twice. What follows is how they hand over instead.
+Four things happen to an order in QuickBooks: its units leave stock when they
+are printed or built into a bundle, the sale is recorded when you invoice it,
+and what the order cost — postage and Etsy's cut — is expensed.
+
+The first two are designed together because **both of them move stock**, and
+left to themselves they would move the same units twice. What follows is how
+they hand over instead. The expenses are simpler: they are money going out, and
+nothing else in the system touches them.
 
 ### Stock out when a line is printed
 
@@ -1344,6 +1348,59 @@ records *why* its units went, not just that they did.
 Assembly is a shop-floor action, so it never fails over bookkeeping: a component
 with no QuickBooks item is simply not booked, and the tick still lands.
 
+### What the order cost: two expenses
+
+An order earns money and an order costs money, and until now only the earning
+reached QuickBooks. Two bills arrive against a sale, from two different people
+at two different times, so they are two documents rather than one — each raised
+and removed on its own from the Money tab, because an order is often ready to
+expense one and not the other.
+
+* **The shipping label** — what ShipStation charged, once it has priced one.
+  Not the same number as the shipping the buyer paid: that one is *income* and
+  is billed on the invoice. Confusing the two is how postage looks free.
+* **Etsy's cut** — its commission, Offsite Ads and payment processing, as one
+  expense with a line for each. Three lines rather than a single figure called
+  "Etsy", because a shop deciding whether Offsite Ads pays for itself cannot
+  tell from one number.
+
+Both are plain Purchases: an account line per thing paid for, against the
+expense account chosen in Settings, out of the account chosen there too. Nothing
+here is an item line — postage bought and a marketplace's commission are costs,
+and putting them on an item would move a quantity of something nobody has.
+
+Unlike a stock removal, **these really do take money out of the account they
+name**, because the carrier really was paid and Etsy really did take its cut.
+That is why the paid-from account is worth a thought rather than a default; it
+falls back to the Manufacturing paid-from account, which is right for most
+shops.
+
+Each is once-only — the id on the order is the proof — and each carries a stable
+idempotency key, so a timeout followed by a retry cannot produce two. **Remove**
+deletes the Purchase and frees the order to be expensed again; a Purchase has no
+void in QuickBooks that keeps it visible, which is the same reason voiding a
+made sheet deletes its document.
+
+### Typing Etsy's fees in
+
+Etsy posts its fees to the shop ledger *days* after a sale. Until they land an
+order shows no cost at all, so a shop closing its month either waits for Etsy or
+works the figures out on paper.
+
+The Money tab has a third option: **Etsy fees → Enter them**, three boxes, typed
+by hand. They behave exactly like swept ones — they show in the summary, they
+count against Net, and they expense the same way.
+
+What is typed is marked as typed, and **Check Etsy for fees then leaves that
+order alone**. A sweep quietly replacing a number somebody put there — and may
+already have expensed to QuickBooks — is how the books and the screen stop
+agreeing. Clearing every box hands the order back to the sweep.
+
+Etsy's ledger states fees as money *leaving*, so a figure pasted from there
+arrives with a minus sign; PrintFlow stores the size of the bite and reads
+`-2.55` as the same thing as `2.55`. Anything that is not a number is refused
+rather than quietly stored as zero.
+
 ### Auditing what left stock
 
 The Manufacturing tab lists **Stock out, from orders** underneath the made-items
@@ -1377,6 +1434,12 @@ Under **Settings → QuickBooks → Orders in the books**:
   accounts are offered, because a discount is revenue not earned rather than a
   cost incurred. Left unset — the sensible default — QuickBooks uses the
   company's own discount account.
+* **Shipping label expense** (required to expense postage). Where what the
+  carrier charged lands.
+* **Etsy fee expense** (required to expense fees). Where Etsy's cut lands.
+* **Expenses are paid from** (optional). Which account the money left. These
+  two are real money going out, unlike a stock removal, so the account matters.
+  Left unset it reuses the Manufacturing paid-from account.
 
 Nothing has a default. Which account and which item are right depends on your
 chart of accounts, and picking on your behalf would file real money somewhere

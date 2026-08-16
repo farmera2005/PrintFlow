@@ -19,7 +19,7 @@ import type {
   Product,
 } from '../lib/types'
 import LabelDialog from './LabelDialog'
-import { Alert, Badge, Button, Modal, Spinner, cx, inputClass } from './ui'
+import { Alert, Badge, Button, Field, Modal, Spinner, cx, inputClass } from './ui'
 
 /** The drawer's three views of one order.
  *
@@ -1115,8 +1115,259 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
 
       {order.fee_lines?.length ? <FeeBreakdown order={order} /> : null}
 
+      <FeesByHand order={order} onChanged={onRefreshed} />
+      <ExpensePanel order={order} onChanged={onRefreshed} />
       <InvoicePanel order={order} onChanged={onRefreshed} />
     </section>
+  )
+}
+
+/** Etsy's fees, typed in.
+ *
+ *  Etsy's ledger settles days after a sale, and until it does an order shows no
+ *  cost at all — so a shop closing its month either waits for Etsy or works the
+ *  figures out on paper. This is the third option.
+ *
+ *  What is typed is marked as typed, and *Check Etsy for fees* then leaves this
+ *  order alone: a sweep quietly replacing a number somebody put here — and may
+ *  already have expensed to QuickBooks — is how the books and the screen stop
+ *  agreeing. Emptying every box hands the order back to the sweep.
+ */
+function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void }) {
+  const manual = order.fees_source === 'manual'
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [draft, setDraft] = useState({
+    etsy_fees: order.etsy_fees ?? '',
+    marketing_fees: order.marketing_fees ?? '',
+    processing_fees: order.processing_fees ?? '',
+  })
+  // Re-read when the order does: another tab, or the sweep, may have moved them.
+  useEffect(() => {
+    setDraft({
+      etsy_fees: order.etsy_fees ?? '',
+      marketing_fees: order.marketing_fees ?? '',
+      processing_fees: order.processing_fees ?? '',
+    })
+  }, [order.etsy_fees, order.marketing_fees, order.processing_fees])
+
+  const save = async (values: typeof draft) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.put(`/api/orders/${order.id}/fees`, values)
+      onChanged()
+      setOpen(false)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const fields: [keyof typeof draft, string][] = [
+    ['etsy_fees', 'Etsy fees'],
+    ['marketing_fees', 'Marketing'],
+    ['processing_fees', 'Processing'],
+  ]
+
+  return (
+    <div className="mt-3 border-t border-ink-200 pt-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+          Etsy fees
+        </h4>
+        {manual ? (
+          <Badge className="bg-sky-100 text-sky-800">entered by hand</Badge>
+        ) : null}
+        <button
+          type="button"
+          className="ml-auto text-xs text-ink-500 underline"
+          onClick={() => setOpen((was) => !was)}
+        >
+          {open ? 'Close' : manual ? 'Edit' : 'Enter them'}
+        </button>
+      </div>
+
+      {manual && !open ? (
+        <p className="mt-1 text-xs text-ink-500">
+          Typed rather than read from Etsy, so <em>Check Etsy for fees</em> will
+          not overwrite them. Clear every box to hand this order back to it.
+        </p>
+      ) : null}
+
+      {open ? (
+        <div className="mt-2 space-y-2">
+          <div className="grid grid-cols-3 gap-2">
+            {fields.map(([field, label]) => (
+              <Field key={field} label={label}>
+                <input
+                  className={inputClass}
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={draft[field]}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setDraft((was) => ({ ...was, [field]: e.target.value }))
+                  }
+                />
+              </Field>
+            ))}
+          </div>
+          <p className="text-xs text-ink-500">
+            What Etsy took, as positive amounts. Its ledger states them as money
+            leaving; a minus sign copied from there is read as the same figure.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="primary" disabled={busy} onClick={() => save(draft)}>
+              {busy ? 'Saving…' : 'Save fees'}
+            </Button>
+            {manual ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() =>
+                  save({ etsy_fees: '', marketing_fees: '', processing_fees: '' })
+                }
+              >
+                Clear, and let Etsy fill them
+              </Button>
+            ) : null}
+          </div>
+          {error ? <Alert tone="error">{error}</Alert> : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** What the order cost, expensed into QuickBooks.
+ *
+ *  Two bills that arrive at different times from different people: the
+ *  carrier's, once a label is priced, and Etsy's, once its ledger settles or
+ *  somebody types it. So two documents rather than one, each raised and removed
+ *  on its own — an order can easily be ready to expense one and not the other.
+ *
+ *  Unlike a stock removal these are real money going out, so they are plain
+ *  Purchases against the expense accounts chosen in Settings.
+ */
+function ExpensePanel({ order, onChanged }: { order: Order; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (kind: string, path: string, confirmText?: string) => {
+    if (confirmText && !window.confirm(confirmText)) return
+    setBusy(kind)
+    setError(null)
+    try {
+      await api.post(`/api/orders/${order.id}/expenses/${kind}${path}`)
+      onChanged()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const bills = [
+    {
+      kind: 'shipping',
+      label: 'Shipping label',
+      amount: order.label_cost,
+      id: order.qbo_shipping_expense_id,
+      at: order.qbo_shipping_expense_at,
+      total: order.qbo_shipping_expense_total,
+      failed: order.qbo_shipping_expense_error,
+      missing: 'No label has been priced for this order yet.',
+    },
+    {
+      kind: 'fees',
+      label: "Etsy's fees",
+      amount:
+        order.etsy_fees || order.marketing_fees || order.processing_fees
+          ? String(
+              Number(order.etsy_fees ?? 0) +
+                Number(order.marketing_fees ?? 0) +
+                Number(order.processing_fees ?? 0),
+            )
+          : null,
+      id: order.qbo_fee_expense_id,
+      at: order.qbo_fee_expense_at,
+      total: order.qbo_fee_expense_total,
+      failed: order.qbo_fee_expense_error,
+      missing: 'No fees on this order yet — read them from Etsy or type them above.',
+    },
+  ]
+
+  return (
+    <div className="mt-3 border-t border-ink-200 pt-3">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+        QuickBooks expenses
+      </h4>
+      <p className="mt-1 text-xs text-ink-500">
+        What this order cost, as expenses in QuickBooks. Two bills, raised
+        separately: the carrier's postage and Etsy's cut.
+      </p>
+      <div className="mt-2 space-y-2">
+        {bills.map((bill) => (
+          <div key={bill.kind} className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-ink-700">{bill.label}</span>
+            {bill.amount ? (
+              <span className="text-ink-500">
+                {formatMoney(bill.amount, order.currency ?? order.label_currency)}
+              </span>
+            ) : (
+              <span className="text-xs text-ink-400">{bill.missing}</span>
+            )}
+            <span className="ml-auto flex items-center gap-2">
+              {bill.id ? (
+                <>
+                  <Badge className="bg-emerald-100 text-emerald-800">
+                    expensed {formatDateTime(bill.at)}
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      run(
+                        bill.kind,
+                        '/void',
+                        `Remove the ${bill.label.toLowerCase()} expense from ` +
+                          'QuickBooks? The Purchase is deleted, and this order ' +
+                          'can then be expensed again.',
+                      )
+                    }
+                  >
+                    {busy === bill.kind ? 'Working…' : 'Remove'}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  disabled={busy !== null || !bill.amount}
+                  onClick={() => run(bill.kind, '')}
+                >
+                  {busy === bill.kind ? 'Posting…' : 'Expense it'}
+                </Button>
+              )}
+            </span>
+            {bill.failed && !bill.id ? (
+              <p className="w-full text-xs text-red-700">
+                Last attempt failed: {bill.failed}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      {error ? (
+        <div className="mt-2">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

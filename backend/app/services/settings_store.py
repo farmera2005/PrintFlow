@@ -74,6 +74,19 @@ DEFAULT_BOOKS: dict[str, Any] = {
     # most shops and is one fewer thing to choose.
     "discount_account_id": None,
     "discount_account_name": None,
+    # What an order *costs*. Two bills, so two accounts: the carrier's postage
+    # and Etsy's cut. Neither has a default — which expense account is right
+    # depends on a chart of accounts nobody here has seen.
+    "shipping_expense_account_id": None,
+    "shipping_expense_account_name": None,
+    "fee_expense_account_id": None,
+    "fee_expense_account_name": None,
+    # Which account the money left. Unlike a stock removal — which totals zero
+    # and never touches the account it names — these are real money going out,
+    # so the account matters. Falls back to the manufacturing payment account,
+    # because most shops clear all of this through the same one.
+    "expense_payment_account_id": None,
+    "expense_payment_account_name": None,
     # Whether finishing a print books the stock removal on its own. Off means
     # only a person pressing Mark printed moves anything, which is the older
     # rule that nothing but a person writes to the books.

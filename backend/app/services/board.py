@@ -194,6 +194,10 @@ def order_card(order: Order) -> dict[str, Any]:
         },
         "net": _amount(finance.net_of(order)),
         "finance_synced_at": order.finance_synced_at,
+        # Whether the fee figures were swept out of Etsy's ledger or typed by a
+        # person. The screen has to say, because the sweep treats them
+        # differently and a number nobody can account for is worse than none.
+        "fees_source": order.fees_source,
         # The QuickBooks invoice, when there is one. On the card rather than
         # only in the drawer because "has this been invoiced" is a question
         # asked of a whole column at once.
@@ -202,6 +206,17 @@ def order_card(order: Order) -> dict[str, Any]:
         "qbo_invoice_at": order.qbo_invoice_at,
         "qbo_invoice_total": _amount(order.qbo_invoice_total),
         "qbo_invoice_error": order.qbo_invoice_error,
+        # What the order cost, expensed. Two bills that arrive at different
+        # times from different people, so two documents and two states.
+        **{
+            f"qbo_{kind}_expense_{field}": (
+                _amount(getattr(order, f"qbo_{kind}_expense_{field}"))
+                if field == "total"
+                else getattr(order, f"qbo_{kind}_expense_{field}")
+            )
+            for kind in ("shipping", "fee")
+            for field in ("id", "at", "total", "error")
+        },
         "shipstation_order_id": order.shipstation_order_id,
         "summary": _summary(order),
         "lines": _line_tree(order),

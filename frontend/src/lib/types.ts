@@ -143,6 +143,10 @@ export interface Order {
   etsy_fees: string | null
   marketing_fees: string | null
   processing_fees: string | null
+  /** Where those three came from: swept out of Etsy's ledger, or typed by a
+   *  person because it had not settled yet. The sweep leaves a manual figure
+   *  alone, so the screen has to say which it is. */
+  fees_source: 'etsy' | 'manual' | null
   /** Revenue less every fee and the label. Null when revenue is unknown. */
   net: string | null
   finance_synced_at: string | null
@@ -153,6 +157,17 @@ export interface Order {
   qbo_invoice_at: string | null
   qbo_invoice_total: string | null
   qbo_invoice_error: string | null
+  /** What the order cost, expensed into QuickBooks. Two bills that arrive at
+   *  different times from different people — the carrier's postage and Etsy's
+   *  cut — so two documents, each once-only and each removable on its own. */
+  qbo_shipping_expense_id: string | null
+  qbo_shipping_expense_at: string | null
+  qbo_shipping_expense_total: string | null
+  qbo_shipping_expense_error: string | null
+  qbo_fee_expense_id: string | null
+  qbo_fee_expense_at: string | null
+  qbo_fee_expense_total: string | null
+  qbo_fee_expense_error: string | null
   shipstation_order_id: number | null
   summary: OrderSummary
   lines: OrderLine[]

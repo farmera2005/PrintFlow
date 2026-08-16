@@ -733,6 +733,34 @@ class Order(Base):
     # waiting to see it in QuickBooks.
     qbo_invoice_error: Mapped[str | None] = mapped_column(Text)
 
+    # What the order *cost*, expensed into QuickBooks. Two documents, kept
+    # apart because they are two different bills that arrive at two different
+    # times: the carrier's, when a label is bought, and Etsy's, when the ledger
+    # settles. Each is once-only for the same reason the invoice is — the id is
+    # the proof, and a second press says "already expensed".
+    qbo_shipping_expense_id: Mapped[str | None] = mapped_column(Text)
+    # Needed to delete it again. QuickBooks refuses a write without the token
+    # it last issued.
+    qbo_shipping_expense_sync_token: Mapped[str | None] = mapped_column(Text)
+    qbo_shipping_expense_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    qbo_shipping_expense_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    qbo_shipping_expense_error: Mapped[str | None] = mapped_column(Text)
+
+    qbo_fee_expense_id: Mapped[str | None] = mapped_column(Text)
+    qbo_fee_expense_sync_token: Mapped[str | None] = mapped_column(Text)
+    qbo_fee_expense_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    qbo_fee_expense_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    qbo_fee_expense_error: Mapped[str | None] = mapped_column(Text)
+
+    # Where the fee figures came from. `etsy` — swept out of the shop's payment
+    # ledger — or `manual`, typed by a person because the ledger had not
+    # settled yet. The sweep leaves a manual figure alone: a machine silently
+    # replacing a number somebody typed, and may already have expensed, is how
+    # the books and the screen stop agreeing.
+    fees_source: Mapped[str | None] = mapped_column(Text)
+
     raw: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
