@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import JOB_FAILED, JOB_PENDING, JOB_PRINTING, JOB_QUEUED
-from ..services import printing
+from ..services import controls, printing
 from ..services.credentials import IntegrationNotConfigured
 
 # Plates worth putting on a machine's card: still to happen, or gone wrong.
@@ -62,7 +62,7 @@ RUNNING_WORDS = ("running", "printing", "busy", "prepare")
 IDLE_WORDS = ("idle", "finish", "finished", "ready", "standby")
 
 
-def _doing(printer: dict[str, Any]) -> str:
+def doing(printer: dict[str, Any]) -> str:
     """One word for what a machine is up to, from whichever field said it."""
     if printer.get("online") is False:
         return "offline"
@@ -78,6 +78,45 @@ def _doing(printer: dict[str, Any]) -> str:
     return "unknown"
 
 
+async def state_of(session: AsyncSession, client: Any, printer_id: Any) -> str:
+    """What one machine is doing right now, however this build reports it.
+
+    For the moment before a control is sent, which is not the same moment the
+    card was drawn. Two calls at worst and usually one: most builds put the live
+    readings on the farm listing, and only a build whose listing is a bare
+    inventory of names and models needs the machine asked directly.
+
+    Anything that goes wrong on the way is `unknown`, which allows the control
+    through. A status PrintFlow could not read is not evidence against what the
+    operator can see with their own eyes.
+    """
+    try:
+        rows = await bambuddy_api.with_healing(
+            session, client, ("printers",), client.list_printers
+        )
+    except IntegrationError:
+        return "unknown"
+    row = next((r for r in rows if _key(r.get("id")) == _key(printer_id)), None)
+    if row is None:
+        return "unknown"
+    state = doing(row)
+    if state == "unknown":
+        # The listing did not say what this machine is doing — some builds keep
+        # that on the machine's own endpoint. One extra call, for one machine,
+        # only when the cheap answer was no answer.
+        try:
+            extra = await bambuddy_api.with_healing(
+                session,
+                client,
+                ("printer_detail",),
+                lambda: client.read_printer(printer_id),
+            )
+        except IntegrationError:
+            return "unknown"
+        return doing({**row, **{k: v for k, v in extra.items() if v is not None}})
+    return state
+
+
 def _summary(printers: list[dict[str, Any]], plates: list[dict[str, Any]]) -> dict[str, Any]:
     """The farm in one line, for the top of the page.
 
@@ -86,25 +125,25 @@ def _summary(printers: list[dict[str, Any]], plates: list[dict[str, Any]]) -> di
     be free. The longest remaining time is the one that matters — the farm is
     clear when the last one finishes, not the first.
     """
-    doing: dict[str, int] = {}
+    counts: dict[str, int] = {}
     for printer in printers:
-        state = _doing(printer)
-        doing[state] = doing.get(state, 0) + 1
+        state = doing(printer)
+        counts[state] = counts.get(state, 0) + 1
 
     remaining = [
         printer["remaining_minutes"]
         for printer in printers
-        if _doing(printer) == "printing"
+        if doing(printer) == "printing"
         and isinstance(printer.get("remaining_minutes"), int)
         and printer["remaining_minutes"] > 0
     ]
     open_plates = [plate for plate in plates if plate["status"] in OPEN_STATUSES]
     return {
         "machines": len(printers),
-        "by_state": doing,
-        "printing": doing.get("printing", 0),
-        "idle": doing.get("idle", 0),
-        "offline": doing.get("offline", 0),
+        "by_state": counts,
+        "printing": counts.get("printing", 0),
+        "idle": counts.get("idle", 0),
+        "offline": counts.get("offline", 0),
         # When the whole farm is free, not the first machine to finish.
         "busy_until_minutes": max(remaining) if remaining else None,
         "plates_open": len(open_plates),
@@ -201,6 +240,7 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
     detail_error: str | None = None
     queues: dict[str | None, list[dict[str, Any]]] = {}
     queue_error: str | None = None
+    offered: dict[str, str] = {}
     try:
         client = await bambuddy_api.client_for(session)
         found = await bambuddy_api.read_farm(session, client)
@@ -209,6 +249,14 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
         detail_error = found["detail_error"]
         remember_cameras(printers)
         queues, queue_error = await read_queue(session, client, plates)
+        # What this instance can be told to do to a machine. Asked once and
+        # then remembered, so this is free on all but the first load.
+        try:
+            offered = await bambuddy_api.ensure_controls(session, client)
+        except IntegrationError:
+            # No buttons, and the rest of the page is unaffected. A farm that
+            # cannot be commanded can still be read.
+            offered = {}
     except IntegrationNotConfigured as exc:
         error = str(exc)
     except IntegrationError as exc:
@@ -228,6 +276,13 @@ async def overview(session: AsyncSession) -> dict[str, Any]:
             # What this machine will actually work through, in the order it
             # will do it — Bambuddy's line, not PrintFlow's list.
             "queue": queues.get(_key(row.get("id")), []),
+            # Pause, Resume, Stop and whatever else this build offers, each
+            # already told whether it applies to what this machine is doing.
+            "controls": controls.for_state(
+                offered,
+                doing(row),
+                printer=str(row.get("name") or "this printer"),
+            ),
         }
         for row in printers
     ]

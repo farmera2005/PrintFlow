@@ -471,6 +471,29 @@ export interface FarmPrinter extends BambuddyPrinter {
   /** Everything lined up on this machine, in the order it will be printed —
    *  including jobs PrintFlow did not put there. */
   queue: QueuedJob[]
+  /** What this machine can be told to do. Empty when the Bambuddy build
+   *  offers no controls PrintFlow could find — which is a real answer, not a
+   *  failure, and means no buttons rather than broken ones. */
+  controls: PrinterControl[]
+}
+
+/** One button on a machine's card.
+ *
+ *  Whether it exists at all comes from Bambuddy's own API document; whether it
+ *  is pressable right now comes from what the machine is doing. A control that
+ *  does not apply stays on the card, disabled and with `why` on it, so the row
+ *  does not rearrange itself under the cursor. */
+export interface PrinterControl {
+  /** What to send back: POST /api/printers/{id}/control/{action}. */
+  action: string
+  label: string
+  enabled: boolean
+  /** Why not, when it is not. Null when it is. */
+  why: string | null
+  /** Irreversible — draw it apart from the rest. */
+  danger: boolean
+  /** Ask this before sending. Null for the ones that need no asking. */
+  confirm: string | null
 }
 
 /** Why there are no pictures, according to the instance itself. */

@@ -56,6 +56,26 @@ class FakeBambuddy:
         self.enqueued: list[dict] = []
         self.next_id = 1000
         self.queue: list[dict] = []
+        # What this pretend build offers to do to a machine, {name: path}. Empty
+        # is the ordinary case and means no buttons; a test that wants them says
+        # so. `sent` is what was actually asked of the machine.
+        self.controls: dict[str, str] = {}
+        self.sent: list[tuple[str, str]] = []
+        # Enough of the real client's spec surface for ensure_controls to ask
+        # this build what it can do and be told "nothing", without a network.
+        self.last_spec: dict | None = {"discovered": {}}
+
+    def printer_controls(self):
+        return dict(self.controls)
+
+    def adopt_discovered(self, _discovered):
+        return {}
+
+    async def run_control(self, printer_id, action):
+        if action not in self.controls:
+            raise AssertionError(f"No {action} control on this build")
+        self.sent.append((str(printer_id), action))
+        return {}
 
     async def enqueue(
         self,

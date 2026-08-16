@@ -14,7 +14,7 @@ from ..integrations import base as base_api
 from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import PROVIDER_BAMBUDDY, User
-from ..services import audit, farm, printing
+from ..services import audit, controls, farm, printing
 from ..services.credentials import IntegrationNotConfigured
 
 router = APIRouter(prefix="/api/printers", tags=["printers"])
@@ -264,6 +264,75 @@ async def cancel_queued(
     )
     await session.commit()
     return {"queue_id": queue_id, "print_job_cancelled": plate is not None}
+
+
+@router.post("/{printer_id}/control/{action}")
+async def run_control(
+    printer_id: int,
+    action: str,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Pause, resume, stop — or whatever else this Bambuddy offers.
+
+    The page already knows which buttons apply, and draws the rest disabled.
+    This checks again anyway, against a status read now rather than whenever
+    that page last refreshed: the farm screen polls, and a print that finished
+    thirty seconds ago still shows a live Pause. Sending it would at best do
+    nothing and at worst pause the next plate, which is a print nobody is
+    watching quietly stopping overnight.
+    """
+    try:
+        client = await bambuddy_api.client_for(session)
+    except IntegrationNotConfigured as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    try:
+        offered = await bambuddy_api.ensure_controls(session, client)
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if action not in offered:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This Bambuddy does not offer a {controls.label_for(action).lower()} "
+            "control for a printer. PrintFlow reads what it can do from the "
+            "instance's own API document — if the control exists under a name "
+            "PrintFlow did not recognise, set it under Settings → Bambuddy → "
+            "Advanced.",
+        )
+
+    # What the machine is doing now, not what the card said.
+    async with base_api.deadline(PROVIDER_BAMBUDDY, "Reading the printer"):
+        state = await farm.state_of(session, client, printer_id)
+    if not controls.allowed(action, state):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{controls.label_for(action)} does not apply to this printer: "
+            f"it is {state}.",
+        )
+
+    try:
+        async with base_api.deadline(PROVIDER_BAMBUDDY, "Sending a printer control"):
+            await bambuddy_api.with_healing(
+                session,
+                client,
+                (bambuddy_api.control_role(action),),
+                lambda: client.run_control(printer_id, action),
+            )
+    except IntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    # Anything that changes what a machine is physically doing is written down.
+    await audit.record(
+        session,
+        entity_type="printer",
+        entity_id=None,
+        action="printer_control",
+        detail={"printer_id": printer_id, "control": action, "state": state},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"printer_id": printer_id, "control": action, "state": state, "sent": True}
 
 
 @router.get("/cameras")

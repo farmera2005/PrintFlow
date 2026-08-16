@@ -948,6 +948,30 @@ const PATH_ROLES: {
       'machine that reported no spools. {printer_id} is substituted.',
     templated: true,
   },
+  // The buttons on a printer card. Left blank, PrintFlow uses whatever this
+  // instance's own description says — including controls beyond these three,
+  // which get a button under their own name. There is no default: a guessed
+  // control path is a POST at a machine that is mid-print, so a build whose
+  // pause endpoint PrintFlow could not recognise gets no Pause button until
+  // somebody says where it is.
+  {
+    key: 'control_pause',
+    label: 'Pause a print',
+    hint: 'Posted to when Pause is pressed. {printer_id} is substituted.',
+    templated: true,
+  },
+  {
+    key: 'control_resume',
+    label: 'Resume a print',
+    hint: 'Posted to when Resume is pressed. {printer_id} is substituted.',
+    templated: true,
+  },
+  {
+    key: 'control_stop',
+    label: 'Stop a print',
+    hint: 'Posted to when Stop is pressed. {printer_id} is substituted.',
+    templated: true,
+  },
 ]
 
 export function BambuddyPanel({ status, onChange }: PanelProps) {

@@ -682,6 +682,52 @@ things to act on. A machine reporting a fault says so in red; a Bambu machine
 reports "no fault" as the number 0, which is read as no fault rather than
 printed as one.
 
+### Telling a machine what to do
+
+Under the readings on each card — and at the top of the machine's own **Now**
+tab — is a row of buttons: **Pause**, **Resume**, **Stop**, and whatever else
+your Bambuddy turns out to offer.
+
+**Which buttons exist is your instance's answer, not PrintFlow's.** They are
+read off its own OpenAPI document, the same way every other endpoint is, and
+there is no default for any of them. A build with no pause endpoint gets no
+Pause button rather than one that posts into thin air, because a button that
+looks like it worked is worse than no button — the operator walks away believing
+the machine stopped. It also means the list is not limited to three: a build that
+offers to home the bed, flick the chamber light or run a calibration gets a
+button for each, under its own name. Spelling is normalised on the way in, so a
+build that says `cancel` or `abort` still produces one **Stop**.
+
+**Which buttons are pressable is what the machine is doing.** Pause only while
+something is printing, Resume only while something is paused, Stop while either;
+anything that moves the head or the filament only while the machine is free.
+What does not apply stays on the card, greyed, with the reason in its tooltip —
+"Nothing is paused" — rather than disappearing. A row that rearranges itself
+between the glance and the click is a row where **Stop** moves under the cursor.
+
+Two exceptions are worth knowing:
+
+* A machine that is **offline** takes no orders at all.
+* A build that reports **no live state** gets everything enabled. That is not
+  the same as a machine doing nothing — it means the build did not say — and
+  greying every button out over a reading PrintFlow never got would take the
+  controls away from exactly the shops that most need them.
+
+The page refreshes every fifteen seconds, so the card you are looking at can be
+up to fifteen seconds stale — which matters when the print it offers to pause
+has just finished. So the state is checked again, server-side, in the moment
+before the control is sent: usually from the farm listing that was going to be
+read anyway, and from the machine itself only on builds whose listing carries no
+readings. A Pause aimed at a finished print is refused rather than landing on
+whatever started next. Everything sent is written to the audit log.
+
+Nothing is retried. Every other Bambuddy call is a read and repeating one costs
+nothing; these change what a machine is physically doing, and a Stop quietly
+sent twice is not the same as one sent once.
+
+If your build has a control PrintFlow did not recognise, its path can be set by
+hand under **Settings → Bambuddy → Advanced**, alongside every other endpoint.
+
 ### The queue on each machine
 
 Each card says how many jobs are lined up on that machine and what is next, and
@@ -712,8 +758,9 @@ Cancelling something that never came from an order is fine and says so.
 Click a machine's name and it opens on its own, in four tabs, because the
 questions are different:
 
-* **Now** — the camera at full size refreshing every second, the progress bar,
-  temperatures, fan, speed, light and door, and the PrintFlow plates on it.
+* **Now** — the controls, the camera at full size refreshing every second, the
+  progress bar, temperatures, fan, speed, light and door, and the PrintFlow
+  plates on it.
 * **Queue** — the whole line on this machine, in order, with what each job is
   for and a way to take it out.
 * **Machine** — what it *is* rather than what it is doing: model, serial,
@@ -1748,7 +1795,10 @@ queue endpoints from that, whatever they are called on your build.
 Three layers decide the path actually used, weakest first:
 
 1. **Defaults** — `/api/printers`, `/api/archives`, `/api/queue`, spec at
-   `/openapi.json`. Only used when the other two say nothing.
+   `/openapi.json`. Only used when the other two say nothing. There is
+   deliberately no default for a **printer control**: a guessed listing path
+   that 404s costs one failed read, while a guessed control path is a POST at a
+   machine mid-print. Nothing discovered, no button.
 2. **Discovered** — read from the instance's OpenAPI document and re-read on
    every re-validation, so an upgrade that moves an endpoint is picked up.
 3. **Yours** — anything set under **Settings → Bambuddy → Advanced** wins and is

@@ -7,6 +7,7 @@ import type {
   FarmPrinter,
   FarmSummary,
   FilamentSpool,
+  PrinterControl,
   QueueJob,
   QueuedJob,
 } from '../lib/types'
@@ -255,6 +256,7 @@ export default function Printers() {
                           : [...seen, String(printer.id)],
                       )
                     }
+                    onControl={load}
                   />
                 ))}
               </div>
@@ -406,6 +408,7 @@ function PrinterCard({
   tick,
   onWatch,
   onBlind,
+  onControl,
 }: {
   printer: FarmPrinter
   renderPlate: (job: QueueJob) => JSX.Element
@@ -413,6 +416,8 @@ function PrinterCard({
   tick: number
   onWatch: () => void
   onBlind: () => void
+  /** Re-read the farm: a machine that was just paused says so on its own card. */
+  onControl: () => Promise<void> | void
 }) {
   const state = machineState(printer)
   const nozzle = temperature(printer.nozzle_temp, printer.nozzle_target)
@@ -534,6 +539,8 @@ function PrinterCard({
         <p className="text-xs text-red-700">{String(printer.error)}</p>
       ) : null}
 
+      <PrinterControls printer={printer} onDone={onControl} />
+
       <div className="mt-auto border-t border-ink-200 pt-2">
         {printer.plates.length ? (
           <div className="divide-y divide-ink-100">{printer.plates.map(renderPlate)}</div>
@@ -542,6 +549,104 @@ function PrinterCard({
         )}
       </div>
     </Card>
+  )
+}
+
+/** Pause, Resume, Stop — and whatever else this Bambuddy turned out to offer.
+ *
+ *  Which buttons exist is the instance's answer, read off its own API document,
+ *  so a build that cannot pause a print shows no Pause rather than one that
+ *  does nothing. Which are pressable is what the machine is doing: Resume on a
+ *  printing machine is a question with no answer.
+ *
+ *  The ones that do not apply stay put, greyed, with the reason on them. The
+ *  alternative — showing only what applies — is a row that rearranges itself
+ *  between the glance and the click, on a page that refreshes every fifteen
+ *  seconds, next to a button that ends a print.
+ */
+function PrinterControls({
+  printer,
+  onDone,
+  className,
+}: {
+  printer: FarmPrinter
+  onDone: () => Promise<void> | void
+  className?: string
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [asking, setAsking] = useState<PrinterControl | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+  // What the last press actually did, since most of these change nothing on
+  // screen for a second or two and a button that looks inert gets pressed again.
+  // It goes again shortly after: the card is left up for hours, and "Pause sent"
+  // still sitting there at teatime is a note about something else.
+  const [said, setSaid] = useState<string | null>(null)
+  useEffect(() => {
+    if (!said) return
+    const timer = setTimeout(() => setSaid(null), 6000)
+    return () => clearTimeout(timer)
+  }, [said])
+
+  if (!printer.controls?.length || printer.id === null) return null
+
+  const send = async (control: PrinterControl) => {
+    setAsking(null)
+    setBusy(control.action)
+    setFailed(null)
+    setSaid(null)
+    try {
+      await api.post(`/api/printers/${printer.id}/control/${control.action}`)
+      setSaid(`${control.label} sent`)
+      await onDone()
+    } catch (err) {
+      setFailed(errorMessage(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className={cx('flex flex-col gap-1', className)}>
+      <div className="flex flex-wrap gap-1">
+        {printer.controls.map((control) => (
+          <Button
+            key={control.action}
+            size="sm"
+            // Red only while it can actually be pressed. A farm of ten idle
+            // machines is otherwise ten pink Stop buttons pulling the eye
+            // towards the one thing none of them can do.
+            variant={control.danger && control.enabled ? 'danger' : 'secondary'}
+            disabled={!control.enabled || busy !== null}
+            title={control.why ?? `${control.label} this machine`}
+            onClick={() => (control.confirm ? setAsking(control) : send(control))}
+          >
+            {busy === control.action ? <Spinner /> : null}
+            {control.label}
+          </Button>
+        ))}
+      </div>
+      {failed ? <p className="text-xs text-red-700">{failed}</p> : null}
+      {said && !failed ? <p className="text-xs text-ink-500">{said}</p> : null}
+
+      <Modal
+        open={asking !== null}
+        title={asking?.label ?? ''}
+        onClose={() => setAsking(null)}
+      >
+        <p className="text-sm text-ink-700">{asking?.confirm}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setAsking(null)}>
+            Leave it
+          </Button>
+          <Button
+            variant={asking?.danger ? 'danger' : 'primary'}
+            onClick={() => asking && send(asking)}
+          >
+            {asking?.label}
+          </Button>
+        </div>
+      </Modal>
+    </div>
   )
 }
 
@@ -870,6 +975,10 @@ function PrinterDetail({
 
       {tab === 'now' ? (
         <div className="space-y-3">
+          {/* Above the picture, because this is the screen somebody opens when
+              they can see something going wrong and want it to stop. */}
+          <PrinterControls printer={printer} onDone={onPrinted} />
+
           {printer.camera ? (
             <LiveCamera printer={printer} />
           ) : (

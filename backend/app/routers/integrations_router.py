@@ -857,6 +857,9 @@ async def bambuddy_config(
     # asking. Re-validating is exactly the moment an upgrade would have added
     # one, so the question is allowed to be asked again.
     payload.pop("camera_checked", None)
+    # The same for controls: an upgrade that added a Pause endpoint should show
+    # up as a Pause button without anyone knowing to ask for it.
+    payload.pop("controls_checked", None)
     payload["api_version"] = spec.get("version")
     payload["openapi"] = spec
     payload["printers"] = printers

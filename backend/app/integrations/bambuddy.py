@@ -514,6 +514,124 @@ def discover_printer_files(spec_paths: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# What a build calls the things it can be told to do to one machine, and what
+# PrintFlow calls them. Spellings rather than guesses: every one of these has
+# been seen, and a build that says `cancel` means the same thing as one that
+# says `abort`.
+CONTROL_WORDS: dict[str, tuple[str, ...]] = {
+    "pause": ("pause",),
+    "resume": ("resume", "unpause", "continue"),
+    "stop": ("stop", "cancel", "abort"),
+    "home": ("home",),
+    "light": ("light", "lamp", "led", "chamberlight", "chamber_light"),
+    "unload": ("unload",),
+    "load": ("load",),
+    "calibrate": ("calibrate", "calibration"),
+    "speed": ("speed",),
+    "fan": ("fan",),
+}
+
+# POSTs under a printer that are not controls. Some are how PrintFlow already
+# does something (`print` is dispatch, and has a whole service behind it) and
+# some are plumbing that would be alarming as a button. A denylist rather than
+# an allowlist, because the point is to surface controls nobody has thought of
+# yet — a build's own oddity should appear, not be silently dropped.
+NOT_CONTROLS = frozenset(
+    {
+        "print", "printing", "job", "jobs", "queue", "file", "files", "upload",
+        "camera", "cam", "snapshot", "stream", "token", "status", "state",
+        "filament", "ams", "login", "auth", "connect", "disconnect", "delete",
+    }
+)
+
+# Wrappers a build may put its controls behind: /printers/{id}/control/pause.
+CONTROL_PARENTS = frozenset({"control", "controls", "command", "commands", "action", "actions"})
+
+
+def control_name(word: str) -> str:
+    """PrintFlow's name for a control, or the build's own where it is new."""
+    plain = re.sub(r"[-_.]", "", word.strip().lower())
+    for name, spellings in CONTROL_WORDS.items():
+        if plain in {re.sub(r"[-_.]", "", s) for s in spellings}:
+            return name
+    return word.strip().lower()
+
+
+def _score_printer_control(path: str, methods: set[str]) -> tuple[str, int] | None:
+    """Rank a spec path as "tell one machine to do something".
+
+    A control is a POST, the template is the printer, and what follows is the
+    verb — either directly, `/printers/{id}/pause`, or behind a wrapper the
+    build uses for all of them, `/printers/{id}/control/pause`.
+    """
+    if "post" not in methods:
+        return None
+    segments = [s for s in path.split("/") if s]
+    templated = [i for i, s in enumerate(segments) if s.startswith("{")]
+    if len(templated) != 1:
+        return None
+    slot = templated[0]
+    if slot == 0 or segments[slot - 1].lower().rstrip("s") not in ("printer", "device"):
+        return None
+
+    tail = [s.lower() for s in segments[slot + 1 :]]
+    if len(tail) == 2 and tail[0] in CONTROL_PARENTS:
+        tail = tail[1:]
+    if len(tail) != 1:
+        return None
+
+    verb = tail[0]
+    if verb in NOT_CONTROLS or verb.startswith("{"):
+        return None
+    # The shortest path wins: a build offering both `/pause` and
+    # `/control/pause` means the same thing by them.
+    return control_name(verb), -len(segments)
+
+
+def discover_printer_controls(spec_paths: dict[str, Any]) -> dict[str, str]:
+    """Every "do this to one machine" endpoint the build offers.
+
+    Returns {what PrintFlow calls it: the path}, the printer parameter renamed
+    to ours. Not limited to pause, resume and stop: a build that offers to home
+    the bed or flick the light says so in its own spec, and a control nobody
+    thought to hardcode is exactly the kind a shop misses having.
+    """
+    best: dict[str, tuple[int, str]] = {}
+    for path, operations in spec_paths.items():
+        if not isinstance(operations, dict):
+            continue
+        methods = {m.lower() for m in operations if isinstance(m, str)}
+        scored = _score_printer_control(str(path), methods)
+        if scored is None:
+            continue
+        name, rank = scored
+        normalized = re.sub(r"\{[^}]+\}", "{printer_id}", str(path))
+        if name not in best or rank > best[name][0]:
+            best[name] = (rank, normalized)
+    return {name: path for name, (_, path) in sorted(best.items())}
+
+
+# Controls are carried as ordinary path roles — `control_pause` and the rest —
+# so that everything already built for roles applies to them unchanged: the
+# operator can override one under Advanced, a 404 re-reads the document, and
+# what was found is stored beside the connection. The alternative, a map of its
+# own, would need all of that again.
+CONTROL_ROLE_PREFIX = "control_"
+
+
+def control_role(name: str) -> str:
+    return f"{CONTROL_ROLE_PREFIX}{name}"
+
+
+def controls_in(paths: dict[str, str]) -> dict[str, str]:
+    """The control roles out of a path table, back under their own names."""
+    return {
+        role[len(CONTROL_ROLE_PREFIX) :]: path
+        for role, path in sorted(paths.items())
+        if role.startswith(CONTROL_ROLE_PREFIX) and path
+    }
+
+
 def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
     """Read our endpoints off an OpenAPI document.
 
@@ -527,6 +645,8 @@ def discover_paths(spec_paths: dict[str, Any]) -> dict[str, Any]:
         "printer_camera": discover_printer_camera(spec_paths),
         "camera_token": discover_camera_token(spec_paths),
     }
+    for name, path in discover_printer_controls(spec_paths).items():
+        found[control_role(name)] = {"path": path, "alternatives": []}
     for name, role in PATH_ROLES.items():
         scored: list[tuple[int, str]] = []
         for path, operations in spec_paths.items():
@@ -2369,6 +2489,34 @@ class BambuddyClient:
             expected=(200, 202, 204, 404),
         )
 
+    def printer_controls(self) -> dict[str, str]:
+        """What this connection can tell one machine to do, and where.
+
+        Only what was found on the instance or typed under Advanced — there is
+        no default. A guessed control path is not a harmless 404 the way a
+        guessed listing path is: it is a POST at a machine that is mid-print,
+        and a build that happens to serve something else at that address would
+        be sent it. Nothing discovered, no button.
+        """
+        return controls_in(self.paths)
+
+    async def run_control(self, printer_id: Any, action: str) -> Any:
+        path = self.paths.get(control_role(action))
+        if not path:
+            raise IntegrationError(
+                PROVIDER_BAMBUDDY,
+                f"This Bambuddy does not offer a {action} control for a printer.",
+            )
+        # No retries. Everything else PrintFlow asks Bambuddy for is a read, and
+        # repeating a read costs nothing; this changes what a machine is doing.
+        # A stop that is quietly sent twice is not the same as one sent once.
+        return await self._call(
+            "POST",
+            path.replace("{printer_id}", str(printer_id)),
+            retries=0,
+            expected=(200, 201, 202, 204),
+        )
+
     def queue_item_url(self, queue_id: int | None) -> str | None:
         if queue_id is None:
             return None
@@ -2655,6 +2803,48 @@ async def ensure_filament(session: AsyncSession, client: BambuddyClient) -> bool
     payload["filament_checked"] = FILAMENT_RULES
     await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
     return False
+
+
+# And again for controls. Bumped whenever the rules for recognising one change,
+# so a connection that was read under narrower rules is asked afresh rather than
+# keeping an answer that is no longer the whole of it.
+CONTROL_RULES = 1
+
+
+async def ensure_controls(session: AsyncSession, client: BambuddyClient) -> dict[str, str]:
+    """What this instance can be told to do to a machine — asked once, then kept.
+
+    The farm screen is drawn on every refresh and these buttons are on every
+    card, so this cannot be a document read per load. It cannot be a guess
+    either: what a build offers varies, and a Pause button that turns out to
+    post nothing anywhere is worse than no button, because the operator walks
+    away believing the machine stopped.
+
+    So it is the camera's arrangement: read the instance's own spec once, store
+    what it stated beside the connection, and ask again only when the rules
+    change or somebody re-saves Settings.
+    """
+    found = client.printer_controls()
+    if found:
+        return found
+    payload = await credentials.load(session, PROVIDER_BAMBUDDY)
+    if payload is None:
+        return {}
+    if payload.get("controls_checked") == CONTROL_RULES:
+        return {}
+    spec = client.last_spec or await client.fetch_openapi()
+    client.last_spec = spec
+    discovered = spec.get("discovered") or {}
+    adopted = client.adopt_discovered(
+        {role: result for role, result in discovered.items()
+         if role.startswith(CONTROL_ROLE_PREFIX)}
+    )
+    if adopted:
+        await remember_paths(session, adopted)
+        return client.printer_controls()
+    payload["controls_checked"] = CONTROL_RULES
+    await credentials.save(session, PROVIDER_BAMBUDDY, payload, mark_connected=False)
+    return {}
 
 
 async def camera_report(
