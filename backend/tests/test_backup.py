@@ -577,8 +577,10 @@ async def _one_of_everything(db) -> dict[str, int]:
         BomLine,
         BomOptionRule,
         EtsyProductLink,
+        Machine,
         MadeSheet,
         MadeSheetLine,
+        MaintenanceLog,
         OAuthState,
         OrderLine,
         PrintJob,
@@ -670,6 +672,24 @@ async def _one_of_everything(db) -> dict[str, int]:
                 printer_models=["H2D"],
             ),
         ]
+    )
+    await db.flush()
+
+    # The maintenance book, which is PrintFlow's own and has to come back with
+    # everything else — it is the one record about a machine that exists
+    # nowhere but here.
+    machine = Machine(name="H2D-01", model="H2D", serial="03003A2C003")
+    db.add(machine)
+    await db.flush()
+    db.add(
+        MaintenanceLog(
+            machine_id=machine.id,
+            logged_on=now.date(),
+            hours=Decimal("1240.50"),
+            status="serviced",
+            notes="Nozzle changed",
+            actor="adam",
+        )
     )
     await db.commit()
 

@@ -1024,6 +1024,52 @@ detail, verbatim, the same diagnostic the file picker carries and for the same
 reason. No two self-hosted builds spell a temperature the same way, and a blank
 card cannot be diagnosed from outside. It can be shown.
 
+## Maintenance
+
+**The book of what has been done to each machine, and when.** A machine, and
+under it entries of four things: **hours**, **date**, **notes**, **status**.
+
+**These records are PrintFlow's own.** Everything else it knows about a printer
+comes from Bambuddy, is read live, is cached nowhere, and is gone the moment
+that connection is re-pointed or the printer re-added under a new id. A
+maintenance history cannot work that way. It is the one record about a machine
+that has to outlive changing farm managers, re-imaging the box, and the machine
+leaving the farm altogether — and plenty of shops service printers no farm
+manager ever saw. So the rows here are ours, and nothing on this tab needs
+Bambuddy, Etsy or QuickBooks to be connected at all.
+
+Adopting a machine from the farm is offered when you add one — it fills the name
+and model, and remembers which farm printer it is. That link is a convenience
+and only a convenience: clear it, break it, or point PrintFlow at a different
+Bambuddy, and every entry is still there.
+
+**Hours are the machine's own counter**, not how long the job took. "Nozzle
+changed at 1,240 hours" is what makes the next change predictable; how long it
+took to change is not. Leaving it blank is a real answer — plenty of entries get
+written up at the end of a shift rather than at the screen — and an invented
+zero would put a false reading between two true ones. Anything that is not a
+number is refused rather than stored as zero.
+
+**Status is what the machine is once that entry is written**: Serviced, Running
+fine, Service due, Needs attention, Out of service. The newest entry *is* the
+machine's condition — rather than a separate field somebody has to remember to
+change — so it can never drift from the history that explains it, and it is a
+thing they were going to write down anyway.
+
+Machines wanting a look sort to the top, with the ones nobody has logged yet
+just under them; a list in name order buries exactly the machine somebody opened
+the tab to find. **Retiring** a machine keeps its whole history and takes it out
+of the way, which is what is wanted nearly every time; deleting one is offered
+too, for the machine typed in by mistake, and takes its book with it.
+
+Entries can be corrected and deleted — this is a shop's own notebook rather than
+an accounting record, and a typo in an hour reading should be crossed out rather
+than lived with. The crossing-out is kept in the audit log, which is also the
+only place a deleted entry survives. Every entry is signed with whoever wrote
+it: a maintenance log nobody signed is one nobody can ask about.
+
+The whole book is in the backup, like everything else.
+
 ## Calculator
 
 **What a printed part costs to make**, and what it would have to sell for. Five

@@ -51,6 +51,15 @@ export function CalculatorIcon(props: IconProps) {
   )
 }
 
+/** A spanner: the maintenance book, not the machines themselves. */
+export function MaintenanceIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M15.5 3.5a5 5 0 0 0-5.9 6.4L3.7 15.8a2 2 0 1 0 2.8 2.8l5.9-5.9a5 5 0 0 0 6.4-5.9l-3 3-2.4-2.4Z" />
+    </Svg>
+  )
+}
+
 export function ManufacturingIcon(props: IconProps) {
   return (
     <Svg {...props}>

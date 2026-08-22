@@ -8,6 +8,7 @@ import Orders from './pages/Orders'
 import Products from './pages/Products'
 import Printers from './pages/Printers'
 import Calculator from './pages/Calculator'
+import Maintenance from './pages/Maintenance'
 import Manufacturing from './pages/Manufacturing'
 import Settings from './pages/Settings'
 import SyncLog from './pages/SyncLog'
@@ -73,6 +74,7 @@ export default function App() {
         <Route path="/print-queue" element={<Navigate to="/printers" replace />} />
         <Route path="/manufacturing" element={<Manufacturing />} />
         <Route path="/calculator" element={<Calculator />} />
+        <Route path="/maintenance" element={<Maintenance />} />
         <Route path="/sync-log" element={<SyncLog />} />
         <Route path="/settings" element={<Settings onChange={refresh} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

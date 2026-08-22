@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -1153,6 +1154,112 @@ class TlsCertificate(Base):
         CheckConstraint("source in ('generated','uploaded')", name="ck_tls_source"),
         Index("ix_tls_certificates_active", "active"),
     )
+
+
+# What a maintenance entry says the machine is, once that entry is written.
+# The newest entry is the machine's condition now, which is the question the
+# Maintenance tab exists to answer: which printer should somebody go and look at.
+MAINT_SERVICED = "serviced"
+MAINT_OK = "ok"
+MAINT_DUE = "due"
+MAINT_ATTENTION = "attention"
+MAINT_DOWN = "down"
+
+MAINTENANCE_STATUSES = (
+    MAINT_SERVICED,
+    MAINT_OK,
+    MAINT_DUE,
+    MAINT_ATTENTION,
+    MAINT_DOWN,
+)
+
+
+class Machine(Base):
+    """A printer, as PrintFlow's own maintenance records know it.
+
+    Deliberately not a Bambuddy printer. A maintenance history outlives the
+    software watching the machine: shops change farm managers, re-add printers
+    under new ids, run machines Bambuddy never saw, and keep servicing one long
+    after it has been taken out of the farm. A log keyed on somebody else's id
+    would lose all of that the day that id changed.
+
+    So the row is ours and the link is optional. `bambuddy_printer_id` is a
+    convenience — it lets the tab show what the machine is doing now, and lets a
+    farm listing be adopted in one press — and nothing breaks when it is empty,
+    wrong, or pointing at a printer that no longer exists.
+    """
+
+    __tablename__ = "machines"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(Text)
+    # The one identifier that really belongs to the machine rather than to any
+    # system watching it. Worth having when a warranty claim comes around.
+    serial: Mapped[str | None] = mapped_column(Text)
+    # Optional link to the farm. Text rather than an integer: builds differ on
+    # what a printer id is, and this is only ever compared as a string.
+    bambuddy_printer_id: Mapped[str | None] = mapped_column(Text)
+    # Standing notes about the machine itself — the modified part, the quirk,
+    # the thing the next person needs to know. Not a log entry; those are below.
+    notes: Mapped[str | None] = mapped_column(Text)
+    # Retired rather than deleted, so its history stays readable. Deleting is
+    # still possible and takes the logs with it, which is the operator's call.
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_machines_name"),
+        Index("ix_machines_bambuddy", "bambuddy_printer_id"),
+    )
+
+    logs: Mapped[list[MaintenanceLog]] = relationship(
+        back_populates="machine",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        # Newest first: the top of the list is the current state of the machine,
+        # and it is also what the condition badge is read from.
+        order_by="MaintenanceLog.logged_on.desc(), MaintenanceLog.created_at.desc()",
+    )
+
+
+class MaintenanceLog(Base):
+    """One thing that happened to a machine, on a date, at a running total.
+
+    Hours are the machine's own counter at the time rather than the length of
+    the job: "nozzle changed at 1,240 hours" is what makes the next change
+    predictable, and how long it took to change is not.
+    """
+
+    __tablename__ = "maintenance_logs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    machine_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("machines.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # A date rather than a timestamp: somebody writes these up at the end of a
+    # day, or a week later, and an hour nobody recorded is an hour invented.
+    logged_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # The machine's hour counter. Numeric because a reading of 1240.5 is a
+    # reading, and because a float would drift over years of entries.
+    hours: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default=MAINT_SERVICED)
+    notes: Mapped[str | None] = mapped_column(Text)
+    # Who wrote it. A maintenance log nobody signed is one nobody can ask about.
+    actor: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('serviced','ok','due','attention','down')",
+            name="ck_maintenance_logs_status",
+        ),
+        Index("ix_maintenance_logs_machine_date", "machine_id", "logged_on"),
+    )
+
+    machine: Mapped[Machine] = relationship(back_populates="logs")
 
 
 class SyncLog(Base):

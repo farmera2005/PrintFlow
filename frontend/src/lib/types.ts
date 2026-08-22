@@ -573,6 +573,52 @@ export interface StockMovement {
   error: string | null
 }
 
+/** What a maintenance entry says the machine is, once that entry is written. */
+export type MaintenanceStatus = 'serviced' | 'ok' | 'due' | 'attention' | 'down'
+
+/** One thing that happened to a machine, on a date, at a running total. */
+export interface MaintenanceLog {
+  id: string
+  machine_id: string
+  /** A day, not a moment: these get written up at the end of a shift. */
+  logged_on: string
+  /** The machine's own hour counter at the time, as a decimal string. Null
+   *  where nobody read it — a real answer, and better than an invented zero. */
+  hours: string | null
+  status: MaintenanceStatus
+  status_label: string
+  notes: string | null
+  actor: string | null
+  created_at: string
+}
+
+/** A printer, as PrintFlow's own maintenance records know it.
+ *
+ *  Deliberately not a Bambuddy printer: a maintenance history has to outlive
+ *  changing farm managers, re-adding a printer under a new id, and the machine
+ *  leaving the farm. `bambuddy_printer_id` is an optional convenience. */
+export interface Machine {
+  id: string
+  name: string
+  model: string | null
+  serial: string | null
+  bambuddy_printer_id: string | null
+  notes: string | null
+  active: boolean
+  /** Read from the newest entry rather than stored, so it cannot drift from
+   *  the history under it. Null for a machine nobody has logged yet. */
+  status: MaintenanceStatus | null
+  status_label: string | null
+  /** Whether that newest entry is the sort somebody should go and look at. */
+  needs_somebody: boolean
+  last_logged_on: string | null
+  /** The last hour reading anybody wrote down, which is not always the newest
+   *  entry — a note about a rattle need not carry the counter. */
+  last_hours: string | null
+  logs: MaintenanceLog[]
+  created_at: string
+}
+
 export interface FarmSummary {
   machines: number
   by_state: Record<string, number>

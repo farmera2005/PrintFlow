@@ -19,6 +19,7 @@ from .routers import (
     backup_router,
     integrations_router,
     calculator_router,
+    maintenance_router,
     manufacturing_router,
     orders_router,
     print_jobs_router,
@@ -75,6 +76,7 @@ app.include_router(integrations_router.router)
 app.include_router(products_router.router)
 app.include_router(manufacturing_router.router)
 app.include_router(calculator_router.router)
+app.include_router(maintenance_router.router)
 app.include_router(orders_router.router)
 app.include_router(print_jobs_router.router)
 app.include_router(printers_router.router)
