@@ -95,6 +95,7 @@ export default function Maintenance() {
   const retired = machines.filter((row) => !row.active)
   const shown = showRetired ? machines : machines.filter((row) => row.active)
   const wanting = machines.filter((row) => row.active && row.needs_somebody)
+  const opened = machines.find((row) => row.id === openId) ?? null
 
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
@@ -130,20 +131,15 @@ export default function Maintenance() {
             description="Add the printers you service. Each one keeps its own log of hours, dates, notes and condition — kept here rather than in whatever is watching the farm this year."
           />
         ) : (
-          <div className="space-y-2">
+          <Card className="divide-y divide-ink-100">
             {shown.map((machine) => (
               <MachineRow
                 key={machine.id}
                 machine={machine}
-                statuses={statuses}
-                open={openId === machine.id}
-                onToggle={() =>
-                  setOpenId((was) => (was === machine.id ? null : machine.id))
-                }
-                onChanged={load}
+                onOpen={() => setOpenId(machine.id)}
               />
             ))}
-          </div>
+          </Card>
         )}
 
         {retired.length && !showRetired ? (
@@ -165,64 +161,72 @@ export default function Maintenance() {
             setOpenId(id)
           }}
         />
+        {/* Looked up from the list each render rather than held as its own
+            copy, so a write that reloads the list is reflected in the popup
+            without a second fetch — and a machine deleted from inside it
+            simply stops being found, which closes it. */}
+        <MachineDialog
+          machine={opened}
+          statuses={statuses}
+          onClose={() => setOpenId(null)}
+          onChanged={load}
+        />
       </div>
     </div>
   )
 }
 
-function MachineRow({
-  machine,
-  statuses,
-  open,
-  onToggle,
-  onChanged,
-}: {
-  machine: Machine
-  statuses: { value: MaintenanceStatus; label: string }[]
-  open: boolean
-  onToggle: () => void
-  onChanged: () => Promise<void> | void
-}) {
+/** One line in the list: enough to decide whether to open it. */
+function MachineRow({ machine, onOpen }: { machine: Machine; onOpen: () => void }) {
   return (
-    <Card className={cx('overflow-hidden', !machine.active && 'opacity-70')}>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full flex-wrap items-center gap-2 p-3 text-left hover:bg-ink-50"
-      >
-        <span className="font-medium text-ink-900">{machine.name}</span>
-        {machine.model ? <Badge>{machine.model}</Badge> : null}
-        {machine.status ? (
-          <Badge className={TONE[machine.status] ?? ''}>{machine.status_label}</Badge>
-        ) : (
-          <Badge className="bg-ink-100 text-ink-600">no entries yet</Badge>
-        )}
-        {!machine.active ? (
-          <Badge className="bg-ink-100 text-ink-600">retired</Badge>
-        ) : null}
-        <span className="ml-auto text-xs text-ink-500">
-          {machine.last_hours ? `${hours(machine.last_hours)} · ` : ''}
-          {machine.last_logged_on ? day(machine.last_logged_on) : 'never logged'}
-          {machine.logs.length
-            ? ` · ${machine.logs.length} entr${machine.logs.length === 1 ? 'y' : 'ies'}`
-            : ''}
-        </span>
-      </button>
-
-      {open ? (
-        <MachineBook machine={machine} statuses={statuses} onChanged={onChanged} />
-      ) : null}
-    </Card>
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cx(
+        'flex w-full flex-wrap items-center gap-2 p-3 text-left hover:bg-ink-50',
+        !machine.active && 'opacity-70',
+      )}
+    >
+      <span className="font-medium text-ink-900">{machine.name}</span>
+      {machine.model ? <Badge>{machine.model}</Badge> : null}
+      {machine.status ? (
+        <Badge className={TONE[machine.status] ?? ''}>{machine.status_label}</Badge>
+      ) : (
+        <Badge className="bg-ink-100 text-ink-600">no entries yet</Badge>
+      )}
+      {!machine.active ? <Badge className="bg-ink-100 text-ink-600">retired</Badge> : null}
+      <span className="ml-auto text-xs text-ink-500">
+        {machine.last_hours ? `${hours(machine.last_hours)} · ` : ''}
+        {machine.last_logged_on ? day(machine.last_logged_on) : 'never logged'}
+        {machine.logs.length
+          ? ` · ${machine.logs.length} entr${machine.logs.length === 1 ? 'y' : 'ies'}`
+          : ''}
+      </span>
+    </button>
   )
 }
 
-function MachineBook({
+/** One machine, in full: what it is, what has been done to it, and the box to
+ *  add the next entry.
+ *
+ *  A popup rather than an expanding row. The list is for choosing a machine —
+ *  a shelf of them, read at a glance — and the book is for working on one, so
+ *  they are two things rather than one thing that grows. It also means the log
+ *  gets the whole width, which matters once a machine has a year of entries.
+ *
+ *  Editing swaps this panel rather than opening a second dialog on top of it:
+ *  stacked modals are two Escape presses and an ambiguous backdrop, and there
+ *  is nothing behind this one worth reading while a name is being changed.
+ */
+function MachineDialog({
   machine,
   statuses,
+  onClose,
   onChanged,
 }: {
-  machine: Machine
+  machine: Machine | null
   statuses: { value: MaintenanceStatus; label: string }[]
+  onClose: () => void
   onChanged: () => Promise<void> | void
 }) {
   const [busy, setBusy] = useState(false)
@@ -235,6 +239,17 @@ function MachineBook({
     notes: '',
   }
   const [draft, setDraft] = useState(blank)
+
+  // A fresh form and a closed editor for each machine, so opening the next one
+  // does not inherit half-typed notes meant for the last.
+  useEffect(() => {
+    setDraft(blank)
+    setEditing(false)
+    setError(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machine?.id])
+
+  if (machine === null) return null
 
   const write = async (path: string, method: 'post' | 'patch' | 'delete', body?: unknown) => {
     setBusy(true)
@@ -260,127 +275,162 @@ function MachineBook({
   }
 
   return (
-    <div className="space-y-3 border-t border-ink-200 p-3">
-      {machine.notes ? (
-        <p className="rounded-md bg-ink-50 p-2 text-sm text-ink-700">{machine.notes}</p>
-      ) : null}
-
-      {/* The date box needs room for a picker icon as well as the date; at
-          7rem the browser clips its own control. */}
-      <div className="grid gap-2 sm:grid-cols-[9.5rem_7rem_1fr_auto] sm:items-end">
-        <Field label="Date">
-          <input
-            type="date"
-            className={inputClass}
-            value={draft.logged_on}
-            disabled={busy}
-            onChange={(e) => setDraft((was) => ({ ...was, logged_on: e.target.value }))}
-          />
-        </Field>
-        <Field label="Hours">
-          <input
-            className={inputClass}
-            inputMode="decimal"
-            placeholder="1240"
-            value={draft.hours}
-            disabled={busy}
-            onChange={(e) => setDraft((was) => ({ ...was, hours: e.target.value }))}
-          />
-        </Field>
-        <Field label="Notes">
-          <input
-            className={inputClass}
-            placeholder="Nozzle changed, belts tensioned…"
-            value={draft.notes}
-            disabled={busy}
-            onChange={(e) => setDraft((was) => ({ ...was, notes: e.target.value }))}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addEntry()
-            }}
-          />
-        </Field>
-        <Field label="Status">
-          <select
-            className={inputClass}
-            value={draft.status}
-            disabled={busy}
-            onChange={(e) =>
-              setDraft((was) => ({ ...was, status: e.target.value as MaintenanceStatus }))
-            }
-          >
-            {statuses.map((row) => (
-              <option key={row.value} value={row.value}>
-                {row.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="primary" disabled={busy} onClick={addEntry}>
-          {busy ? 'Saving…' : 'Add entry'}
-        </Button>
-        <span className="text-xs text-ink-500">
-          Hours are the machine's own counter, not how long the job took — that
-          is what makes the next service predictable.
-        </span>
-      </div>
-
-      {error ? <Alert tone="error">{error}</Alert> : null}
-
-      {machine.logs.length ? (
-        <div className="divide-y divide-ink-100">
-          {machine.logs.map((entry) => (
-            <LogRow
-              key={entry.id}
-              machine={machine}
-              entry={entry}
-              busy={busy}
-              onDelete={() =>
-                write(
-                  `/api/maintenance/machines/${machine.id}/logs/${entry.id}`,
-                  'delete',
-                )
-              }
-            />
-          ))}
-        </div>
+    <Modal open title={machine.name} onClose={onClose} wide>
+      {editing ? (
+        <EditMachine
+          machine={machine}
+          onDone={() => setEditing(false)}
+          onDeleted={onClose}
+          onChanged={onChanged}
+        />
       ) : (
-        <p className="text-sm text-ink-500">
-          Nothing logged for this machine yet.
-        </p>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {machine.model ? <Badge>{machine.model}</Badge> : null}
+            {machine.status ? (
+              <Badge className={TONE[machine.status] ?? ''}>{machine.status_label}</Badge>
+            ) : (
+              <Badge className="bg-ink-100 text-ink-600">no entries yet</Badge>
+            )}
+            {!machine.active ? (
+              <Badge className="bg-ink-100 text-ink-600">retired</Badge>
+            ) : null}
+            {machine.serial ? (
+              <span className="font-mono text-xs text-ink-500">{machine.serial}</span>
+            ) : null}
+            <span className="ml-auto text-xs text-ink-500">
+              {machine.last_hours ? `${hours(machine.last_hours)} · ` : ''}
+              {machine.last_logged_on
+                ? `last logged ${day(machine.last_logged_on)}`
+                : 'never logged'}
+            </span>
+          </div>
+
+          {machine.notes ? (
+            <p className="rounded-md bg-ink-50 p-2 text-sm text-ink-700">{machine.notes}</p>
+          ) : null}
+
+          <div className="rounded-md ring-1 ring-ink-200 p-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+              Add an entry
+            </h3>
+            {/* The date box needs room for a picker icon as well as the date;
+                at 7rem the browser clips its own control. */}
+            <div className="mt-2 grid gap-2 sm:grid-cols-[9.5rem_7rem_1fr] sm:items-end">
+              <Field label="Date">
+                <input
+                  type="date"
+                  className={inputClass}
+                  value={draft.logged_on}
+                  disabled={busy}
+                  onChange={(e) => setDraft((was) => ({ ...was, logged_on: e.target.value }))}
+                />
+              </Field>
+              <Field label="Hours">
+                <input
+                  className={inputClass}
+                  inputMode="decimal"
+                  placeholder="1240"
+                  value={draft.hours}
+                  disabled={busy}
+                  onChange={(e) => setDraft((was) => ({ ...was, hours: e.target.value }))}
+                />
+              </Field>
+              <Field label="Status">
+                <select
+                  className={inputClass}
+                  value={draft.status}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setDraft((was) => ({ ...was, status: e.target.value as MaintenanceStatus }))
+                  }
+                >
+                  {statuses.map((row) => (
+                    <option key={row.value} value={row.value}>
+                      {row.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="mt-2">
+              <Field label="Notes">
+                <textarea
+                  className={cx(inputClass, 'h-16')}
+                  placeholder="Nozzle changed, belts tensioned…"
+                  value={draft.notes}
+                  disabled={busy}
+                  onChange={(e) => setDraft((was) => ({ ...was, notes: e.target.value }))}
+                />
+              </Field>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="primary" disabled={busy} onClick={addEntry}>
+                {busy ? 'Saving…' : 'Add entry'}
+              </Button>
+              <span className="text-xs text-ink-500">
+                Hours are the machine's own counter, not how long the job took —
+                that is what makes the next service predictable.
+              </span>
+            </div>
+          </div>
+
+          {error ? <Alert tone="error">{error}</Alert> : null}
+
+          {machine.logs.length ? (
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+                {machine.logs.length} entr{machine.logs.length === 1 ? 'y' : 'ies'}
+              </h3>
+              <div className="divide-y divide-ink-100">
+                {machine.logs.map((entry) => (
+                  <LogRow
+                    key={entry.id}
+                    machine={machine}
+                    entry={entry}
+                    busy={busy}
+                    onDelete={() =>
+                      write(
+                        `/api/maintenance/machines/${machine.id}/logs/${entry.id}`,
+                        'delete',
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-ink-500">Nothing logged for this machine yet.</p>
+          )}
+
+          <div className="flex flex-wrap gap-2 border-t border-ink-200 pt-3">
+            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+              Edit machine
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                write(`/api/maintenance/machines/${machine.id}`, 'patch', {
+                  active: !machine.active,
+                })
+              }
+              title={
+                machine.active
+                  ? 'Keeps its history and takes it out of the way'
+                  : 'Put it back in the list'
+              }
+            >
+              {machine.active ? 'Retire' : 'Un-retire'}
+            </Button>
+            <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </div>
       )}
-
-      <div className="flex flex-wrap gap-2 border-t border-ink-100 pt-2">
-        <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
-          Edit machine
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={busy}
-          onClick={() =>
-            write(`/api/maintenance/machines/${machine.id}`, 'patch', {
-              active: !machine.active,
-            })
-          }
-          title={
-            machine.active
-              ? 'Keeps its history and takes it out of the way'
-              : 'Put it back in the list'
-          }
-        >
-          {machine.active ? 'Retire' : 'Un-retire'}
-        </Button>
-      </div>
-
-      <EditMachine
-        machine={machine}
-        open={editing}
-        onClose={() => setEditing(false)}
-        onChanged={onChanged}
-      />
-    </div>
+    </Modal>
   )
 }
 
@@ -557,15 +607,21 @@ function AddMachine({
   )
 }
 
+/** What the machine *is*, edited in place inside its own popup.
+ *
+ *  A panel rather than a second dialog: stacked modals are two Escape presses
+ *  and an ambiguous backdrop, and there is nothing behind this one worth
+ *  reading while a name is being changed. */
 function EditMachine({
   machine,
-  open,
-  onClose,
+  onDone,
+  onDeleted,
   onChanged,
 }: {
   machine: Machine
-  open: boolean
-  onClose: () => void
+  onDone: () => void
+  /** Deleting takes the machine away, so the popup has nothing left to show. */
+  onDeleted: () => void
   onChanged: () => Promise<void> | void
 }) {
   const [draft, setDraft] = useState({
@@ -586,13 +642,13 @@ function EditMachine({
     })
   }, [machine.id, machine.name, machine.model, machine.serial, machine.notes])
 
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>, then: () => void) => {
     setBusy(true)
     setError(null)
     try {
       await action()
       await onChanged()
-      onClose()
+      then()
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -601,7 +657,7 @@ function EditMachine({
   }
 
   return (
-    <Modal open={open} title={machine.name} onClose={onClose}>
+    <div>
       <div className="space-y-2">
         <Field label="Name">
           <input
@@ -668,23 +724,25 @@ function EditMachine({
                   'entries? Retiring it instead keeps the history.',
               )
             ) {
-              run(() => api.del(`/api/maintenance/machines/${machine.id}`))
+              run(() => api.del(`/api/maintenance/machines/${machine.id}`), onDeleted)
             }
           }}
         >
           Delete
         </Button>
-        <Button variant="ghost" onClick={onClose}>
+        <Button variant="ghost" onClick={onDone}>
           Cancel
         </Button>
         <Button
           variant="primary"
           disabled={busy || !draft.name.trim()}
-          onClick={() => run(() => api.patch(`/api/maintenance/machines/${machine.id}`, draft))}
+          onClick={() =>
+            run(() => api.patch(`/api/maintenance/machines/${machine.id}`, draft), onDone)
+          }
         >
           {busy ? 'Saving…' : 'Save'}
         </Button>
       </div>
-    </Modal>
+    </div>
   )
 }

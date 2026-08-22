@@ -1026,8 +1026,17 @@ card cannot be diagnosed from outside. It can be shown.
 
 ## Maintenance
 
-**The book of what has been done to each machine, and when.** A machine, and
-under it entries of four things: **hours**, **date**, **notes**, **status**.
+**The book of what has been done to each machine, and when.** A list of the
+printers you service; selecting one opens it, with everything about it and its
+whole log in one place. Entries carry four things: **hours**, **date**,
+**notes**, **status**.
+
+A popup rather than a row that expands. The list is for *choosing* a machine —
+a shelf of them read at a glance, worst first — and the book is for *working on*
+one, so they are two things rather than one thing that grows under the cursor.
+It also gives the log the full width, which starts to matter once a machine has
+a year of entries. Editing a machine swaps that panel rather than opening a
+second dialog on top of it.
 
 **These records are PrintFlow's own.** Everything else it knows about a printer
 comes from Bambuddy, is read live, is cached nowhere, and is gone the moment
