@@ -1115,14 +1115,57 @@ async def wix_config(
         payload["orders_since"] = body.orders_since.strip() or None
     client = wix_api.WixClient(payload)
     try:
-        found = await client.validate()
+        # Belt and braces over the client's own bounded timeout: whatever goes
+        # wrong out there, this endpoint answers long before the proxy in front
+        # of PrintFlow gives up and serves its own 502 — which names PrintFlow's
+        # hostname and sends the operator looking in entirely the wrong place.
+        async with base_api.deadline(
+            PROVIDER_WIX,
+            "Checking the Wix API key",
+            hint=(
+                "check that this machine can reach www.wixapis.com — an "
+                "outbound firewall or proxy is the usual reason it cannot"
+            ),
+        ):
+            found = await client.validate()
     except IntegrationError as exc:
         await credentials.mark_error(session, PROVIDER_WIX, str(exc))
         await session.commit()
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        raise HTTPException(_wix_status(exc), str(exc)) from exc
     await credentials.save(session, PROVIDER_WIX, payload)
     await session.commit()
     return found
+
+
+# What Wix answers when the trouble is with what was typed into the form, not
+# with Wix. Each has a hint attached in the client that says how to fix it.
+#   401 the key is wrong        403 the key lacks the read permissions
+#   404 no site with that id    428 the site has no eCommerce app installed
+OPERATOR_FIXABLE = frozenset({401, 403, 404, 428})
+
+
+def _wix_status(exc: IntegrationError) -> int:
+    """The status that describes what actually went wrong.
+
+    Answering 502 to everything is what made this endpoint's failures
+    indistinguishable from the reverse proxy's own 502 page, which is the one
+    thing standing between the operator and the real reason. So:
+
+    * everything Wix refuses this form over is the operator's input — a
+      mistyped key, a site id from the wrong place, permissions never granted,
+      a site with no eCommerce app. 400 is never mistaken for an
+      infrastructure problem, nor stripped by an edge that replaces origin 5xx
+      with a page of its own;
+    * running out of time is a gateway timeout, and saying 504 distinguishes
+      "PrintFlow gave up waiting for Wix" from "the proxy gave up waiting for
+      PrintFlow" without anybody having to read a log;
+    * anything else really is an upstream failure.
+    """
+    if exc.status_code in OPERATOR_FIXABLE:
+        return status.HTTP_400_BAD_REQUEST
+    if isinstance(exc, base_api.DeadlineExceeded):
+        return status.HTTP_504_GATEWAY_TIMEOUT
+    return status.HTTP_502_BAD_GATEWAY
 
 
 class WixOrdersSinceRequest(BaseModel):

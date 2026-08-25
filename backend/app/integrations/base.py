@@ -78,9 +78,21 @@ class TransportFailed(IntegrationError):
     """
 
 
+# What to suggest when an operation runs out of time. The default suits a
+# service the operator configured the address of; a public API they cannot
+# have typed wrong needs different advice, hence the override.
+LOCAL_SERVICE_HINT = (
+    "check the address and port, and that the service is running"
+)
+
+
 @asynccontextmanager
 async def deadline(
-    provider: str, what: str, seconds: float = INTERACTIVE_BUDGET_SECONDS
+    provider: str,
+    what: str,
+    seconds: float = INTERACTIVE_BUDGET_SECONDS,
+    *,
+    hint: str = LOCAL_SERVICE_HINT,
 ) -> AsyncIterator[None]:
     """Cap a multi-request operation so a reply always beats the proxy.
 
@@ -95,8 +107,7 @@ async def deadline(
         raise DeadlineExceeded(
             provider,
             f"{what} did not finish within {int(seconds)}s. "
-            f"{provider} accepted the connection but never answered — "
-            "check the address and port, and that the service is running",
+            f"{provider} accepted the connection but never answered — {hint}",
         ) from exc
 
 

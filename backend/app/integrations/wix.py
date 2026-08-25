@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import PROVIDER_WIX
@@ -38,6 +39,22 @@ _limiter = RateLimiter(max_calls=100, period=60.0)
 
 # How many orders one page of the search asks for. Wix caps this at 100.
 PAGE_SIZE = 100
+
+# What a person pressing "Save & validate" waits behind.
+#
+# The background poll can afford the default patience — three retries at a 30s
+# read timeout is over two minutes, which costs nothing when no one is watching
+# and saves a poll cycle from a transient blip. An interactive check cannot:
+# PrintFlow sits behind a reverse proxy, Cloudflare gives up at 100s and serves
+# its own 502 page, and the operator is then told PrintFlow is broken when the
+# truth was "Wix never answered".
+#
+# So the interactive path answers once, quickly. Retrying a credential check is
+# close to pointless anyway — a key that is wrong is still wrong three attempts
+# later, and the only thing retrying buys is a transient 5xx, which the person
+# can retry themselves by pressing the button again.
+INTERACTIVE_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=10.0)
+INTERACTIVE_RETRIES = 0
 
 
 class WixClient:
@@ -60,9 +77,20 @@ class WixClient:
             "Accept": "application/json",
         }
 
-    async def _call(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        retries: int | None = None,
+        timeout: httpx.Timeout | None = None,
+        **kwargs: Any,
+    ) -> Any:
         await _limiter.acquire()
-        async with new_client(base_url=API_BASE) as client:
+        client_args: dict[str, Any] = {"base_url": API_BASE}
+        if timeout is not None:
+            client_args["timeout"] = timeout
+        async with new_client(**client_args) as client:
             try:
                 response = await request(
                     client,
@@ -70,6 +98,7 @@ class WixClient:
                     path,
                     provider=PROVIDER_WIX,
                     headers=self._headers(),
+                    **({} if retries is None else {"retries": retries}),
                     **kwargs,
                 )
             except IntegrationError as exc:
@@ -89,8 +118,13 @@ class WixClient:
         One page of one order rather than a dedicated ping: it exercises
         exactly the call the poll makes, so a key that reads orders is a key
         that has been shown to read orders.
+
+        Bounded, because somebody is watching a spinner and a proxy is watching
+        the clock — see INTERACTIVE_TIMEOUT.
         """
-        found = await self.search_orders(limit=1)
+        found = await self.search_orders(
+            limit=1, retries=INTERACTIVE_RETRIES, timeout=INTERACTIVE_TIMEOUT
+        )
         orders = found.get("orders") or []
         return {
             "site_id": self.site_id,
@@ -104,12 +138,17 @@ class WixClient:
         since: str | None = None,
         cursor: str | None = None,
         limit: int = PAGE_SIZE,
+        retries: int | None = None,
+        timeout: httpx.Timeout | None = None,
     ) -> dict[str, Any]:
         """One page of orders, newest first.
 
         A cursor and a filter cannot be sent together — Wix carries the
         original query inside the cursor — so a continuation sends only the
         cursor, which is why this takes both and uses one.
+
+        `retries` and `timeout` are how the interactive check borrows this call
+        without borrowing the background poll's patience.
         """
         if cursor:
             body: dict[str, Any] = {"search": {"cursorPaging": {"cursor": cursor}}}
@@ -121,7 +160,13 @@ class WixClient:
             if since:
                 search["filter"] = {"createdDate": {"$gte": since}}
             body = {"search": search}
-        return await self._call("POST", "/ecom/v1/orders/search", json=body)
+        return await self._call(
+            "POST",
+            "/ecom/v1/orders/search",
+            json=body,
+            retries=retries,
+            timeout=timeout,
+        )
 
     async def iter_orders(
         self, *, since: str | None = None, max_pages: int = 20
@@ -175,7 +220,13 @@ def _explain(exc: IntegrationError) -> IntegrationError:
     hint = hints.get(exc.status_code or 0)
     if not hint:
         return exc
-    return IntegrationError(
+    # `type(exc)` rather than IntegrationError: adding the hint must not quietly
+    # downgrade the class. A 401 arrives as AuthExpiredError, and rebuilding it
+    # as a plain IntegrationError loses the one fact worth keeping — that these
+    # are *credentials* being refused, not the service being broken. Everything
+    # that branches on that, from the route's status code to the app-wide
+    # "reconnect it in Settings" handler, stops seeing Wix.
+    return type(exc)(
         PROVIDER_WIX,
         f"{exc.args[0] if exc.args else 'Wix refused the request'}. {hint}",
         status_code=exc.status_code,

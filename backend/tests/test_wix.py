@@ -9,11 +9,14 @@ staying out of each other's way.
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
+import httpx
 import pytest
 from sqlalchemy import select
 
+from app.integrations import base as base_api
 from app.integrations import wix
 from app.integrations.base import IntegrationError
 from app.models import (
@@ -475,3 +478,119 @@ async def test_an_order_taken_before_wix_existed_is_still_an_etsy_order(db):
 
     assert order.source == SOURCE_ETSY
     assert order.external_id is None
+
+
+# --------------------------------------------------------------------------
+# Answering before the proxy gives up
+# --------------------------------------------------------------------------
+#
+# PrintFlow sits behind a reverse proxy. Cloudflare stops waiting at 100s and
+# serves its own 502 page — which names PrintFlow's hostname rather than the
+# service that was actually unreachable, so the operator is told PrintFlow is
+# broken and goes looking in the wrong place entirely.
+#
+# "Save & validate" is the endpoint most likely to hit it, because it is the
+# one that talks to a third party while somebody watches a spinner. These pin
+# the two properties that keep it from happening: it tries once, and it is
+# capped whatever happens out there.
+
+
+def _patch_transport(monkeypatch, handler):
+    """Point the Wix client's HTTP client at a canned handler."""
+
+    def fake(**kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return base_api.new_client(**kwargs)
+
+    monkeypatch.setattr(wix, "new_client", fake)
+
+
+def _client() -> wix.WixClient:
+    return wix.WixClient({"api_key": "k" * 12, "site_id": "site-1"})
+
+
+async def test_validate_asks_once_rather_than_four_times(monkeypatch):
+    """The retry budget is what pushed this past the proxy's patience.
+
+    Three retries at a 30s read timeout, plus backoff, is over two minutes —
+    so the proxy answered first and the operator never saw the real error. A
+    credential check has nothing to gain from retrying anyway: a key that is
+    wrong is still wrong on the fourth attempt.
+    """
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.url.path)
+        return httpx.Response(503, json={"message": "try later"})
+
+    _patch_transport(monkeypatch, handler)
+    with pytest.raises(IntegrationError):
+        await _client().validate()
+
+    assert len(attempts) == 1
+
+
+async def test_the_poll_still_retries(monkeypatch):
+    """Nobody is watching a background poll, so a blip should not cost a cycle."""
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.url.path)
+        # Fails once, then succeeds: enough to prove the retry happened,
+        # without paying for the whole backoff ladder in test time.
+        if len(attempts) < 2:
+            return httpx.Response(503, json={"message": "try later"})
+        return httpx.Response(200, json={"orders": [], "metadata": {"cursors": {}}})
+
+    _patch_transport(monkeypatch, handler)
+    found = await _client().search_orders()
+
+    assert found == {"orders": [], "metadata": {"cursors": {}}}
+    assert len(attempts) == 2
+
+
+async def test_validate_is_capped_even_if_wix_never_answers(monkeypatch):
+    """The backstop. Whatever happens out there, the endpoint answers.
+
+    A request that hangs forever is the case the retry cap alone does not
+    cover, and it is the one that produced the proxy's 502.
+    """
+    async def handler(request):
+        await asyncio.sleep(3600)
+        raise AssertionError("should never get here")
+
+    _patch_transport(monkeypatch, handler)
+    with pytest.raises(base_api.DeadlineExceeded) as caught:
+        async with base_api.deadline(
+            "wix", "Checking the Wix API key", seconds=0.2, hint="check the network"
+        ):
+            await _client().validate()
+
+    said = str(caught.value)
+    assert "Checking the Wix API key" in said
+    # The hint is the point: the default one talks about an address and a port,
+    # which is nonsense for an API whose address the operator never typed.
+    assert "check the network" in said
+    assert "address and port" not in said
+
+
+async def test_adding_a_hint_keeps_the_kind_of_failure_it_was():
+    """A 401 is credentials being refused, and must stay that.
+
+    `_explain` rebuilds the exception to add its hint, and rebuilding it as a
+    plain IntegrationError quietly threw away the subclass — so the route
+    answered 502 ("upstream is broken") to a key the operator had simply
+    mistyped, and the app-wide "reconnect it in Settings" handler stopped
+    seeing Wix at all.
+    """
+    rejected = base_api.AuthExpiredError(
+        "wix", "Authorisation was rejected", status_code=401
+    )
+    explained = wix._explain(rejected)
+
+    assert isinstance(explained, base_api.AuthExpiredError)
+    assert "copied whole" in str(explained)
+
+    # And a plain failure stays plain rather than being promoted.
+    plain = IntegrationError("wix", "Wix refused the request", status_code=404)
+    assert type(wix._explain(plain)) is IntegrationError
