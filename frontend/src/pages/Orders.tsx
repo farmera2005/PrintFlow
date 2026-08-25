@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import { COLUMN_LABELS, formatDateTime } from '../lib/format'
+import {
+  COLUMN_LABELS,
+  SOURCE_CLASSES,
+  SOURCE_LABELS,
+  formatDateTime,
+  sourcesWorthShowing,
+} from '../lib/format'
 import type { Order, OrderStatus } from '../lib/types'
 import InvoiceAction from '../components/InvoiceAction'
 import OrderDrawer from '../components/OrderDrawer'
@@ -113,7 +119,7 @@ export default function Orders() {
             description={
               query || filter !== 'all'
                 ? 'Try a different search, or clear the filter.'
-                : 'Orders appear here within a few minutes of arriving on Etsy.'
+                : 'Orders appear here within a few minutes of arriving on a connected shop.'
             }
           />
         ) : (
@@ -140,6 +146,11 @@ export default function Orders() {
                 <span className="font-mono text-sm font-semibold text-ink-900">
                   #{order.order_number}
                 </span>
+                {sourcesWorthShowing(data.orders) ? (
+                  <Badge className={SOURCE_CLASSES[order.source]}>
+                    {SOURCE_LABELS[order.source]}
+                  </Badge>
+                ) : null}
                 <span className="min-w-0 flex-1 truncate text-sm text-ink-600">
                   {order.buyer_name ?? 'Unknown buyer'}
                 </span>

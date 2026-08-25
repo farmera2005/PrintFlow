@@ -83,6 +83,10 @@ def _line_tree(order: Order) -> list[dict[str, Any]]:
             # remember the link — a listing with no SKU has nothing else.
             "etsy_listing_id": line.etsy_listing_id,
             "etsy_product_id": line.etsy_product_id,
+            # The same idea on the other channel: which catalogue item, and
+            # which variant of it, Wix sold.
+            "wix_catalog_item_id": line.wix_catalog_item_id,
+            "wix_variant_id": line.wix_variant_id,
             "assembled_at": line.assembled_at,
             # What QuickBooks was told about these units, and what went wrong
             # if it was not told. A removal that silently did not happen is the
@@ -155,6 +159,11 @@ def order_card(order: Order) -> dict[str, Any]:
     return {
         "id": order.id,
         "order_number": order.order_number,
+        # Which shop window sold it. Everything past intake treats an order the
+        # same whichever channel it came from, so this is for the person
+        # reading the card — a shop selling in two places needs to know which
+        # one to go and look at when a buyer asks.
+        "source": order.source,
         "etsy_receipt_id": order.etsy_receipt_id,
         "buyer_name": order.buyer_name,
         "placed_at": order.placed_at,

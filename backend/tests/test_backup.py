@@ -589,6 +589,7 @@ async def _one_of_everything(db) -> dict[str, int]:
     ProductVariation,
         SyncLog,
         TlsCertificate,
+        WixProductLink,
     )
 
     now = datetime.now(timezone.utc)
@@ -649,6 +650,9 @@ async def _one_of_everything(db) -> dict[str, int]:
                 quantity=1,
             ),
             EtsyProductLink(etsy_listing_id=12345, product_id=product.id),
+            WixProductLink(
+                wix_catalog_item_id="wix-item-1", product_id=product.id
+            ),
             ProductVariation(product_id=product.id, label="Large", options=[]),
             ProductOptionItem(
                 product_id=product.id,

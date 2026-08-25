@@ -205,6 +205,7 @@ function IntervalsCard({
   // anyway.
   const rows: [string, string, number, number][] = [
     ['etsy_minutes', 'Etsy receipt poll', 1, 240],
+    ['wix_minutes', 'Wix order poll', 1, 240],
     ['bambuddy_minutes', 'Bambuddy status reconcile', 1, 240],
     ['shipstation_minutes', 'ShipStation order match', 1, 240],
     ['tracking_minutes', 'Delivery check', 5, 1440],

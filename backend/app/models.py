@@ -172,7 +172,21 @@ PROVIDER_ETSY = "etsy"
 PROVIDER_QBO = "qbo"
 PROVIDER_BAMBUDDY = "bambuddy"
 PROVIDER_SHIPSTATION = "shipstation"
-PROVIDERS = (PROVIDER_ETSY, PROVIDER_QBO, PROVIDER_BAMBUDDY, PROVIDER_SHIPSTATION)
+PROVIDER_WIX = "wix"
+PROVIDERS = (
+    PROVIDER_ETSY,
+    PROVIDER_QBO,
+    PROVIDER_BAMBUDDY,
+    PROVIDER_SHIPSTATION,
+    PROVIDER_WIX,
+)
+
+# Where an order came from. A shop can sell the same thing through more than
+# one window, and everything past intake treats them identically — this says
+# which door it came through, and which poll owns re-reading it.
+SOURCE_ETSY = "etsy"
+SOURCE_WIX = "wix"
+ORDER_SOURCES = (SOURCE_ETSY, SOURCE_WIX)
 
 
 # --------------------------------------------------------------------------
@@ -255,6 +269,9 @@ class Product(Base):
         order_by="ProductOptionItem.position",
     )
     etsy_links: Mapped[list[EtsyProductLink]] = relationship(
+        back_populates="product", cascade="all, delete-orphan", lazy="selectin"
+    )
+    wix_links: Mapped[list[WixProductLink]] = relationship(
         back_populates="product", cascade="all, delete-orphan", lazy="selectin"
     )
     variations: Mapped[list[ProductVariation]] = relationship(
@@ -352,6 +369,64 @@ class EtsyProductLink(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="etsy_links")
+
+
+class WixProductLink(Base):
+    """A Wix catalogue item (or one variant of it) that means a given product.
+
+    The same idea as the Etsy link and a separate table on purpose. Etsy's is
+    entangled with the catalogue check — fetching listings, reconciling them,
+    reporting what has no SKU — which is Etsy machinery with no Wix equivalent
+    here. Widening it to carry both would drag all of that along for no gain,
+    so this is its own small thing.
+
+    Wix Stores does have first-class SKUs, so most orders match without ever
+    needing one of these. It exists for the shop that leaves them blank, and
+    for the item whose SKU does not match what PrintFlow calls the product:
+    matching it by hand once records the identity, and the next order of it
+    matches itself.
+    """
+
+    __tablename__ = "wix_product_links"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Wix ids are UUIDs, so text rather than a number.
+    wix_catalog_item_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Null means the whole item, whichever variant was bought — usually the
+    # right one, since options change the BOM through a rule rather than
+    # through the product.
+    wix_variant_id: Mapped[str | None] = mapped_column(Text)
+    # What it was called when the link was made, so the Products screen can
+    # show something a person recognises rather than a bare UUID.
+    item_title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        # Two partial indexes rather than one constraint, for the same reason
+        # as the Etsy links: a plain unique over both columns would let an
+        # item-wide link be added twice, because NULLs never collide.
+        Index(
+            "uq_wix_link_variant",
+            "wix_catalog_item_id",
+            "wix_variant_id",
+            unique=True,
+            postgresql_where=text("wix_variant_id is not null"),
+            sqlite_where=text("wix_variant_id is not null"),
+        ),
+        Index(
+            "uq_wix_link_item",
+            "wix_catalog_item_id",
+            unique=True,
+            postgresql_where=text("wix_variant_id is null"),
+            sqlite_where=text("wix_variant_id is null"),
+        ),
+    )
+
+    product: Mapped[Product] = relationship(back_populates="wix_links")
 
 
 class ProductVariation(Base):
@@ -640,7 +715,19 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    etsy_receipt_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    # Which shop window this came through. Everything downstream — printing,
+    # assembly, labels, the books — treats an order the same whichever channel
+    # sold it; this exists so the two can be told apart on screen, and so the
+    # bits that genuinely differ (where the prices live in `raw`, which poll
+    # re-fetches it) can ask.
+    source: Mapped[str] = mapped_column(Text, nullable=False, default=SOURCE_ETSY)
+    # The channel's own id for this order, as a string because channels
+    # disagree about what an id is — Etsy numbers them, Wix uses a UUID.
+    external_id: Mapped[str | None] = mapped_column(Text)
+    # Etsy's receipt id, kept as its own typed column because the Etsy poll,
+    # the fee sweep and every existing row are built on it. Null for an order
+    # that did not come from Etsy.
+    etsy_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
     order_number: Mapped[str] = mapped_column(Text, nullable=False)
     buyer_name: Mapped[str | None] = mapped_column(Text)
     placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -778,6 +865,25 @@ class Order(Base):
             name="ck_orders_fees_not_negative",
         ),
         Index("ix_orders_status", "status"),
+        # One order per channel id. Partial rather than plain, because a
+        # channel that has not been connected leaves the column null on every
+        # row and NULLs never collide — which is right, but only says so
+        # explicitly like this.
+        Index(
+            "uq_orders_source_external",
+            "source",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id is not null"),
+            sqlite_where=text("external_id is not null"),
+        ),
+        Index(
+            "uq_orders_etsy_receipt",
+            "etsy_receipt_id",
+            unique=True,
+            postgresql_where=text("etsy_receipt_id is not null"),
+            sqlite_where=text("etsy_receipt_id is not null"),
+        ),
     )
 
     lines: Mapped[list[OrderLine]] = relationship(
@@ -810,6 +916,13 @@ class OrderLine(Base):
     # to one variant.
     etsy_product_id: Mapped[int | None] = mapped_column(BigInteger)
     etsy_transaction_id: Mapped[int | None] = mapped_column(BigInteger)
+    # The same three things for a Wix order, as text: Wix ids are UUIDs. The
+    # catalogue item is the product in the shop's Wix store, the variant is the
+    # exact combination bought, and the line id is how this row finds its own
+    # price back in the stored order.
+    wix_catalog_item_id: Mapped[str | None] = mapped_column(Text)
+    wix_variant_id: Mapped[str | None] = mapped_column(Text)
+    wix_line_item_id: Mapped[str | None] = mapped_column(Text)
     sku_raw: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
     # The options the buyer chose on Etsy, normalised to

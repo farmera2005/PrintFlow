@@ -28,8 +28,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..integrations import etsy as etsy_api
+from ..integrations import wix
 from ..integrations.base import IntegrationError
-from ..models import Order
+from ..models import SOURCE_WIX, Order
 from ..services.manufacturing import money
 
 log = logging.getLogger("printflow.finance")
@@ -200,30 +201,49 @@ def fees_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def apply_receipt(order: Order) -> bool:
-    """Read the address and the money out of the receipt already stored.
+MONEY_FIELDS = (
+    "currency", "revenue", "items_total", "shipping_total", "tax_total",
+    "discount_total",
+)
+
+
+def _snapshot(order: Order) -> tuple[Any, ...]:
+    return (order.ship_to, *(getattr(order, field) for field in MONEY_FIELDS))
+
+
+def apply_stored(order: Order) -> bool:
+    """Read the address and the money out of the payload already stored.
 
     No API call: this is a payload PrintFlow has had since the order arrived.
     Every order gets this on every poll, which is what backfills the ones taken
     before any of it was being read.
+
+    Which reader runs depends on where the order came from. The two channels
+    describe the same six figures in different words, and this is the one place
+    that has to know the difference — everything downstream reads the columns.
     """
-    receipt = order.raw or {}
-    if not receipt:
+    payload = order.raw or {}
+    if not payload:
         return False
-    before = (
-        order.ship_to, order.currency, order.revenue, order.items_total,
-        order.shipping_total, order.tax_total, order.discount_total,
-    )
-    address = address_from(receipt)
+    before = _snapshot(order)
+    if order.source == SOURCE_WIX:
+        parsed = wix.parse_order(payload)
+        address = parsed.get("ship_to")
+        found = {field: parsed.get(field) for field in MONEY_FIELDS}
+    else:
+        address = address_from(payload)
+        found = totals_from(payload)
     if address:
         order.ship_to = address
-    for field, value in totals_from(receipt).items():
+    for field, value in found.items():
         if value is not None:
             setattr(order, field, value)
-    return before != (
-        order.ship_to, order.currency, order.revenue, order.items_total,
-        order.shipping_total, order.tax_total, order.discount_total,
-    )
+    return before != _snapshot(order)
+
+
+# The name intake and the fee sweep have always called it by. Kept because
+# "apply the receipt" is still exactly what it does for an Etsy order.
+apply_receipt = apply_stored
 
 
 async def backfill(session: AsyncSession, *, limit: int = 2000) -> dict[str, int]:
@@ -251,7 +271,7 @@ async def backfill(session: AsyncSession, *, limit: int = 2000) -> dict[str, int
         .scalars()
         .all()
     )
-    filled = sum(1 for order in orders if apply_receipt(order))
+    filled = sum(1 for order in orders if apply_stored(order))
     if filled:
         await session.flush()
     return {"looked_at": len(orders), "filled": filled}

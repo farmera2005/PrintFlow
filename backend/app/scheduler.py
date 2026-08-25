@@ -16,12 +16,14 @@ from sqlalchemy import select
 from .db import session_scope
 from .integrations import etsy as etsy_api
 from .integrations import qbo as qbo_api
+from .integrations import wix as wix_api
 from .integrations.base import IntegrationError
 from .models import (
     PROVIDER_BAMBUDDY,
     PROVIDER_ETSY,
     PROVIDER_QBO,
     PROVIDER_SHIPSTATION,
+    PROVIDER_WIX,
     ORDER_SHIPPED,
     Order,
 )
@@ -40,6 +42,7 @@ from .services.settings_store import get_poll_intervals, is_setup_complete
 log = logging.getLogger("printflow.scheduler")
 
 JOB_ETSY = "etsy_receipt_poll"
+JOB_WIX = "wix_order_poll"
 JOB_BAMBUDDY = "bambuddy_status_reconcile"
 JOB_SHIPSTATION = "shipstation_order_match"
 JOB_TRACKING = "shipment_delivery_poll"
@@ -120,6 +123,51 @@ async def poll_etsy() -> dict[str, Any]:
 
     # Newly planned plates go out on the next line, so a fresh order does not
     # wait a full Bambuddy cycle before printing starts.
+    try:
+        await dispatch_prints()
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Post-intake dispatch failed: %s", exc)
+    return stats
+
+
+async def poll_wix() -> dict[str, Any]:
+    """The same job as the Etsy poll, for the other shop window.
+
+    Deliberately its own job rather than a branch inside that one: the two
+    channels fail independently, and a Wix key that has expired must not stop
+    Etsy orders arriving — or make the Etsy row on the Settings screen go red.
+    """
+    async with session_scope() as session:
+        if not await is_setup_complete(session):
+            return {"skipped": "setup incomplete"}
+        async with sync_log.run(session, JOB_WIX) as record:
+            await session.commit()
+            try:
+                client = await wix_api.client_for(session)
+            except IntegrationNotConfigured:
+                record.note("Wix not connected")
+                await session.commit()
+                return {"skipped": "not connected"}
+            try:
+                orders = await client.iter_orders(
+                    # Set when the connection is made, so connecting an
+                    # established site does not import its whole history.
+                    since=client.payload.get("orders_since"),
+                )
+            except IntegrationError as exc:
+                await credentials.mark_error(session, PROVIDER_WIX, str(exc))
+                await session.commit()
+                raise
+            stats = await intake.ingest_wix_orders(session, orders)
+            await credentials.mark_ok(session, PROVIDER_WIX)
+            record.note(
+                f"{stats['seen']} orders: {stats['created']} new, "
+                f"{stats['skipped']} already known, {stats['errors']} errors"
+            )
+            await session.commit()
+
+    # Same as Etsy's: a fresh order's plates go out on the next line rather
+    # than waiting a full Bambuddy cycle.
     try:
         await dispatch_prints()
     except Exception as exc:  # pragma: no cover - defensive
@@ -269,6 +317,7 @@ async def refresh_qbo_token() -> dict[str, Any]:
 
 JOBS: dict[str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]] = {
     JOB_ETSY: poll_etsy,
+    JOB_WIX: poll_wix,
     JOB_BAMBUDDY: reconcile_bambuddy,
     JOB_SHIPSTATION: match_shipstation,
     JOB_TRACKING: poll_tracking,
@@ -277,6 +326,7 @@ JOBS: dict[str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]] = {
 
 PROVIDER_JOBS = {
     PROVIDER_ETSY: JOB_ETSY,
+    PROVIDER_WIX: JOB_WIX,
     PROVIDER_BAMBUDDY: JOB_BAMBUDDY,
     PROVIDER_SHIPSTATION: JOB_SHIPSTATION,
     PROVIDER_QBO: JOB_QBO,
@@ -315,6 +365,7 @@ async def configure_jobs() -> None:
 
     plan = {
         JOB_ETSY: intervals["etsy_minutes"],
+        JOB_WIX: intervals["wix_minutes"],
         JOB_BAMBUDDY: intervals["bambuddy_minutes"],
         JOB_SHIPSTATION: intervals["shipstation_minutes"],
         JOB_TRACKING: intervals["tracking_minutes"],

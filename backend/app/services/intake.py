@@ -1,4 +1,11 @@
-"""Etsy receipt intake: ingest → SKU match → bundle explosion → decisioning (§4.1)."""
+"""Order intake: ingest → match → bundle explosion → decisioning (§4.1).
+
+Two channels arrive here and leave as the same thing. An Etsy receipt and a Wix
+order describe a sale in different words — different ids, different money
+shapes, different names for the options a buyer picked — and this is where that
+stops mattering. Past `process_order` nothing downstream knows or cares which
+window the order came through.
+"""
 
 from __future__ import annotations
 
@@ -10,18 +17,21 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..integrations import wix as wix_api
 from ..models import (
     BomOptionRule,
     EtsyProductLink,
     LINE_EXPLODED,
     LINE_NEW,
     LINE_UNMATCHED,
+    SOURCE_WIX,
     BomLine,
     Order,
     OrderLine,
     PrintJob,
     Product,
     ProductVariation,
+    WixProductLink,
 )
 from ..services import allocation, bom_options, finance, printing, variations
 from ..services.state import recompute_order
@@ -250,6 +260,244 @@ async def apply_etsy_link(session: AsyncSession, link: EtsyProductLink) -> int:
     return fixed
 
 
+# --------------------------------------------------------------------------
+# The same three things, for Wix
+# --------------------------------------------------------------------------
+#
+# Wix Stores has first-class SKUs, so nearly every line matches on the product
+# code and never reaches any of this. It exists for the shop that leaves them
+# blank, and for the item whose SKU is not what PrintFlow calls the product:
+# matching one by hand records the identity, and the next order matches itself.
+
+
+async def match_by_wix_ids(
+    session: AsyncSession, catalog_item_id: str | None, variant_id: str | None
+) -> tuple[Product | None, str | None]:
+    """Match on the catalogue item itself, for an item that carries no SKU.
+
+    Most specific first: a link to this exact variant beats one covering the
+    whole item. Returns (product, how) so a line can say what it matched on.
+    """
+    if not catalog_item_id:
+        return None, None
+
+    if variant_id:
+        link = (
+            await session.execute(
+                select(WixProductLink).where(
+                    WixProductLink.wix_catalog_item_id == catalog_item_id,
+                    WixProductLink.wix_variant_id == variant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if link is not None:
+            product = await session.get(Product, link.product_id)
+            if product is not None:
+                return product, "wix_variant"
+
+    link = (
+        await session.execute(
+            select(WixProductLink).where(
+                WixProductLink.wix_catalog_item_id == catalog_item_id,
+                WixProductLink.wix_variant_id.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if link is not None:
+        product = await session.get(Product, link.product_id)
+        if product is not None:
+            return product, "wix_item"
+    return None, None
+
+
+async def remember_wix_link(
+    session: AsyncSession, line: OrderLine, product: Product, scope: str
+) -> WixProductLink | None:
+    """Record "this Wix item is this product", so the next order matches itself.
+
+    Returns None when the line has no catalogue item to hang the link on — an
+    order typed in by hand, or one from a site that sells something PrintFlow's
+    catalogue has never seen.
+    """
+    item_id = line.wix_catalog_item_id
+    if not item_id:
+        return None
+
+    variant = line.wix_variant_id if scope == LINK_SCOPE_VARIANT else None
+    stmt = select(WixProductLink).where(WixProductLink.wix_catalog_item_id == item_id)
+    stmt = (
+        stmt.where(WixProductLink.wix_variant_id == variant)
+        if variant is not None
+        else stmt.where(WixProductLink.wix_variant_id.is_(None))
+    )
+    link = (await session.execute(stmt)).scalar_one_or_none()
+    if link is None:
+        link = WixProductLink(
+            product_id=product.id,
+            wix_catalog_item_id=item_id,
+            wix_variant_id=variant,
+            item_title=line.title,
+        )
+        session.add(link)
+    else:
+        link.product_id = product.id
+        link.item_title = line.title or link.item_title
+    await session.flush()
+    return link
+
+
+async def apply_wix_link(session: AsyncSession, link: WixProductLink) -> int:
+    """Re-resolve unmatched lines the new link now covers. Returns how many moved.
+
+    An item usually sells more than once before anybody notices it never
+    matched, so linking it clears the backlog rather than only the line the
+    operator happened to be looking at.
+    """
+    stmt = select(OrderLine).where(
+        OrderLine.state == LINE_UNMATCHED,
+        OrderLine.wix_catalog_item_id == link.wix_catalog_item_id,
+    )
+    if link.wix_variant_id is not None:
+        stmt = stmt.where(OrderLine.wix_variant_id == link.wix_variant_id)
+    lines = (await session.execute(stmt)).scalars().all()
+
+    fixed = 0
+    for line in lines:
+        produced = await resolve_line(session, line)
+        if not produced:
+            continue
+        fixed += 1
+        await allocation.decide_lines(session, produced)
+        await printing.plan_jobs(session, produced)
+        order = await session.get(Order, line.order_id)
+        if order is not None:
+            await recompute_order(session, order)
+    return fixed
+
+
+async def match_by_channel(
+    session: AsyncSession, line: OrderLine
+) -> tuple[Product | None, str | None]:
+    """Whichever channel's identity this line carries, matched.
+
+    A line has one or the other, never both, so this is a dispatch rather than
+    a search: an Etsy line has listing ids, a Wix line has catalogue ids.
+    """
+    if line.wix_catalog_item_id:
+        return await match_by_wix_ids(
+            session, line.wix_catalog_item_id, line.wix_variant_id
+        )
+    return await match_by_etsy_ids(session, line.etsy_listing_id, line.etsy_product_id)
+
+
+async def remember_channel_link(
+    session: AsyncSession, line: OrderLine, product: Product, scope: str
+) -> Any:
+    """Record the identity on whichever channel the line came from."""
+    if line.wix_catalog_item_id:
+        return await remember_wix_link(session, line, product, scope)
+    return await remember_etsy_link(session, line, product, scope)
+
+
+async def apply_channel_link(session: AsyncSession, link: Any) -> int:
+    """Clear the backlog a link of either kind now covers."""
+    if isinstance(link, WixProductLink):
+        return await apply_wix_link(session, link)
+    return await apply_etsy_link(session, link)
+
+
+def link_identity(link: Any) -> Any:
+    """What to write in the audit trail as "what was remembered"."""
+    if isinstance(link, WixProductLink):
+        return link.wix_variant_id or link.wix_catalog_item_id
+    return link.etsy_product_id or link.etsy_listing_id
+
+
+async def ingest_wix_order(
+    session: AsyncSession, order_payload: dict[str, Any]
+) -> tuple[Order, bool]:
+    """Upsert one Wix order. Returns (order, created). Idempotent, like Etsy's.
+
+    Everything past this point is the same pipeline: the lines are matched,
+    bundles explode, stock is decided, plates are planned. An order from Wix is
+    an order.
+    """
+    parsed = wix_api.parse_order(order_payload)
+    wix_id = parsed.get("wix_order_id")
+    if not wix_id:
+        raise ValueError("Wix order has no id")
+
+    order = (
+        await session.execute(
+            select(Order).where(
+                Order.source == SOURCE_WIX, Order.external_id == wix_id
+            )
+        )
+    ).scalar_one_or_none()
+
+    if order is not None:
+        # Already ingested. Refresh what Wix may have changed since — an
+        # address correction, a discount applied after the fact — without
+        # re-importing lines, which would duplicate them.
+        order.raw = order_payload
+        order.buyer_name = parsed.get("buyer_name") or order.buyer_name
+        finance.apply_stored(order)
+        await session.flush()
+        if await backfill_variations(session, order):
+            await process_order(session, order)
+        return order, False
+
+    order = Order(
+        source=SOURCE_WIX,
+        external_id=wix_id,
+        # Wix's own number, which is what the shop and the buyer both call it.
+        order_number=parsed.get("number") or wix_id,
+        buyer_name=parsed.get("buyer_name"),
+        placed_at=parsed.get("placed_at"),
+        raw=order_payload,
+    )
+    session.add(order)
+    finance.apply_stored(order)
+    await session.flush()
+
+    for item in parsed["lines"]:
+        session.add(
+            OrderLine(
+                order_id=order.id,
+                sku_raw=item.get("sku"),
+                title=item.get("title"),
+                quantity=item.get("quantity") or 1,
+                wix_line_item_id=item.get("wix_line_item_id"),
+                wix_catalog_item_id=item.get("wix_catalog_item_id"),
+                wix_variant_id=item.get("wix_variant_id"),
+                variations=item.get("options") or [],
+                state=LINE_NEW,
+            )
+        )
+
+    await session.flush()
+    await process_order(session, order)
+    return order, True
+
+
+async def ingest_wix_orders(
+    session: AsyncSession, orders: list[dict[str, Any]]
+) -> dict[str, int]:
+    stats = {"seen": 0, "created": 0, "skipped": 0, "errors": 0}
+    for payload in orders:
+        stats["seen"] += 1
+        try:
+            _, created = await ingest_wix_order(session, payload)
+        except Exception as exc:  # one bad order must not stop the poll
+            stats["errors"] += 1
+            log.exception("Failed to ingest Wix order %s: %s", payload.get("id"), exc)
+            await session.rollback()
+            continue
+        stats["created" if created else "skipped"] += 1
+        await session.commit()
+    return stats
+
+
 async def ingest_receipt(session: AsyncSession, receipt: dict[str, Any]) -> tuple[Order, bool]:
     """Upsert an Etsy receipt. Returns (order, created). Idempotent (§6)."""
     receipt_id = receipt.get("receipt_id")
@@ -436,13 +684,11 @@ async def resolve_line(session: AsyncSession, line: OrderLine) -> list[OrderLine
     line itself otherwise).
     """
     if line.product_id is None:
-        # The Etsy identity comes first. It is on every receipt, it is what the
-        # operator linked deliberately, and it does not depend on the shop
-        # having filled in a field Etsy never required. A product code is only
-        # consulted when the listing itself is not linked to anything.
-        product, _how = await match_by_etsy_ids(
-            session, line.etsy_listing_id, line.etsy_product_id
-        )
+        # The channel's own identity comes first. It is on every order, it is
+        # what the operator linked deliberately, and it does not depend on the
+        # shop having filled in a field the channel never required. A product
+        # code is only consulted when the listing itself is linked to nothing.
+        product, _how = await match_by_channel(session, line)
         if product is None:
             product = await match_product(session, line.sku_raw)
         if product is None:

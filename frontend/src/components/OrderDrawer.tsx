@@ -6,6 +6,8 @@ import {
   JOB_STATUS_CLASSES,
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
+  SOURCE_CLASSES,
+  SOURCE_LABELS,
   TRACKING_CLASSES,
   TRACKING_LABELS,
   formatDateTime,
@@ -35,10 +37,46 @@ const TABS = [
 
 type Tab = (typeof TABS)[number]['key']
 
-/** What to remember about the Etsy listing when a product is picked. */
+/** What to remember about the listing or catalogue item when a product is picked. */
 export interface RememberChoice {
   remember: boolean
   remember_scope: 'listing' | 'variant'
+}
+
+/** What this line is called on the channel it came from.
+ *
+ * Both channels have the same two ideas — the thing being sold, and which
+ * variation of it — under different names and different id types. The picker
+ * only needs the two ids and the words to put around them. */
+function channelIdentity(line: OrderLine | null): {
+  channel: 'Etsy' | 'Wix'
+  itemId: string | null
+  variantId: string | null
+  itemWord: string
+  variantWord: string
+  caveat: string | null
+} {
+  if (line?.wix_catalog_item_id) {
+    return {
+      channel: 'Wix',
+      itemId: line.wix_catalog_item_id,
+      variantId: line.wix_variant_id,
+      itemWord: 'item',
+      variantWord: 'variant',
+      caveat: null,
+    }
+  }
+  return {
+    channel: 'Etsy',
+    itemId: line?.etsy_listing_id != null ? String(line.etsy_listing_id) : null,
+    variantId: line?.etsy_product_id != null ? String(line.etsy_product_id) : null,
+    itemWord: 'listing',
+    variantWord: 'variation',
+    caveat:
+      "Etsy issues a new id for a variation whenever the listing's options are " +
+      'edited, so a variation link stops matching after the next edit. Prefer the ' +
+      'whole listing and let option rules handle the differences.',
+  }
 }
 
 function ProductPicker({
@@ -53,8 +91,9 @@ function ProductPicker({
   line: OrderLine | null
 }) {
   const skuHint = line?.sku_raw ?? null
-  const listingId = line?.etsy_listing_id ?? null
-  const variantId = line?.etsy_product_id ?? null
+  const { channel, itemId, variantId, itemWord, variantWord, caveat } =
+    channelIdentity(line)
+  const listingId = itemId
 
   const [query, setQuery] = useState(skuHint ?? '')
   const [products, setProducts] = useState<Product[]>([])
@@ -85,11 +124,11 @@ function ProductPicker({
       <p className="mb-3 text-sm text-ink-600">
         {listingId ? (
           <>
-            This line came from Etsy listing{' '}
+            This line came from {channel} {itemWord}{' '}
             <code className="font-mono">{listingId}</code>
             {variantId ? (
               <>
-                , variation <code className="font-mono">{variantId}</code>
+                , {variantWord} <code className="font-mono">{variantId}</code>
               </>
             ) : null}
             .{' '}
@@ -115,8 +154,8 @@ function ProductPicker({
               onChange={(e) => setRemember(e.target.checked)}
             />
             <span>
-              Remember this listing, so future orders match on their own — and clear any
-              orders already waiting on it.
+              Remember this {itemWord}, so future orders match on their own — and clear
+              any orders already waiting on it.
             </span>
           </label>
           {remember && variantId ? (
@@ -125,16 +164,16 @@ function ProductPicker({
               value={scope}
               onChange={(e) => setScope(e.target.value as 'listing' | 'variant')}
             >
-              <option value="listing">The whole listing ({listingId})</option>
-              <option value="variant">Only this variation ({variantId})</option>
+              <option value="listing">
+                The whole {itemWord} ({listingId})
+              </option>
+              <option value="variant">
+                Only this {variantWord} ({variantId})
+              </option>
             </select>
           ) : null}
-          {remember && variantId && scope === 'variant' ? (
-            <p className="mt-1.5 text-xs text-ink-500">
-              Etsy issues a new id for a variation whenever the listing's options are
-              edited, so a variation link stops matching after the next edit. Prefer the
-              whole listing and let option rules handle the differences.
-            </p>
+          {remember && variantId && scope === 'variant' && caveat ? (
+            <p className="mt-1.5 text-xs text-ink-500">{caveat}</p>
           ) : null}
         </div>
       ) : null}
@@ -675,8 +714,16 @@ export default function OrderDrawer({
         <div className="flex h-full w-full max-w-2xl flex-col bg-ink-50 shadow-xl">
           <header className="flex flex-wrap items-center gap-3 border-b border-ink-200 bg-white px-4 py-3">
             <div className="min-w-0">
-              <h2 className="font-mono text-base font-semibold text-ink-900">
+              <h2 className="flex items-center gap-2 font-mono text-base font-semibold text-ink-900">
                 #{order?.order_number ?? '…'}
+                {/* Always here, unlike on a card: this is the one order, and
+                    "which shop do I go and look at" is the first thing asked
+                    of it when a buyer writes in. */}
+                {order ? (
+                  <Badge className={SOURCE_CLASSES[order.source]}>
+                    {SOURCE_LABELS[order.source]}
+                  </Badge>
+                ) : null}
               </h2>
               <p className="truncate text-sm text-ink-500">
                 {order?.buyer_name ?? ''}
@@ -893,7 +940,7 @@ export default function OrderDrawer({
                     target="_blank"
                     rel="noreferrer"
                   >
-                    View raw Etsy payload
+                    View raw {SOURCE_LABELS[order.source]} payload
                   </a>
                 </section>
               </>
@@ -961,8 +1008,9 @@ export default function OrderDrawer({
  *  The parts are shown only when there is no formatted version. */
 function ShipTo({ order }: { order: Order }) {
   const to = order.ship_to
+  const channel = SOURCE_LABELS[order.source]
   // An empty block that explains itself, rather than one that is simply not
-  // there: "PrintFlow has not read it" and "Etsy did not send one" are
+  // there: "PrintFlow has not read it" and "the shop did not send one" are
   // different, and only one of them is worth anybody's time.
   if (!to) {
     return (
@@ -971,9 +1019,9 @@ function ShipTo({ order }: { order: Order }) {
           Ship to
         </h3>
         <p className="mt-2 text-sm text-ink-500">
-          Etsy's receipt for this order carries no address. Older receipts
+          What {channel} sent for this order carries no address. Older orders
           predate PrintFlow reading it — the next poll fills them in; if this
-          one stays empty, <em>View raw Etsy payload</em> below shows what
+          one stays empty, <em>View raw {channel} payload</em> below shows what
           arrived.
         </p>
       </section>
@@ -1040,8 +1088,13 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
     ['Tax', show(order.tax_total)],
     ['Discount', order.discount_total ? `−${show(order.discount_total)}` : null],
   ]
+  // Etsy is the only channel PrintFlow can sweep a fee ledger from, so on a
+  // Wix order these three are whatever somebody typed. The first row is named
+  // after the channel rather than after the column it is stored in — "Etsy
+  // fees" on a Wix order is a figure nobody can account for.
+  const sweepable = order.source === 'etsy'
   const costs: [string, string | null][] = [
-    ['Etsy fees', show(order.etsy_fees)],
+    [`${SOURCE_LABELS[order.source]} fees`, show(order.etsy_fees)],
     ['Marketing fees', show(order.marketing_fees)],
     ['Processing fees', show(order.processing_fees)],
     ['Shipping label', show(order.label_cost)],
@@ -1054,20 +1107,23 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
         <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
           Money
         </h3>
-        <button
-          type="button"
-          className="ml-auto text-xs text-ink-500 underline"
-          onClick={() => api.post('/api/orders/finances/refresh').then(onRefreshed)}
-        >
-          Check Etsy for fees
-        </button>
+        {sweepable ? (
+          <button
+            type="button"
+            className="ml-auto text-xs text-ink-500 underline"
+            onClick={() => api.post('/api/orders/finances/refresh').then(onRefreshed)}
+          >
+            Check Etsy for fees
+          </button>
+        ) : null}
       </div>
 
       {!order.revenue ? (
         <p className="mt-2 text-sm text-ink-500">
-          Etsy's receipt for this order carries no totals. The next poll reads
-          them out of the payload already stored, so this fills itself in;
-          <em> View raw Etsy payload</em> below shows what actually arrived.
+          What {SOURCE_LABELS[order.source]} sent for this order carries no
+          totals. The next poll reads them out of the payload already stored,
+          so this fills itself in; <em> View raw {SOURCE_LABELS[order.source]}
+          payload</em> below shows what actually arrived.
         </p>
       ) : null}
 
@@ -1106,10 +1162,15 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
 
       {!anyFees ? (
         <p className="mt-2 text-xs text-ink-500">
-          {order.finance_synced_at
-            ? 'Etsy has charged no fees against this order yet.'
-            : 'Fees have not been read yet — Etsy posts them to the shop ledger ' +
-              'after the sale, so they arrive on a later poll.'}
+          {!sweepable
+            ? // Only Etsy has a fee ledger PrintFlow reads. Saying "not read
+              // yet" on a Wix order would be a promise nothing is going to keep.
+              `PrintFlow reads no fee ledger from ${SOURCE_LABELS[order.source]}. ` +
+              'Type what the sale cost below and it counts towards net the same way.'
+            : order.finance_synced_at
+              ? 'Etsy has charged no fees against this order yet.'
+              : 'Fees have not been read yet — Etsy posts them to the shop ledger ' +
+                'after the sale, so they arrive on a later poll.'}
         </p>
       ) : null}
 
@@ -1167,7 +1228,10 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
   }
 
   const fields: [keyof typeof draft, string][] = [
-    ['etsy_fees', 'Etsy fees'],
+    // The column is `etsy_fees` for historical reasons; the label says which
+    // shop actually charged them, because that is what somebody typing a
+    // figure off a statement is looking at.
+    ['etsy_fees', `${SOURCE_LABELS[order.source]} fees`],
     ['marketing_fees', 'Marketing'],
     ['processing_fees', 'Processing'],
   ]
@@ -1176,7 +1240,7 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
     <div className="mt-3 border-t border-ink-200 pt-3">
       <div className="flex flex-wrap items-baseline gap-2">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-          Etsy fees
+          {SOURCE_LABELS[order.source]} fees
         </h4>
         {manual ? (
           <Badge className="bg-sky-100 text-sky-800">entered by hand</Badge>
@@ -1192,8 +1256,19 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
 
       {manual && !open ? (
         <p className="mt-1 text-xs text-ink-500">
-          Typed rather than read from Etsy, so <em>Check Etsy for fees</em> will
-          not overwrite them. Clear every box to hand this order back to it.
+          {order.source === 'etsy' ? (
+            <>
+              Typed rather than read from Etsy, so <em>Check Etsy for fees</em>{' '}
+              will not overwrite them. Clear every box to hand this order back
+              to it.
+            </>
+          ) : (
+            <>
+              Typed by hand, which is the only way fees reach a{' '}
+              {SOURCE_LABELS[order.source]} order — PrintFlow reads no fee
+              ledger there.
+            </>
+          )}
         </p>
       ) : null}
 
@@ -1284,7 +1359,7 @@ function ExpensePanel({ order, onChanged }: { order: Order; onChanged: () => voi
     },
     {
       kind: 'fees',
-      label: "Etsy's fees",
+      label: `${SOURCE_LABELS[order.source]}'s fees`,
       amount:
         order.etsy_fees || order.marketing_fees || order.processing_fees
           ? String(
@@ -1297,7 +1372,10 @@ function ExpensePanel({ order, onChanged }: { order: Order; onChanged: () => voi
       at: order.qbo_fee_expense_at,
       total: order.qbo_fee_expense_total,
       failed: order.qbo_fee_expense_error,
-      missing: 'No fees on this order yet — read them from Etsy or type them above.',
+      missing:
+        order.source === 'etsy'
+          ? 'No fees on this order yet — read them from Etsy or type them above.'
+          : 'No fees on this order yet — type them above.',
     },
   ]
 
@@ -1308,7 +1386,7 @@ function ExpensePanel({ order, onChanged }: { order: Order; onChanged: () => voi
       </h4>
       <p className="mt-1 text-xs text-ink-500">
         What this order cost, as expenses in QuickBooks. Two bills, raised
-        separately: the carrier's postage and Etsy's cut.
+        separately: the carrier's postage and the shop's cut.
       </p>
       <div className="mt-2 space-y-2">
         {bills.map((bill) => (
@@ -1450,14 +1528,16 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
       ) : (
         <div className="mt-1.5 space-y-1.5">
           <p className="text-xs text-ink-500">
-            Bills the buyer's name and address from this order, at the prices Etsy
-            recorded, each line against its own QuickBooks item. Where that item
-            carries stock the invoice relieves it, and the printed line's removal
-            is taken back so nothing is deducted twice.
+            Bills the buyer's name and address from this order, at the prices{' '}
+            {SOURCE_LABELS[order.source]} recorded, each line against its own
+            QuickBooks item. Where that item carries stock the invoice relieves
+            it, and the printed line's removal is taken back so nothing is
+            deducted twice.
           </p>
           {discount ? (
             <p className="text-xs text-ink-600">
-              Etsy took {formatMoney(discount, order.currency)} off this order.
+              {SOURCE_LABELS[order.source]} took{' '}
+              {formatMoney(discount, order.currency)} off this order.
               That goes on as a discount line, so the invoice totals what the
               buyer actually paid.
             </p>

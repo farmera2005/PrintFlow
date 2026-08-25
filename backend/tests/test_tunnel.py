@@ -322,15 +322,15 @@ class TestTunnelApi:
         assert entry.detail["hostname"] == "a.b"
         assert "tok-secret-12345" not in str(entry.detail)
 
-    async def test_tunnel_is_not_one_of_the_four_integrations(self, signed_in):
-        """It is infrastructure — it must not show up as a fifth platform."""
+    async def test_tunnel_is_not_one_of_the_integrations(self, signed_in):
+        """It is infrastructure — it must not show up as another platform."""
         await signed_in.post(
             "/api/security/tunnel",
             json={"mode": "named", "enabled": True, "token": "tok-abcdef123456", "hostname": "a.b"},
         )
         body = (await signed_in.get("/api/settings")).json()
         providers = {row["provider"] for row in body["integrations"]}
-        assert providers == {"etsy", "qbo", "bambuddy", "shipstation"}
+        assert providers == {"etsy", "wix", "qbo", "bambuddy", "shipstation"}
 
         steps = (await signed_in.get("/api/setup/status")).json()["steps"]
         assert all(step["key"] != tunnel.PROVIDER_TUNNEL for step in steps)

@@ -43,10 +43,11 @@ async def setup_status(session: AsyncSession = Depends(get_session)) -> dict:
                 "key": provider,
                 "label": {
                     "etsy": "Etsy",
+                    "wix": "Wix",
                     "qbo": "QuickBooks Online",
                     "bambuddy": "Bambuddy",
                     "shipstation": "ShipStation",
-                }[provider],
+                }.get(provider, provider),
                 "complete": statuses[provider]["connected"],
             }
             for provider in PROVIDERS

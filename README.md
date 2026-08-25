@@ -1,12 +1,13 @@
 # PrintFlow
 
 Order-orchestration platform for a 3D printing business. It does not replace
-Etsy, QuickBooks Online, Bambuddy or ShipStation — it is the connective tissue
-between them and the single pane of glass over the whole fulfilment flow.
+Etsy, Wix, QuickBooks Online, Bambuddy or ShipStation — it is the connective
+tissue between them and the single pane of glass over the whole fulfilment flow.
 
 | Platform           | Role                                        | Direction                       |
 | ------------------ | ------------------------------------------- | ------------------------------- |
 | Etsy               | Sales channel — source of orders            | Read only (poll receipts)       |
+| Wix                | Sales channel — source of orders            | Read only (poll orders)         |
 | QuickBooks Online  | Inventory system of record — quantity on hand | Read for orders; writes only a made-items sheet you post |
 | Bambuddy           | Print farm manager — queue, archives, library | Read/write (queue, track) |
 | ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, buy labels) |
@@ -16,9 +17,10 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 
 ## The workflow
 
-1. An order arrives from Etsy and is polled in.
-2. Line items are matched to products by the **Etsy listing and variation ids**
-   the receipt carries (see [How orders find their product](#how-orders-find-their-product)).
+1. An order arrives from Etsy or Wix and is polled in.
+2. Line items are matched to products — by SKU, or by the **listing and
+   variation ids** the order carries (see
+   [How orders find their product](#how-orders-find-their-product)).
 3. Bundles explode into their components using the BOM table, adjusted by
    whatever options the buyer picked on Etsy (see below).
 4. For each component, QuickBooks quantity on hand decides print-or-pull:
@@ -29,7 +31,8 @@ PrintFlow itself owns the order state machine, the flow board, the bundle
 7. At **Ready to Ship**, you click Create Label. ShipStation's own Etsy
    connection pushes the tracking number back to Etsy.
 
-**PrintFlow never writes to Etsy.** It writes to QuickBooks in exactly three
+**PrintFlow never writes to a sales channel.** Neither Etsy nor Wix is ever
+written to. It writes to QuickBooks in exactly three
 places, all described under [Orders in the books](#orders-in-the-books) and the
 Manufacturing tab: a made-items sheet when you press Post, a printed line taking
 its units out of stock, and an invoice when you raise one. Importing and
@@ -115,6 +118,20 @@ variation-scoped link quietly stops matching after the next edit. Differences
 between variations belong in
 [option rules](#etsy-options-that-change-the-bom), which match on the option
 values themselves and survive an edit.
+
+### The same, for Wix
+
+Wix Stores has first-class SKUs, so nearly every Wix line matches on the product
+code and never needs any of this. Where a line has no SKU — or the SKU is not
+what PrintFlow calls the product — the same three steps apply against Wix's own
+identifiers: the **catalogue item id**, and the **variant id** of the exact
+combination bought. Matching one by hand and ticking *"Remember this item"*
+records it, and the next order matches itself.
+
+The two channels' links are kept apart. A line carries one channel's identity or
+the other's, never both, and PrintFlow consults only the one it has. Wix's
+variant ids are stable across catalogue edits, so unlike Etsy's there is no
+reason to avoid a variant-scoped link.
 
 ### Product codes
 
@@ -1261,7 +1278,10 @@ Guardrails, because this writes to your books:
 
 Four things happen to an order in QuickBooks: its units leave stock when they
 are printed or built into a bundle, the sale is recorded when you invoice it,
-and what the order cost — postage and Etsy's cut — is expensed.
+and what the order cost — postage and the shop's cut — is expensed. None of it
+cares which channel sold the order: an invoice's private note names the channel
+so a reconciler months later knows where to go and look, and that is the whole
+of the difference.
 
 The first two are designed together because **both of them move stock**, and
 left to themselves they would move the same units twice. What follows is how
@@ -1456,6 +1476,11 @@ arrives with a minus sign; PrintFlow stores the size of the bite and reads
 `-2.55` as the same thing as `2.55`. Anything that is not a number is refused
 rather than quietly stored as zero.
 
+**On a Wix order, typing is the only way.** Etsy is the one channel PrintFlow
+sweeps a fee ledger from, so a Wix order shows no sweep button and says as much
+rather than promising fees that are never going to arrive. Everything after the
+typing is identical — summary, Net, expense.
+
 ### Auditing what left stock
 
 The Manufacturing tab lists **Stock out, from orders** underneath the made-items
@@ -1628,15 +1653,24 @@ and no seed scripts — **every** setting is entered in the app.
    is persisted on every refresh. Picking the shop sets an import cutoff of
    "now", so an established shop's open back catalogue does not land on the
    board; move it back on the Etsy panel to backfill.
-4. **QuickBooks Online** — paste your Intuit app's client ID and secret; the
+4. **Wix** — optional, and skippable like every other connection. Paste an API
+   key made in the Wix dashboard under **Settings → API Keys** with the Wix
+   Stores or eCommerce read permissions, plus the **site ID** from the site's
+   dashboard URL. No OAuth and so no callback: PrintFlow is one shop's software
+   on one shop's machine, an API key is made in a minute, and it cannot expire
+   out from under a poll at three in the morning. Saving validates the key by
+   making the same call the poll makes, so a key that passes has been shown to
+   read this site's orders. Set an import cutoff on the panel so an established
+   site's back catalogue does not land on the board.
+5. **QuickBooks Online** — paste your Intuit app's client ID and secret; the
    app runs the OAuth flow and stores the realm ID. Access tokens refresh
    silently.
-5. **Bambuddy** — base URL + API key. Validated by fetching the instance's
+6. **Bambuddy** — base URL + API key. Validated by fetching the instance's
    OpenAPI document (version is logged) and listing the printers it finds.
-6. **ShipStation** — API key + secret. Validated by listing stores; you pick
+7. **ShipStation** — API key + secret. Validated by listing stores; you pick
    the one that receives your Etsy orders.
-7. **Poll intervals** — defaults pre-filled (Etsy 5 min, Bambuddy 2 min,
-   ShipStation 10 min).
+8. **Poll intervals** — defaults pre-filled (Etsy 5 min, Wix 5 min, Bambuddy
+   2 min, ShipStation 10 min).
 
 The Etsy and QuickBooks steps show the exact redirect URI to register, built
 from the address set in step 2 — so set that first if you reach PrintFlow
@@ -1975,6 +2009,7 @@ quantity and say so on the line — intake never blocks on a third party.
 | Job                        | Default   | Notes                                    |
 | -------------------------- | --------- | ---------------------------------------- |
 | Etsy receipt poll          | 5 min     | Intake pipeline runs inline after ingest |
+| Wix order poll             | 5 min     | Its own job, not a branch of Etsy's — the two channels must fail independently |
 | Bambuddy status reconcile  | 2 min     | Dispatches pending plates, advances jobs, and books the stock a finished print used — the one background write to your books, and switchable off |
 | ShipStation order match    | 10 min    | Only orders missing a ShipStation id; backs off because ShipStation's Etsy import can lag an hour |
 | QBO token refresh          | 5 min check | Refreshes at <10 min remaining         |
@@ -2083,7 +2118,7 @@ frontend/src/          React + Vite + Tailwind SPA
 
 ## Not in v1
 
-No writes to Etsy. In QuickBooks, only made-items sheets — no invoices, bills,
+No writes to any sales channel. In QuickBooks, only made-items sheets — no invoices, bills,
 journal entries or other accounting features. No multi-user roles.
 No multi-level BOMs (a bundle may not contain a bundle — this is validated). No
 automatic label purchase. No filament or spool tracking — Bambuddy owns that.

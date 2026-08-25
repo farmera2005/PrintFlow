@@ -21,12 +21,14 @@ from ..integrations import base as base_api
 from ..integrations import etsy as etsy_api
 from ..integrations import qbo as qbo_api
 from ..integrations import shipstation as ss_api
+from ..integrations import wix as wix_api
 from ..integrations.base import IntegrationError
 from ..models import (
     PROVIDER_BAMBUDDY,
     PROVIDER_ETSY,
     PROVIDER_QBO,
     PROVIDER_SHIPSTATION,
+    PROVIDER_WIX,
     PROVIDERS,
     EtsyProductLink,
     OAuthState,
@@ -1073,6 +1075,99 @@ async def shipstation_config(
     await credentials.save(session, PROVIDER_SHIPSTATION, payload)
     await session.commit()
     return {"stores": stores, "tracking": bool(payload.get("tracking_api_key"))}
+
+
+class WixConfigRequest(BaseModel):
+    """An API key and the site it belongs to.
+
+    No OAuth and so no callback URL, which is deliberate: PrintFlow is one
+    shop's software on one shop's machine, and the Etsy connection's need for a
+    public callback is the fiddliest part of setting the whole thing up.
+    """
+
+    api_key: str = Field(min_length=10)
+    site_id: str = Field(min_length=4)
+    # How far back to import on the first poll. Left unset, PrintFlow takes
+    # everything the site has — which for an established shop is years of
+    # history nobody wants on the board.
+    orders_since: str | None = None
+
+
+@router.post("/wix/config")
+async def wix_config(
+    body: WixConfigRequest,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Save the key and prove it before saying it is connected.
+
+    The check is the same call the poll makes, so a key that passes here is a
+    key that has been shown to read this site's orders — rather than one that
+    merely exists.
+    """
+    existing = await credentials.load(session, PROVIDER_WIX)
+    payload = {
+        **existing,
+        "api_key": body.api_key.strip(),
+        "site_id": body.site_id.strip(),
+    }
+    if body.orders_since is not None:
+        payload["orders_since"] = body.orders_since.strip() or None
+    client = wix_api.WixClient(payload)
+    try:
+        found = await client.validate()
+    except IntegrationError as exc:
+        await credentials.mark_error(session, PROVIDER_WIX, str(exc))
+        await session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    await credentials.save(session, PROVIDER_WIX, payload)
+    await session.commit()
+    return found
+
+
+class WixOrdersSinceRequest(BaseModel):
+    # An ISO 8601 instant, as Wix's filter wants. Null means no cutoff.
+    orders_since: str | None = None
+
+
+@router.post("/wix/orders-since")
+async def wix_set_orders_since(
+    body: WixOrdersSinceRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Move the cutoff without re-pasting the key.
+
+    Its own endpoint for the same reason Etsy's is: winding the date back to
+    backfill is a thing done later, and asking for the API key again to do it
+    would mean going and finding it in the Wix dashboard a second time.
+    """
+    value = (body.orders_since or "").strip() or None
+    await credentials.merge(session, PROVIDER_WIX, {"orders_since": value})
+    await audit.record(
+        session,
+        entity_type="settings",
+        entity_id=None,
+        action="wix_orders_since_changed",
+        detail={"orders_since": value},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"orders_since": value}
+
+
+@router.post("/wix/import")
+async def wix_import(
+    _: User = Depends(require_user), session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Fetch orders now rather than waiting for the next poll.
+
+    The same job the scheduler runs, on demand — which is what somebody wants
+    the moment after they connect it.
+    """
+    from ..scheduler import poll_wix
+
+    return await poll_wix()
 
 
 class TrackingKeyRequest(BaseModel):

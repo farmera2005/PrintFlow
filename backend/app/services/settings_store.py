@@ -141,6 +141,7 @@ PAYMENT_ACCOUNT_TYPES: dict[str, tuple[str, ...]] = {
 # Defaults from §6 of the build spec.
 DEFAULT_POLL_INTERVALS: dict[str, int] = {
     "etsy_minutes": 5,
+    "wix_minutes": 5,
     "bambuddy_minutes": 2,
     "shipstation_minutes": 10,
     # Parcels do not move on a five-minute timer. This is how often the poll
@@ -151,6 +152,7 @@ DEFAULT_POLL_INTERVALS: dict[str, int] = {
 
 POLL_INTERVAL_BOUNDS: dict[str, tuple[int, int]] = {
     "etsy_minutes": (1, 240),
+    "wix_minutes": (1, 240),
     "bambuddy_minutes": (1, 240),
     "shipstation_minutes": (1, 240),
     "tracking_minutes": (5, 1440),

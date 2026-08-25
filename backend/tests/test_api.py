@@ -33,6 +33,7 @@ class TestSetupAndAuth:
         assert body["setup_complete"] is False
         assert body["poll_intervals"] == {
             "etsy_minutes": 5,
+            "wix_minutes": 5,
             "bambuddy_minutes": 2,
             "shipstation_minutes": 10,
             # Parcels do not move on a ten-minute timer.
@@ -87,7 +88,8 @@ class TestSetupAndAuth:
             "etsy_minutes": 240,
             "bambuddy_minutes": 1,
             "shipstation_minutes": 15,
-            # Untouched by this request, so it keeps its default.
+            # Untouched by this request, so they keep their defaults.
+            "wix_minutes": 5,
             "tracking_minutes": 30,
         }
 
@@ -97,10 +99,10 @@ class TestSetupAndAuth:
         }
         assert (await signed_in.get("/api/setup/status")).json()["setup_complete"] is True
 
-    async def test_integration_status_lists_all_four_platforms(self, signed_in):
+    async def test_integration_status_lists_every_platform(self, signed_in):
         body = (await signed_in.get("/api/settings")).json()
         providers = {row["provider"] for row in body["integrations"]}
-        assert providers == {"etsy", "qbo", "bambuddy", "shipstation"}
+        assert providers == {"etsy", "wix", "qbo", "bambuddy", "shipstation"}
         assert all(row["connected"] is False for row in body["integrations"])
 
 

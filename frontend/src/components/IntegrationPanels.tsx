@@ -1552,8 +1552,216 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
   )
 }
 
+// --------------------------------------------------------------------------
+// Wix
+// --------------------------------------------------------------------------
+
+/** An ISO instant -> the YYYY-MM-DD an <input type="date"> wants.
+ *
+ * Wix states times as ISO 8601 rather than Etsy's epoch seconds, so this pair
+ * is not the one above with different names — it is the same idea for the
+ * other channel's clock. */
+function toDayInput(iso: string | null): string {
+  if (!iso) return ''
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return ''
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** YYYY-MM-DD -> the ISO instant of local midnight, so the day the operator
+ *  picked is included in full. */
+function fromDayInput(value: string): string | null {
+  const ms = new Date(`${value}T00:00:00`).getTime()
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString()
+}
+
+/** What an import run reported. Same shape the Etsy poll returns, because it
+ *  is the same pipeline behind it. */
+interface ImportStats {
+  seen?: number
+  created?: number
+  skipped?: number | string
+  errors?: number
+}
+
+export function WixPanel({ status, onChange }: PanelProps) {
+  const [apiKey, setApiKey] = useState('')
+  const [siteId, setSiteId] = useState<string>(status.detail.site_id ?? '')
+  const [since, setSince] = useState<string | null>(status.detail.orders_since ?? null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [imported, setImported] = useState<ImportStats | null>(null)
+  const disconnect = useDisconnect('wix', onChange)
+
+  const save = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/integrations/wix/config', {
+        api_key: apiKey.trim(),
+        site_id: siteId.trim(),
+        // Only sent when the operator set one on this form, so saving a
+        // replacement key never quietly widens the cutoff.
+        ...(since ? { orders_since: since } : {}),
+      })
+      setApiKey('')
+      await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveSince = async (value: string | null) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/integrations/wix/orders-since', { orders_since: value })
+      setSince(value)
+      await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const importNow = async () => {
+    setBusy(true)
+    setError(null)
+    setImported(null)
+    try {
+      setImported(await api.post<ImportStats>('/api/integrations/wix/import'))
+      await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {status.connected ? (
+        <ConnectedHeader status={status} onDisconnect={disconnect} />
+      ) : (
+        <p className="text-sm text-ink-600">
+          In your Wix dashboard, make an API key under{' '}
+          <a
+            className="underline"
+            href="https://manage.wix.com/account/api-keys"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Settings → API Keys
+          </a>{' '}
+          with the Wix Stores or eCommerce read permissions, then paste it with the
+          site's ID. PrintFlow only ever reads from Wix.
+        </p>
+      )}
+
+      {!status.connected || apiKey ? (
+        <>
+          <Field
+            label="API key"
+            hint="Shown once, when it is created. Copy it whole — it is long."
+          >
+            <input
+              className={inputClass}
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="Site ID"
+            hint="The ID in the site's dashboard URL, not the site's web address. One key can cover several sites, so this says which."
+          >
+            <input
+              className={inputClass}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              value={siteId}
+              onChange={(e) => setSiteId(e.target.value)}
+            />
+          </Field>
+          <Button
+            variant="primary"
+            onClick={save}
+            disabled={busy || apiKey.trim().length < 10 || siteId.trim().length < 4}
+          >
+            {busy ? 'Validating…' : 'Save & validate'}
+          </Button>
+        </>
+      ) : (
+        <Button size="sm" onClick={() => setApiKey(' ')}>
+          Replace API key
+        </Button>
+      )}
+
+      {status.connected ? (
+        <>
+          <p className="text-sm text-ink-600">
+            Polling site <span className="font-mono">{status.detail.site_id}</span>.
+            Orders arrive on the board the same way Etsy's do.
+          </p>
+          <Field
+            label="Import orders placed since"
+            hint="Set to the day you connected, so an established site's back catalogue does not land on the board. Move it back to backfill older orders."
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              {/* inputClass carries w-full, so the width has to live on a wrapper. */}
+              <div className="w-44">
+                <input
+                  className={inputClass}
+                  type="date"
+                  value={toDayInput(since)}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const next = fromDayInput(e.target.value)
+                    if (next !== null) void saveSince(next)
+                  }}
+                />
+              </div>
+              <Button size="sm" disabled={busy || since === null} onClick={() => saveSince(null)}>
+                Import everything
+              </Button>
+              {since === null ? (
+                <span className="text-xs text-amber-700">
+                  No cutoff — every order the site has will be imported.
+                </span>
+              ) : null}
+            </div>
+          </Field>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="primary" disabled={busy} onClick={importNow}>
+              {busy ? 'Importing…' : 'Import now'}
+            </Button>
+            <span className="text-xs text-ink-500">
+              Runs the poll immediately rather than waiting for the next one.
+            </span>
+          </div>
+          {imported ? (
+            <Alert tone="success">
+              {imported.seen ?? 0} orders read — {imported.created ?? 0} new,{' '}
+              {typeof imported.skipped === 'number' ? imported.skipped : 0} already known
+              {imported.errors ? `, ${imported.errors} could not be read` : ''}.
+            </Alert>
+          ) : null}
+        </>
+      ) : null}
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+    </div>
+  )
+}
+
 export const PANELS: Record<string, (props: PanelProps) => JSX.Element> = {
   etsy: EtsyPanel,
+  wix: WixPanel,
   qbo: QboPanel,
   bambuddy: BambuddyPanel,
   shipstation: ShipStationPanel,

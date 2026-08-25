@@ -13,6 +13,7 @@ const STEP_ORDER = [
   'admin',
   'security',
   'etsy',
+  'wix',
   'qbo',
   'bambuddy',
   'shipstation',
@@ -24,6 +25,7 @@ const STEP_TITLES: Record<StepKey, string> = {
   admin: 'Create your admin account',
   security: 'Access & security',
   etsy: 'Connect Etsy',
+  wix: 'Connect Wix',
   qbo: 'Connect QuickBooks Online',
   bambuddy: 'Connect Bambuddy',
   shipstation: 'Connect ShipStation',
@@ -34,6 +36,7 @@ const STEP_CHIPS: Record<StepKey, string> = {
   admin: 'Admin',
   security: 'Security',
   etsy: 'Etsy',
+  wix: 'Wix',
   qbo: 'QuickBooks',
   bambuddy: 'Bambuddy',
   shipstation: 'ShipStation',
@@ -338,6 +341,7 @@ function IntervalsStep({
 
   const rows: [string, string, string][] = [
     ['etsy_minutes', 'Etsy receipt poll', 'How often new orders are pulled in.'],
+    ['wix_minutes', 'Wix order poll', 'The same, for a connected Wix site.'],
     ['bambuddy_minutes', 'Bambuddy status reconcile', 'How often print jobs advance.'],
     [
       'shipstation_minutes',

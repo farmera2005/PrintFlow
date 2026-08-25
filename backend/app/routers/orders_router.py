@@ -300,8 +300,9 @@ async def unmatch_line(
 
 class LinkProductRequest(BaseModel):
     product_id: uuid.UUID
-    # Etsy does not require a SKU, so some listings have nothing to match on.
-    # Remembering the listing turns a one-off fix into a rule.
+    # Neither channel requires a SKU, so some listings have nothing to match
+    # on. Remembering the listing — or the Wix catalogue item — turns a one-off
+    # fix into a rule.
     remember: bool = False
     remember_scope: str = Field(default="listing", pattern="^(listing|variant)$")
 
@@ -324,12 +325,12 @@ async def link_product(
     remembered = None
     also_fixed = 0
     if body.remember:
-        link = await intake.remember_etsy_link(
+        link = await intake.remember_channel_link(
             session, line, product, body.remember_scope
         )
         if link is not None:
-            remembered = link.etsy_product_id or link.etsy_listing_id
-            also_fixed = await intake.apply_etsy_link(session, link)
+            remembered = intake.link_identity(link)
+            also_fixed = await intake.apply_channel_link(session, link)
 
     await audit.record(
         session,
@@ -340,6 +341,7 @@ async def link_product(
             "sku_raw": line.sku_raw,
             "linked_sku": product.sku,
             "etsy_listing_id": line.etsy_listing_id,
+            "wix_catalog_item_id": line.wix_catalog_item_id,
             "remembered": remembered,
             "remember_scope": body.remember_scope if remembered else None,
             "also_fixed": also_fixed,

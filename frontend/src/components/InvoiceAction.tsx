@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import { formatMoney } from '../lib/format'
+import { SOURCE_LABELS, formatMoney } from '../lib/format'
 import type { Order } from '../lib/types'
 import { Badge, cx } from './ui'
 
@@ -49,8 +49,9 @@ export default function InvoiceAction({
     if (
       !window.confirm(
         `Create a QuickBooks invoice for order ${order.order_number}? It bills ` +
-          "the buyer's name and address from this order, at the prices Etsy " +
-          'recorded, each line against its own QuickBooks item.',
+          "the buyer's name and address from this order, at the prices " +
+          `${SOURCE_LABELS[order.source]} recorded, each line against its own ` +
+          'QuickBooks item.',
       )
     )
       return

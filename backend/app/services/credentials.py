@@ -164,6 +164,15 @@ def _public_detail(provider: str, payload: dict[str, Any]) -> dict[str, Any]:
             "tracking": bool(payload.get("tracking_api_key")),
             "tracking_key_hint": _hint(payload.get("tracking_api_key")),
         }
+    if provider == "wix":
+        return {
+            # The site id is not a secret — it is in the dashboard URL — and
+            # showing it is how somebody confirms they connected the right one
+            # of an account's sites.
+            "site_id": payload.get("site_id"),
+            "api_key_hint": _hint(payload.get("api_key")),
+            "orders_since": payload.get("orders_since"),
+        }
     return {}
 
 

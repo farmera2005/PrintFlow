@@ -71,6 +71,10 @@ export interface OrderLine {
   variation_label: string | null
   etsy_listing_id: number | null
   etsy_product_id: number | null
+  /** The same idea on the other channel: which catalogue item and which
+   *  variant of it Wix sold. Strings, because Wix's ids are GUIDs. */
+  wix_catalog_item_id: string | null
+  wix_variant_id: string | null
   assembled_at: string | null
   /** When these units were taken out of QuickBooks stock, and how many. Null
    *  for a line that has not been printed, or whose product QuickBooks does not
@@ -98,10 +102,17 @@ export interface OrderSummary {
   pending_assembly: { line_id: string; sku: string | null }[]
 }
 
+export type OrderSource = 'etsy' | 'wix'
+
 export interface Order {
   id: string
   order_number: string
-  etsy_receipt_id: number
+  /** Which shop window sold it. Everything past intake treats an order the
+   *  same whichever channel it came from; this is for the person reading the
+   *  card, who needs to know where to go and look when a buyer asks. */
+  source: OrderSource
+  /** Null on a Wix order — Etsy's receipt number is Etsy's alone. */
+  etsy_receipt_id: number | null
   buyer_name: string | null
   placed_at: string | null
   /** The column this card sits in. Only ever set by a person. */

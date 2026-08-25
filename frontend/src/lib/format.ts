@@ -1,4 +1,11 @@
-import type { JobStatus, LineState, OrderStatus, TrackingStatus } from './types'
+import type {
+  JobStatus,
+  LineState,
+  Order,
+  OrderSource,
+  OrderStatus,
+  TrackingStatus,
+} from './types'
 
 /** Every column an order can be in, in the order the board shows them. */
 export const ORDER_STATUSES: OrderStatus[] = [
@@ -37,6 +44,27 @@ export const COLUMN_LABELS: Record<OrderStatus, string> = {
   shipped: 'Shipped',
   complete: 'Complete',
   cancelled: 'Cancelled',
+}
+
+/** Which shop window sold it. Both channels use their own brand colour, so a
+ *  glance down a mixed column separates them without anybody reading a word. */
+export const SOURCE_LABELS: Record<OrderSource, string> = {
+  etsy: 'Etsy',
+  wix: 'Wix',
+}
+
+export const SOURCE_CLASSES: Record<OrderSource, string> = {
+  etsy: 'bg-orange-100 text-orange-800 ring-orange-300',
+  wix: 'bg-blue-100 text-blue-800 ring-blue-300',
+}
+
+/** Whether to mark these cards with where they came from.
+ *
+ * A shop selling in one place would see the same badge on every card, which
+ * tells nobody anything. The mark earns its place the moment a second channel
+ * appears, so it is shown exactly then. */
+export function sourcesWorthShowing(orders: Pick<Order, 'source'>[]): boolean {
+  return new Set(orders.map((order) => order.source)).size > 1
 }
 
 /** What the carrier is saying, for a badge. "Unknown" is deliberately absent:
@@ -95,6 +123,7 @@ export const JOB_STATUS_CLASSES: Record<JobStatus, string> = {
 
 export const PROVIDER_LABELS: Record<string, string> = {
   etsy: 'Etsy',
+  wix: 'Wix',
   qbo: 'QuickBooks Online',
   bambuddy: 'Bambuddy',
   shipstation: 'ShipStation',

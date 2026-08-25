@@ -81,11 +81,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..integrations import qbo as qbo_api
+from ..integrations import wix as wix_api
 from ..integrations.base import IntegrationError
 from ..models import (
     JOB_DONE,
     LINE_CANCELLED,
     LINE_PRINTED,
+    SOURCE_WIX,
     Order,
     OrderLine,
 )
@@ -675,11 +677,38 @@ def unit_price(transaction: dict[str, Any]) -> Decimal | None:
     return amount_of(transaction.get("price"))
 
 
+def channel_name(order: Order) -> str:
+    """What to call the shop window this order came through, in a document.
+
+    QuickBooks documents are read months later by somebody reconciling, and
+    "order 10025" from a shop that sells in two places is a question rather
+    than an answer.
+    """
+    return "Wix" if order.source == SOURCE_WIX else "Etsy"
+
+
+def line_unit_price(order: Order, line: OrderLine) -> Decimal | None:
+    """What one of this line cost the buyer, whichever channel sold it.
+
+    The price is not on PrintFlow's line — it is in the payload the channel
+    sent, which is kept whole on the order — so finding it means knowing where
+    that channel puts it. This is the only place in the books that has to care
+    which shop window an order came through.
+    """
+    if order.source == SOURCE_WIX:
+        for item in wix_api.parse_order(order.raw or {})["lines"]:
+            if item.get("wix_line_item_id") and item["wix_line_item_id"] == line.wix_line_item_id:
+                return item.get("unit_price")
+        return None
+    transaction = transactions_of(order).get(int(line.etsy_transaction_id or 0))
+    return unit_price(transaction) if transaction else None
+
+
 def line_description(line: OrderLine) -> str:
     """What the buyer sees on the invoice line.
 
-    The Etsy title first, because that is what they ordered and what they will
-    recognise. The options they chose come after it: two invoice lines reading
+    The channel's own title first, because that is what they ordered and what
+    they will recognise. The options they chose come after it: two lines reading
     "Storage bin" with no colour between them is an invoice somebody has to
     open the order to understand.
     """
@@ -911,7 +940,7 @@ def build_invoice(
     body: dict[str, Any] = {
         "CustomerRef": {"value": str(customer_id)},
         "Line": body_lines,
-        "PrivateNote": f"PrintFlow — Etsy order {order.order_number}.",
+        "PrivateNote": f"PrintFlow — {channel_name(order)} order {order.order_number}.",
     }
     # Only where the company numbers its own documents. Left out otherwise, so
     # QuickBooks applies the next reference in its own sequence — which is the
@@ -934,13 +963,11 @@ def invoice_lines(order: Order, lines: list[OrderLine]) -> list[tuple[OrderLine,
     A line whose price cannot be found is left out rather than billed at zero —
     a zero on an invoice looks like a decision somebody made.
     """
-    transactions = transactions_of(order)
     out: list[tuple[OrderLine, int, Decimal]] = []
     for line in lines:
         if line.parent_line_id is not None or line.state == LINE_CANCELLED:
             continue
-        transaction = transactions.get(int(line.etsy_transaction_id or 0))
-        price = unit_price(transaction) if transaction else None
+        price = line_unit_price(order, line)
         if price is None:
             continue
         out.append((line, int(line.quantity), price))
@@ -1317,7 +1344,7 @@ async def post_expense(
             )
         parts = [(f"Shipping label — order {order.order_number}", cost)]
         note = (
-            f"PrintFlow — postage for Etsy order {order.order_number}"
+            f"PrintFlow — postage for {channel_name(order)} order {order.order_number}"
             + (f", {order.tracking_number}" if order.tracking_number else "")
             + "."
         )
@@ -1329,7 +1356,7 @@ async def post_expense(
                 "Etsy for fees, or type them in below — Etsy's ledger settles "
                 "days after the sale, so it is often the typing that comes first."
             )
-        note = f"PrintFlow — Etsy's cut of order {order.order_number}."
+        note = f"PrintFlow — {channel_name(order)}'s cut of order {order.order_number}."
 
     expense_account, payment_account, payment_type, vendor = await _expense_accounts(
         session, kind

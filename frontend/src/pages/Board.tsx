@@ -4,10 +4,13 @@ import {
   COLUMN_LABELS,
   LINE_STATE_CLASSES,
   LINE_STATE_LABELS,
+  SOURCE_CLASSES,
+  SOURCE_LABELS,
   TRACKING_CLASSES,
   TRACKING_LABELS,
   formatAge,
   formatMoney,
+  sourcesWorthShowing,
 } from '../lib/format'
 import type { BoardResponse, Order, OrderLine, OrderStatus } from '../lib/types'
 import InvoiceAction from '../components/InvoiceAction'
@@ -66,6 +69,7 @@ function OrderCard({
   onInvoiced,
   dragging,
   completeHours,
+  showSource,
 }: {
   order: Order
   onOpen: () => void
@@ -76,6 +80,9 @@ function OrderCard({
   dragging: boolean
   /** How long a delivered card stays drawn, as the server sets it. */
   completeHours: number
+  /** Whether to say which channel sold it. Off for a shop selling in one
+   *  place, where the same badge on every card says nothing. */
+  showSource: boolean
 }) {
   const rows = leaves(order.lines).filter(
     (leaf) => !leaf.line.is_bundle && leaf.line.state !== 'cancelled',
@@ -118,6 +125,11 @@ function OrderCard({
         <span className="font-mono text-sm font-semibold text-ink-900">
           #{order.order_number}
         </span>
+        {showSource ? (
+          <Badge className={SOURCE_CLASSES[order.source]}>
+            {SOURCE_LABELS[order.source]}
+          </Badge>
+        ) : null}
         <span className="ml-auto text-xs text-ink-400">{formatAge(order.placed_at)}</span>
       </div>
       <p className="truncate text-sm text-ink-600">{order.buyer_name ?? 'Unknown buyer'}</p>
@@ -303,6 +315,9 @@ export default function Board() {
   }
 
   const total = board.columns.reduce((sum, column) => sum + column.count, 0)
+  // Decided across the whole board, not per column, so a card does not gain
+  // and lose its badge as it is dragged from one column to the next.
+  const showSource = sourcesWorthShowing(board.columns.flatMap((column) => column.orders))
 
   return (
     <div className="flex h-full flex-col">
@@ -316,7 +331,7 @@ export default function Board() {
         <div className="p-6">
           <EmptyState
             title="No orders yet"
-            description="Orders appear here within a few minutes of arriving on Etsy. Check Settings if Etsy is not connected."
+            description="Orders appear here within a few minutes of arriving on a connected shop. Check Settings if Etsy or Wix is not connected."
           />
         </div>
       ) : (
@@ -393,6 +408,7 @@ export default function Board() {
                       onOpen={() => setOpenOrderId(order.id)}
                       onInvoiced={load}
                       completeHours={board.complete_board_hours}
+                      showSource={showSource}
                     />
                   ))
                 )}
