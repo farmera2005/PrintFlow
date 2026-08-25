@@ -29,6 +29,7 @@ from ..models import (
     ProductOptionItem,
     ProductVariation,
     User,
+    WixProductLink,
 )
 from ..services import allocation, audit, codes, intake, printing
 from ..services.state import recompute_order
@@ -164,6 +165,17 @@ def _serialize(product: Product) -> dict[str, Any]:
             }
             for link in sorted(product.etsy_links, key=lambda link: link.created_at)
         ],
+        # The same, for the other channel. Its ids are GUIDs rather than
+        # numbers, and its title is what the Wix catalogue calls the item.
+        "wix_links": [
+            {
+                "id": link.id,
+                "wix_catalog_item_id": link.wix_catalog_item_id,
+                "wix_variant_id": link.wix_variant_id,
+                "item_title": link.item_title,
+            }
+            for link in sorted(product.wix_links, key=lambda link: link.created_at)
+        ],
     }
 
 
@@ -178,6 +190,7 @@ async def _get(session: AsyncSession, product_id: uuid.UUID) -> Product:
                 selectinload(Product.option_rules).selectinload(BomOptionRule.component),
                 selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
                 selectinload(Product.etsy_links),
+                selectinload(Product.wix_links),
                 selectinload(Product.option_items),
                 selectinload(Product.variations).selectinload(ProductVariation.variant_product),
             )
@@ -206,6 +219,7 @@ async def list_products(
         selectinload(Product.option_rules).selectinload(BomOptionRule.component),
         selectinload(Product.option_rules).selectinload(BomOptionRule.replaces),
         selectinload(Product.etsy_links),
+        selectinload(Product.wix_links),
         selectinload(Product.option_items),
         selectinload(Product.variations).selectinload(ProductVariation.variant_product),
     )
@@ -1187,6 +1201,82 @@ async def delete_etsy_link(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     link = await session.get(EtsyProductLink, link_id)
+    if link is None or link.product_id != product_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
+    await session.delete(link)
+    await session.commit()
+    return _serialize(await _get(session, product_id))
+
+
+class WixLinkRequest(BaseModel):
+    # A GUID from the Wix catalogue, not a number. The same value an order
+    # carries as `catalogItemId`, which is what makes a link made here match an
+    # order that arrives later.
+    wix_catalog_item_id: str = Field(min_length=1, max_length=200)
+    # Optional, and rarely wanted: linking the whole item covers every
+    # combination it sells, and per-variant differences belong in option rules.
+    # Unlike Etsy's, a Wix variant id survives an edit to the item's options,
+    # so a variant link here does not quietly rot.
+    wix_variant_id: str | None = None
+    item_title: str | None = None
+
+
+@router.post("/{product_id}/wix-links", status_code=status.HTTP_201_CREATED)
+async def add_wix_link(
+    product_id: uuid.UUID,
+    body: WixLinkRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    product = await _get(session, product_id)
+    link = WixProductLink(
+        product_id=product.id,
+        wix_catalog_item_id=body.wix_catalog_item_id.strip(),
+        wix_variant_id=(body.wix_variant_id or "").strip() or None,
+        item_title=(body.item_title or "").strip() or None,
+    )
+    session.add(link)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Wix item {body.wix_catalog_item_id} is already linked to a product. "
+            "Remove that link first.",
+        ) from exc
+
+    # Same reason as Etsy's: orders already sitting unmatched on this item are
+    # why somebody is adding the link, so clear them rather than making them go
+    # and find each one.
+    fixed = await intake.apply_wix_link(session, link)
+
+    await audit.record(
+        session,
+        entity_type="product",
+        entity_id=product.id,
+        action="wix_link_add",
+        detail={
+            "wix_catalog_item_id": link.wix_catalog_item_id,
+            "wix_variant_id": link.wix_variant_id,
+            "also_fixed": fixed,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    result = _serialize(await _get(session, product_id))
+    result["also_fixed"] = fixed
+    return result
+
+
+@router.delete("/{product_id}/wix-links/{link_id}")
+async def delete_wix_link(
+    product_id: uuid.UUID,
+    link_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    link = await session.get(WixProductLink, link_id)
     if link is None or link.product_id != product_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
     await session.delete(link)

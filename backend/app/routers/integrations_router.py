@@ -33,8 +33,10 @@ from ..models import (
     EtsyProductLink,
     OAuthState,
     User,
+    WixProductLink,
 )
 from ..services import audit, catalog, credentials, intake, public_url, settings_store
+from ..services import wix_catalog as wix_catalog_svc
 from ..services.credentials import IntegrationNotConfigured
 
 log = logging.getLogger("printflow.integrations")
@@ -1166,6 +1168,97 @@ def _wix_status(exc: IntegrationError) -> int:
     if isinstance(exc, base_api.DeadlineExceeded):
         return status.HTTP_504_GATEWAY_TIMEOUT
     return status.HTTP_502_BAD_GATEWAY
+
+
+@router.get("/wix/catalog")
+async def wix_catalog(
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """What Wix sells, lined up against the product table.
+
+    200 with an `error` rather than a failure status, for the same reason the
+    Etsy one does it: the whole point of this screen is to be told what is
+    wrong, and a key without the Stores permission lands here — which is worth
+    explaining rather than refusing.
+    """
+    empty: dict[str, Any] = {"items": [], "counts": {}, "proposed": 0, "total": 0}
+    try:
+        client = await wix_api.client_for(session)
+    except IntegrationNotConfigured:
+        return {**empty, "error": "Wix is not connected yet.", "api_version": None}
+    try:
+        async with base_api.deadline(
+            PROVIDER_WIX,
+            "Reading the Wix catalogue",
+            seconds=45.0,
+            hint=(
+                "check that this machine can reach www.wixapis.com — an "
+                "outbound firewall or proxy is the usual reason it cannot"
+            ),
+        ):
+            items, api_version = await client.iter_catalog()
+    except IntegrationError as exc:
+        await session.rollback()
+        return {**empty, "error": str(exc), "api_version": None}
+
+    result = await wix_catalog_svc.reconcile(session, items)
+    return {**result, "error": None, "api_version": api_version}
+
+
+class WixLinkAllRequest(BaseModel):
+    # Explicit ids rather than "link everything you matched": the operator
+    # confirms a list they have looked at, and a catalogue read between the
+    # proposal and the press must not quietly widen it.
+    wix_catalog_item_ids: list[str] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/wix/catalog/link")
+async def wix_catalog_link(
+    body: WixLinkAllRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Link the catalogue items the operator confirmed, and clear the backlog."""
+    client = await wix_api.client_for(session)
+    async with base_api.deadline(
+        PROVIDER_WIX, "Reading the Wix catalogue", seconds=45.0
+    ):
+        items, _version = await client.iter_catalog()
+
+    result = await wix_catalog_svc.link_items(
+        session, items, body.wix_catalog_item_ids
+    )
+
+    # A link is only worth making because it fixes orders, so fix them now
+    # rather than waiting for the next one to arrive.
+    fixed = 0
+    for made in result["linked"]:
+        link = (
+            await session.execute(
+                select(WixProductLink).where(
+                    WixProductLink.wix_catalog_item_id == made["wix_catalog_item_id"],
+                    WixProductLink.wix_variant_id.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if link is not None:
+            fixed += await intake.apply_wix_link(session, link)
+
+    await audit.record(
+        session,
+        entity_type="settings",
+        entity_id=None,
+        action="wix_catalog_link",
+        detail={
+            "linked": len(result["linked"]),
+            "skipped": len(result["skipped"]),
+            "also_fixed": fixed,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return {**result, "also_fixed": fixed}
 
 
 class WixOrdersSinceRequest(BaseModel):

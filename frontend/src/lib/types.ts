@@ -319,6 +319,7 @@ export interface Product {
    *  many of these as it has options worth telling apart. */
   option_items: OptionItem[]
   etsy_links: EtsyLink[]
+  wix_links: WixLink[]
   variations: ProductVariation[]
 }
 
@@ -374,6 +375,48 @@ export interface EtsyLink {
   etsy_listing_id: number
   etsy_product_id: number | null
   listing_title: string | null
+}
+
+/** A Wix catalogue item that resolves to this product.
+ *
+ * The same idea as an Etsy link, with Wix's identifiers: GUIDs rather than
+ * numbers, and `wix_catalog_item_id` is exactly what an order carries as
+ * `catalogItemId` — which is what makes a link made here match one later. */
+export interface WixLink {
+  id: string
+  wix_catalog_item_id: string
+  wix_variant_id: string | null
+  item_title: string | null
+}
+
+/** The Wix catalogue check: every item, and what PrintFlow thinks each is. */
+export interface WixCatalog {
+  items: WixCatalogItem[]
+  counts: Record<string, number>
+  /** How many could be linked in one press, without counting the rows. */
+  proposed: number
+  total: number
+  error: string | null
+  /** Which Stores generation this site answered on, once known. */
+  api_version: string | null
+}
+
+/** One row of the Wix catalogue, lined up against the product table. */
+export interface WixCatalogItem {
+  wix_catalog_item_id: string
+  name: string | null
+  sku: string | null
+  visible: boolean
+  variant_count: number
+  /** `sku` | `etsy_title` | `product_name` when something recognised it,
+   *  `linked` when a link already exists, `missing` when nothing did. */
+  status: string
+  /** How it was recognised, in words, for the ones that were. */
+  matched_on: string | null
+  product_id: string | null
+  product_sku: string | null
+  product_name: string | null
+  link_id: string | null
 }
 
 export interface QboItem {

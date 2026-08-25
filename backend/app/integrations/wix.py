@@ -56,6 +56,9 @@ PAGE_SIZE = 100
 INTERACTIVE_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=10.0)
 INTERACTIVE_RETRIES = 0
 
+# How many catalogue items one page asks for. Wix caps this at 100.
+CATALOG_PAGE_SIZE = 100
+
 
 class WixClient:
     def __init__(self, payload: dict[str, Any]) -> None:
@@ -66,6 +69,9 @@ class WixClient:
         if not self.site_id:
             raise IntegrationError(PROVIDER_WIX, "No Wix site ID is configured.")
         self.payload = payload
+        # Which Stores generation this site answered on, once we know. Saves
+        # re-probing a 404 on every page of a long catalogue walk.
+        self._catalog_api: str | None = None
 
     def _headers(self) -> dict[str, str]:
         # The key goes in Authorization without a scheme — Wix API keys are not
@@ -189,6 +195,182 @@ class WixClient:
                 break
         collected.reverse()
         return collected
+
+    # ----------------------------------------------------------------------
+    # The catalogue
+    # ----------------------------------------------------------------------
+
+    async def catalog_page(
+        self, *, offset: int = 0, limit: int = CATALOG_PAGE_SIZE
+    ) -> tuple[list[dict[str, Any]], int, str]:
+        """One page of catalogue items, whichever Stores API this site answers on.
+
+        Wix Stores has two live generations and a given site may have either.
+        Rather than pick one and be wrong on half the installs, this tries each
+        in turn and remembers which answered — the same shape of problem as the
+        Bambuddy endpoint discovery, solved the same way.
+
+        Returns (items, total, api_version).
+        """
+        attempts = CATALOG_APIS if self._catalog_api is None else [
+            api for api in CATALOG_APIS if api["version"] == self._catalog_api
+        ]
+        last: IntegrationError | None = None
+        for api in attempts:
+            try:
+                payload = await self._call(
+                    "POST", api["path"], json=api["body"](offset, limit)
+                )
+            except IntegrationError as exc:
+                # A 404 means this site does not speak that generation; anything
+                # else — a rejected key, no permissions — is the real answer and
+                # trying the other version would only bury it.
+                if exc.status_code != 404:
+                    raise
+                last = exc
+                continue
+            self._catalog_api = api["version"]
+            items = [
+                parse_catalog_item(row)
+                for row in (payload.get("products") or [])
+                if isinstance(row, dict)
+            ]
+            return items, api["total"](payload, len(items)), api["version"]
+        # Every generation 404'd. Deliberately not re-raising the last one:
+        # `_explain` reads a 404 as "no site with that id", which is true of the
+        # orders endpoint — the site id is the only thing there that can miss —
+        # and quite wrong here, where it means this site does not speak that
+        # generation. Sending somebody to re-check a site id that is correct is
+        # worse than saying nothing.
+        raise IntegrationError(
+            PROVIDER_WIX,
+            "This Wix site has no Stores catalogue to read. The API key needs "
+            "the Wix Stores read permission, and the site needs Wix Stores "
+            "installed.",
+            status_code=404,
+            body=last.body if last else None,
+        )
+
+    async def iter_catalog(self, *, max_pages: int = 20) -> tuple[list[dict[str, Any]], str]:
+        """The whole catalogue, paged with a stop. Returns (items, api_version)."""
+        collected: list[dict[str, Any]] = []
+        version = ""
+        for page in range(max_pages):
+            items, total, version = await self.catalog_page(
+                offset=page * CATALOG_PAGE_SIZE
+            )
+            collected.extend(items)
+            if not items or len(collected) >= total:
+                break
+        return collected, version
+
+
+def _v1_body(offset: int, limit: int) -> dict[str, Any]:
+    return {"query": {"paging": {"offset": offset, "limit": limit}}}
+
+
+def _v3_body(offset: int, limit: int) -> dict[str, Any]:
+    return {"search": {"cursorPaging": {"offset": offset, "limit": limit}}}
+
+
+# The two Stores generations, newest first. `total` says how many items exist,
+# so paging knows when to stop; both report it in a different place and neither
+# is guaranteed to report it at all, hence the fallback to "as many as we got".
+CATALOG_APIS: list[dict[str, Any]] = [
+    {
+        "version": "v3",
+        "path": "/stores/v3/products/search",
+        "body": _v3_body,
+        "total": lambda payload, got: int(
+            (payload.get("pagingMetadata") or {}).get("total") or got
+        ),
+    },
+    {
+        "version": "v1",
+        "path": "/stores-reader/v1/products/query",
+        "body": _v1_body,
+        "total": lambda payload, got: int(payload.get("totalResults") or got),
+    },
+]
+
+
+def parse_catalog_item(row: dict[str, Any]) -> dict[str, Any]:
+    """One catalogue item, in PrintFlow's words, from either generation.
+
+    The id here is the one an order carries as `catalogItemId`, which is what
+    makes a link from this screen match an order later.
+
+    A SKU can live in three places depending on generation and on whether the
+    item has variants at all, so all three are read and the first real one
+    wins. Getting this wrong would show a whole catalogue as having no SKUs,
+    and the SKU is the entire basis of matching.
+    """
+    variants = _catalog_variants(row)
+    sku = (
+        _clean(row.get("sku"))
+        # v3 puts a single-variant item's code on the variant, not the product.
+        or next((variant["sku"] for variant in variants if variant["sku"]), None)
+    )
+    return {
+        "wix_catalog_item_id": _clean(row.get("id")),
+        "name": _name_of(row),
+        "sku": sku,
+        "visible": row.get("visible", row.get("visibility", True)) is not False,
+        "variants": variants,
+    }
+
+
+def _name_of(row: dict[str, Any]) -> str | None:
+    """The item's title. A bare string on one generation, a translated object
+    on the other — `_clean` on the object would stringify the dict itself."""
+    raw = row.get("name")
+    if isinstance(raw, dict):
+        return _clean(raw.get("original") or raw.get("translated"))
+    return _clean(raw)
+
+
+def _catalog_variants(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Buyable combinations, flattened out of whichever shape arrived."""
+    raw = row.get("variants")
+    if not isinstance(raw, list):
+        raw = ((row.get("variantsInfo") or {}).get("variants")) or []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        # v1 nests the sellable detail under "variant"; v3 has it flat.
+        detail = entry.get("variant") if isinstance(entry.get("variant"), dict) else entry
+        out.append(
+            {
+                "wix_variant_id": _clean(entry.get("id")),
+                "sku": _clean(detail.get("sku")),
+                "choices": _choices(entry),
+            }
+        )
+    return out
+
+
+def _choices(entry: dict[str, Any]) -> dict[str, str]:
+    """What this combination is, as {option: value}."""
+    raw = entry.get("choices")
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items() if k and v}
+    out: dict[str, str] = {}
+    for choice in raw if isinstance(raw, list) else []:
+        if not isinstance(choice, dict):
+            continue
+        name = _clean(choice.get("optionName") or choice.get("name"))
+        value = _clean(choice.get("choiceName") or choice.get("value"))
+        if name and value:
+            out[name] = value
+    return out
+
+
+def _clean(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _explain(exc: IntegrationError) -> IntegrationError:

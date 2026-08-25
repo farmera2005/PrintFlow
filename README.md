@@ -128,6 +128,49 @@ identifiers: the **catalogue item id**, and the **variant id** of the exact
 combination bought. Matching one by hand and ticking *"Remember this item"*
 records it, and the next order matches itself.
 
+Links are made in three places, as on Etsy:
+
+* **In bulk.** **Products → Check against Wix**. See below — this is the one to
+  reach for.
+* **From an order.** Match the line and tick *"Remember this item"*.
+* **From a product.** **Products → (a product) → Wix items**. A Wix catalogue id
+  is a GUID and nobody should type one, so the way in is *Search the Wix
+  catalogue*, which opens already filtered by that product's own code. Pasting
+  an id is the fallback, not the path.
+
+### Check against Wix
+
+The Etsy catalogue check exists to *create* products, because Etsy is usually
+where a shop's catalogue came from. The Wix one exists to *recognise* them: a
+shop running both channels almost always built its Wix catalogue by importing
+from Etsy, so every Wix item already has a product here under another name, and
+the only work is joining them up.
+
+Three rules, tried in order, and the screen says which one fired for every row:
+
+1. **the product code** — the same comparison intake uses. If Wix and PrintFlow
+   agree on a SKU, that is the end of the question.
+2. **the Etsy listing's title** — for the shops the link table exists for, who
+   never filled in a SKU anywhere. The Wix item was imported from an Etsy
+   listing and carries its title, and PrintFlow stored that title when the Etsy
+   link was made. So the match is transitive: this Wix item is that Etsy
+   listing, and that listing is this product. A title two listings share is
+   dropped rather than guessed at.
+3. **the product's own name** — last and weakest, because a product's name is
+   ours to edit and drifts from what either channel calls it.
+
+Everything it recognises arrives ticked, so the work is unticking what looks
+wrong rather than ticking what looks right — but nothing is linked until you
+press the button. A wrong link sends real orders to the wrong product and is
+noticed when the wrong thing comes off a printer.
+
+Items nothing matches are listed too, folded away. Those are the ones a Wix
+order will stall on.
+
+Wix Stores has two live API generations and a given site may have either;
+PrintFlow tries the newer one, falls back to the older, and shows which
+answered.
+
 The two channels' links are kept apart. A line carries one channel's identity or
 the other's, never both, and PrintFlow consults only the one it has. Wix's
 variant ids are stable across catalogue edits, so unlike Etsy's there is no

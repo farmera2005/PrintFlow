@@ -10,6 +10,8 @@ import type {
   Product,
   ProductVariation,
   QboItem,
+  WixCatalog,
+  WixCatalogItem,
 } from '../lib/types'
 import {
   Alert,
@@ -100,6 +102,7 @@ export default function Products() {
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Product | 'new' | null>(null)
   const [checking, setChecking] = useState(false)
+  const [checkingWix, setCheckingWix] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -194,6 +197,7 @@ export default function Products() {
           >
             Check against Etsy
           </Button>
+          <Button onClick={() => setCheckingWix(true)}>Check against Wix</Button>
           <Button variant="primary" onClick={() => setEditing('new')}>
             New product
           </Button>
@@ -339,6 +343,10 @@ export default function Products() {
           </Card>
         )}
       </div>
+
+      {checkingWix ? (
+        <WixCatalogCheck onClose={() => setCheckingWix(false)} onChanged={load} />
+      ) : null}
 
       {checking ? (
         <CatalogCheck
@@ -567,6 +575,7 @@ function ProductEditor({
         {product ? <OptionItemsEditor product={product} onSaved={onSaved} /> : null}
 
         {product ? <EtsyLinksEditor product={product} onSaved={onSaved} /> : null}
+        {product ? <WixLinksEditor product={product} onSaved={onSaved} /> : null}
 
         {/* Bundles included. This used to be hidden for them, on the grounds
             that a bundle's options change its BOM — which is what option rules
@@ -2352,6 +2361,441 @@ const CATALOG_STATUS: Record<
   missing: { label: 'no product', className: 'bg-red-100 text-red-800 ring-red-300' },
   no_sku: { label: 'no product', className: 'bg-amber-100 text-amber-800 ring-amber-300' },
 }
+
+/** The Wix catalogue items that resolve to this product.
+ *
+ * The same job as the Etsy editor above, with one difference that decides the
+ * whole design: a Wix catalogue id is a GUID. Nobody types a GUID, and nobody
+ * should be asked to — so the way in is a search over the live catalogue, and
+ * pasting an id is the fallback rather than the path.
+ */
+function WixLinksEditor({
+  product,
+  onSaved,
+}: {
+  product: Product
+  onSaved: (product: Product) => void | Promise<void>
+}) {
+  const [picking, setPicking] = useState(false)
+  const [itemId, setItemId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const link = async (wixItemId: string, title?: string | null) => {
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const saved = await api.post<Product & { also_fixed?: number }>(
+        `/api/products/${product.id}/wix-links`,
+        { wix_catalog_item_id: wixItemId, item_title: title ?? null },
+      )
+      await onSaved(saved)
+      setItemId('')
+      setPicking(false)
+      const fixed = saved.also_fixed ?? 0
+      if (fixed > 0) {
+        setNotice(
+          `${fixed} order line${fixed === 1 ? '' : 's'} that were waiting on this ` +
+            'item now match.',
+        )
+      }
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (linkId: string) => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      await onSaved(
+        await api.del<Product>(`/api/products/${product.id}/wix-links/${linkId}`),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-ink-200 p-3">
+      <div>
+        <h3 className="text-sm font-semibold text-ink-800">Wix items</h3>
+        <p className="text-xs text-ink-500">
+          Wix orders match on these, the same way Etsy orders match on the
+          listings above. Links are also made for you by <em>Check against Wix</em>,
+          and from the order drawer when you match a line and tick “remember this
+          item”.
+        </p>
+      </div>
+
+      {product.wix_links.length === 0 ? (
+        <p className="text-sm text-ink-500">
+          No Wix items linked. If this product also sells on Wix under the same
+          code, <em>Check against Wix</em> will find it — or search for it below.
+        </p>
+      ) : (
+        <ul className="space-y-1 text-sm">
+          {product.wix_links.map((row) => (
+            <li
+              key={row.id}
+              className="flex flex-wrap items-center gap-2 border-b border-ink-100 pb-1"
+            >
+              <span className="min-w-0 flex-1 truncate text-ink-800">
+                {row.item_title ?? row.wix_catalog_item_id}
+              </span>
+              {row.wix_variant_id ? (
+                <Badge className="bg-ink-100 text-ink-700 ring-ink-300">
+                  one variant only
+                </Badge>
+              ) : null}
+              <code className="truncate font-mono text-xs text-ink-400">
+                {row.wix_catalog_item_id}
+              </code>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => remove(row.id)}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {notice ? <Alert tone="success">{notice}</Alert> : null}
+
+      <div className="flex flex-wrap items-end gap-2">
+        <Button onClick={() => setPicking(true)} disabled={busy}>
+          Search the Wix catalogue
+        </Button>
+        <span className="text-xs text-ink-400">or</span>
+        <div className="min-w-40 flex-1">
+          <Field label="Catalogue item id">
+            <input
+              className={inputClass}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+            />
+          </Field>
+        </div>
+        <Button onClick={() => link(itemId.trim())} disabled={busy || !itemId.trim()}>
+          {busy ? 'Linking…' : 'Link item'}
+        </Button>
+      </div>
+
+      {picking ? (
+        <WixItemPicker
+          product={product}
+          onClose={() => setPicking(false)}
+          onPick={link}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** Search the live Wix catalogue and pick the item this product is sold as.
+ *
+ * Opens pre-filtered by the product's own code, because the overwhelmingly
+ * common case — a Wix catalogue imported from Etsy — means the counterpart is
+ * sitting there under exactly that code and the operator should not have to
+ * type anything at all.
+ */
+function WixItemPicker({
+  product,
+  onClose,
+  onPick,
+}: {
+  product: Product
+  onClose: () => void
+  onPick: (wixItemId: string, title: string | null) => void | Promise<void>
+}) {
+  const [rows, setRows] = useState<WixCatalogItem[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState(product.sku ?? '')
+
+  useEffect(() => {
+    api
+      .get<{ items: WixCatalogItem[]; error: string | null }>(
+        '/api/integrations/wix/catalog',
+      )
+      .then((data) => {
+        if (data.error) setError(data.error)
+        setRows(data.items)
+      })
+      .catch((err) => setError(errorMessage(err)))
+  }, [])
+
+  const needle = query.trim().toLowerCase()
+  const shown = (rows ?? []).filter(
+    (row) =>
+      !needle ||
+      (row.name ?? '').toLowerCase().includes(needle) ||
+      (row.sku ?? '').toLowerCase().includes(needle),
+  )
+
+  return (
+    <Modal open title="Find this product in the Wix catalogue" onClose={onClose}>
+      <input
+        className={inputClass}
+        placeholder="Search by name or code…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {error ? (
+        <div className="mt-3">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+      <div className="mt-3 max-h-80 space-y-1 overflow-y-auto">
+        {rows === null && !error ? <Spinner /> : null}
+        {rows !== null && shown.length === 0 ? (
+          <p className="py-4 text-center text-sm text-ink-500">
+            {rows.length === 0
+              ? 'The Wix catalogue is empty, or the API key cannot read it.'
+              : 'Nothing in the catalogue matches that.'}
+          </p>
+        ) : null}
+        {shown.map((row) => {
+          const taken = row.status === 'linked'
+          return (
+            <button
+              key={row.wix_catalog_item_id}
+              type="button"
+              disabled={taken}
+              onClick={() => onPick(row.wix_catalog_item_id, row.name)}
+              className={cx(
+                'flex w-full flex-wrap items-center gap-2 rounded-md px-2 py-2 text-left',
+                taken ? 'opacity-50' : 'hover:bg-ink-50',
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate text-sm text-ink-800">
+                {row.name ?? row.wix_catalog_item_id}
+              </span>
+              {row.sku ? (
+                <span className="font-mono text-xs text-ink-500">{row.sku}</span>
+              ) : null}
+              {taken ? (
+                <Badge className="bg-ink-100 text-ink-600 ring-ink-300">
+                  linked to {row.product_sku ?? 'another product'}
+                </Badge>
+              ) : null}
+            </button>
+          )
+        })}
+      </div>
+    </Modal>
+  )
+}
+
+
+/** What Wix sells, lined up against what PrintFlow can make.
+ *
+ * The Etsy version of this screen exists to *create* products, because Etsy is
+ * usually where a shop's catalogue came from. This one exists to *recognise*
+ * them: a shop running both channels almost always built its Wix catalogue by
+ * importing from Etsy, so every Wix item already has a product here under
+ * another name. The work is joining them up, and there is no reason for that to
+ * be several hundred clicks.
+ *
+ * Nothing is linked without being confirmed. A wrong link sends real orders to
+ * the wrong product, and is noticed when the wrong thing comes off a printer.
+ */
+function WixCatalogCheck({
+  onClose,
+  onChanged,
+}: {
+  onClose: () => void
+  onChanged: () => void | Promise<void>
+}) {
+  const [data, setData] = useState<WixCatalog | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [chosen, setChosen] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setData(null)
+    setError(null)
+    try {
+      const found = await api.get<WixCatalog>('/api/integrations/wix/catalog')
+      setData(found)
+      if (found.error) setError(found.error)
+      // Everything it recognised, ticked. The operator's job is to untick what
+      // looks wrong, which is far less work than ticking what looks right.
+      setChosen(
+        new Set(
+          found.items
+            .filter((row) => row.product_id && row.status !== 'linked')
+            .map((row) => row.wix_catalog_item_id),
+        ),
+      )
+    } catch (err) {
+      setError(errorMessage(err))
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const linkChosen = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.post<{
+        linked: unknown[]
+        skipped: unknown[]
+        also_fixed: number
+      }>('/api/integrations/wix/catalog/link', {
+        wix_catalog_item_ids: [...chosen],
+      })
+      const fixed = result.also_fixed
+      setDone(
+        `Linked ${result.linked.length} item${result.linked.length === 1 ? '' : 's'}` +
+          (fixed ? `, and ${fixed} waiting order line${fixed === 1 ? '' : 's'} now match` : '') +
+          '.',
+      )
+      await onChanged()
+      await load()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggle = (id: string) => {
+    setChosen((was) => {
+      const next = new Set(was)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const rows = data?.items ?? []
+  const proposals = rows.filter((row) => row.product_id && row.status !== 'linked')
+  const unmatched = rows.filter((row) => !row.product_id)
+  const already = rows.filter((row) => row.status === 'linked')
+
+  return (
+    <Modal open title="Check against Wix" onClose={onClose}>
+      <p className="mb-3 text-sm text-ink-600">
+        Every item your Wix site sells, and the product PrintFlow thinks it is.
+        Matches are found by product code first, then by the title of the Etsy
+        listing the item was imported from, then by the product's own name.
+      </p>
+
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {done ? <Alert tone="success">{done}</Alert> : null}
+      {data === null && !error ? <Spinner /> : null}
+
+      {data ? (
+        <>
+          {/* gap-x rather than interpuncts between spans: the row wraps on a
+              narrow screen, and a separator that wraps to the end of a line is
+              a line ending in a dot for no reason. */}
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-ink-500">
+            <span>{data.total} in the Wix catalogue</span>
+            <span>{already.length} already linked</span>
+            <span>{proposals.length} can be linked now</span>
+            {unmatched.length ? (
+              <span>{unmatched.length} unrecognised</span>
+            ) : null}
+            {data.api_version ? (
+              <span className="ml-auto font-mono">Stores {data.api_version}</span>
+            ) : null}
+          </div>
+
+          {proposals.length ? (
+            <div className="max-h-72 space-y-1 overflow-y-auto rounded-md border border-ink-200 p-2">
+              {proposals.map((row) => (
+                <label
+                  key={row.wix_catalog_item_id}
+                  className="flex flex-wrap items-center gap-2 rounded px-1 py-1 text-sm hover:bg-ink-50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={chosen.has(row.wix_catalog_item_id)}
+                    onChange={() => toggle(row.wix_catalog_item_id)}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-ink-800">
+                    {row.name ?? row.wix_catalog_item_id}
+                  </span>
+                  <span aria-hidden className="text-ink-400">
+                    →
+                  </span>
+                  <span className="font-mono text-xs text-ink-700">
+                    {row.product_sku}
+                  </span>
+                  <Badge className={WIX_MATCH_CLASSES[row.status] ?? ''}>
+                    {row.matched_on ?? 'matched'}
+                  </Badge>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-md border border-dashed border-ink-300 px-3 py-6 text-center text-sm text-ink-500">
+              {rows.length
+                ? 'Nothing left to link — every Wix item PrintFlow recognises already is.'
+                : 'No catalogue items to show.'}
+            </p>
+          )}
+
+          {unmatched.length ? (
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs text-ink-500">
+                {unmatched.length} Wix item{unmatched.length === 1 ? '' : 's'} nothing
+                matches — a Wix order for these will stall
+              </summary>
+              <ul className="mt-1 space-y-0.5 text-xs text-ink-600">
+                {unmatched.map((row) => (
+                  <li key={row.wix_catalog_item_id} className="truncate">
+                    {row.name ?? row.wix_catalog_item_id}
+                    {row.sku ? (
+                      <span className="ml-2 font-mono text-ink-400">{row.sku}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button
+              variant="primary"
+              disabled={busy || chosen.size === 0}
+              onClick={linkChosen}
+            >
+              {busy ? 'Linking…' : `Link ${chosen.size} item${chosen.size === 1 ? '' : 's'}`}
+            </Button>
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </>
+      ) : null}
+    </Modal>
+  )
+}
+
+const WIX_MATCH_CLASSES: Record<string, string> = {
+  sku: 'bg-emerald-100 text-emerald-800 ring-emerald-300',
+  etsy_title: 'bg-sky-100 text-sky-800 ring-sky-300',
+  product_name: 'bg-amber-100 text-amber-800 ring-amber-300',
+}
+
 
 /** What Etsy sells, lined up against what PrintFlow can make.
  *
