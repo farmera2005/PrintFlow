@@ -889,7 +889,7 @@ async def create_label(
             "tracking_number": result["tracking_number"],
             # Which building it actually left from. A label bought from the
             # wrong origin is a real cost, and the audit trail should say.
-            "ship_from": (result.get("ship_from") or {}).get("label"),
+            "ship_from_warehouse_id": result.get("ship_from_warehouse_id"),
             "forced": body.allow_not_ready,
         },
         actor=user.username,

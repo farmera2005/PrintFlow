@@ -40,6 +40,21 @@ HOME = warehouse(1, "Kilnford Workshop", "45011", default=True)
 SECOND = warehouse(2, "Second Unit", "45050", city="Farhaven")
 
 
+async def _an_order_ready_to_ship(db):
+    """An order ShipStation has matched, sitting in Ready to Ship."""
+    from app.models import Order
+
+    order = Order(
+        etsy_receipt_id=7788,
+        order_number="7788",
+        status="ready_to_ship",
+        shipstation_order_id=555,
+    )
+    db.add(order)
+    await db.flush()
+    return order
+
+
 class FakeShipStation:
     """Just enough of the client for the origin ladder."""
 
@@ -212,6 +227,111 @@ async def test_something_that_is_not_a_number_is_passed_on_untouched():
         warehouse_id="not-a-number",
     )
     assert sent["advancedOptions"] == {"warehouseId": "not-a-number"}
+
+
+# --------------------------------------------------------------------------
+# The purchase path stays one call
+# --------------------------------------------------------------------------
+
+
+async def test_buying_a_label_never_looks_a_warehouse_up(db):
+    """One call in, one call out, however the ship-from was chosen.
+
+    The lookup this replaces cost a second ShipStation round trip on the only
+    path in PrintFlow that spends money, and it carried the ordinary retry
+    budget — four attempts at a 30s read, which is longer than the proxy in
+    front of PrintFlow waits. Worse, it ran *before* the purchase, so a slow
+    one could push the request past that limit with the label already bought:
+    the operator sees a failure, presses again, and pays twice.
+    """
+    from app.services import shipping as svc
+
+    await credentials.save(
+        db, PROVIDER_SHIPSTATION, {"api_key": "k", svc.KEY_SHIP_FROM: "2"}
+    )
+    order = await _an_order_ready_to_ship(db)
+
+    class OneCallOnly(FakeShipStation):
+        async def list_warehouses(self):
+            raise AssertionError(
+                "buying a label must not ask ShipStation about warehouses"
+            )
+
+    client = OneCallOnly([HOME, SECOND])
+
+    async def client_for(_session):
+        return client
+
+    import app.services.shipping as shipping_module
+
+    original = shipping_module.ss_api.client_for
+    shipping_module.ss_api.client_for = client_for
+    try:
+        result = await svc.create_label(
+            db,
+            order,
+            carrier_code="stamps_com",
+            service_code="usps_ground_advantage",
+            package_code="package",
+            weight_value=6.5,
+        )
+    finally:
+        shipping_module.ss_api.client_for = original
+
+    # The default still reached ShipStation, without a lookup to find it.
+    assert client.label_calls[0]["warehouse_id"] == "2"
+    assert result["ship_from_warehouse_id"] == "2"
+
+
+async def test_the_purchase_is_committed_before_anything_else(db):
+    """`label_created_at` is all that stands between an operator and paying twice.
+
+    Everything after the purchase — the roll-up, the audit entry, the router's
+    own commit — can fail or be cancelled when a browser gives up on a slow
+    request. If this write went with it, the next press would buy a second
+    label.
+    """
+    from app.services import shipping as svc
+
+    await credentials.save(db, PROVIDER_SHIPSTATION, {"api_key": "k"})
+    order = await _an_order_ready_to_ship(db)
+    client = FakeShipStation([HOME])
+
+    async def client_for(_session):
+        return client
+
+    import app.services.shipping as shipping_module
+
+    original = shipping_module.ss_api.client_for
+    shipping_module.ss_api.client_for = client_for
+    try:
+        await svc.create_label(
+            db,
+            order,
+            carrier_code="stamps_com",
+            service_code="usps_ground_advantage",
+            package_code="package",
+            weight_value=6.5,
+        )
+    finally:
+        shipping_module.ss_api.client_for = original
+
+    # Rolling back everything since must not undo the record of a bought label.
+    await db.rollback()
+    await db.refresh(order)
+    assert order.label_created_at is not None
+    assert order.tracking_number == "9400111899223"
+
+    # And a second attempt is refused rather than charged for.
+    with pytest.raises(svc.LabelError):
+        await svc.create_label(
+            db,
+            order,
+            carrier_code="stamps_com",
+            service_code="usps_ground_advantage",
+            package_code="package",
+            weight_value=6.5,
+        )
 
 
 # --------------------------------------------------------------------------

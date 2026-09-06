@@ -262,17 +262,24 @@ async def create_label(
         raise LabelError("Enter a shipping weight greater than zero.")
 
     client = await ss_api.client_for(session)
-    # Only resolved when somebody has actually chosen a ship-from — for this
-    # label, or as the shop default. With neither, nothing is sent and
-    # ShipStation uses the order's own warehouse, which is precisely what every
-    # label before this feature was bought with. A shop that never touches this
-    # gets the behaviour it already had, and one fewer round trip on the path
-    # that spends money.
+    # The chosen ship-from, as an id and nothing more.
+    #
+    # This deliberately does NOT look the warehouse up. `create_label_for_order`
+    # wants the id, and the id is what we already have — the only thing a
+    # lookup added was a prettier address in the response, and it bought that
+    # with a second ShipStation call on the one path in PrintFlow that spends
+    # money. That call carried the ordinary retry budget (four attempts at a
+    # 30s read), which is over two minutes, which is longer than the proxy in
+    # front of PrintFlow will wait.
+    #
+    # Worse than the timeout: the lookup ran *before* the purchase, so a slow
+    # one could push the whole request past the proxy's patience with the label
+    # already bought — the operator sees a failure, presses again, and pays
+    # twice. One call in, one call out.
+    #
+    # With nothing chosen, nothing is sent at all and ShipStation uses the
+    # order's own warehouse, exactly as every label before this feature did.
     wanted = warehouse_id or await default_warehouse_id(session)
-    origin = None
-    if wanted:
-        row = ss_api.origin_warehouse(await client.list_warehouses(), wanted)
-        origin = ss_api.warehouse_summary(row) if row else None
 
     response = await client.create_label_for_order(
         order_id=order.shipstation_order_id,
@@ -281,7 +288,7 @@ async def create_label(
         package_code=package_code or "package",
         weight={"value": float(weight_value), "units": weight_units},
         confirmation=confirmation,
-        warehouse_id=origin["warehouse_id"] if origin else None,
+        warehouse_id=wanted or None,
         test_label=test_label,
     )
 
@@ -300,7 +307,17 @@ async def create_label(
     order.label_cost = ss_api.label_cost(response)
     if order.label_cost is not None:
         order.label_currency = str(response.get("currency") or "USD")
-    await session.flush()
+
+    # Banked before anything else runs.
+    #
+    # The money is already spent by this line, and everything after it — the
+    # roll-up, the audit entry, the router's own commit — is work that could
+    # fail or be cancelled when a browser gives up on a slow request. Losing
+    # this write would leave a label bought and no record of it, so the next
+    # press would buy a second one: `label_created_at` is the only thing
+    # standing between an operator and paying twice.
+    await session.commit()
+
     await credentials.mark_ok(session, "shipstation")
     # Tracking flows back to Etsy through ShipStation's own store connection —
     # this platform never writes to Etsy.
@@ -313,7 +330,8 @@ async def create_label(
         "label_cost": str(money(order.label_cost)) if order.label_cost is not None else None,
         "label_currency": order.label_currency,
         "has_pdf": order.label_pdf is not None,
-        # What it actually shipped from, echoed back so the confirmation can
-        # say so rather than leaving it to be assumed.
-        "ship_from": origin,
+        # Which ship-from it went out on. The id alone: the screen that asked
+        # for it already holds the addresses, and fetching one here would put a
+        # ShipStation round trip back on the path that spends money.
+        "ship_from_warehouse_id": wanted or None,
     }
