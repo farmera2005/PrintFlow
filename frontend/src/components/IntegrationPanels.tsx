@@ -24,6 +24,16 @@ interface Diagnosis {
   working: string[]
 }
 
+/** One ship-from location ShipStation knows about. */
+interface Warehouse {
+  warehouse_id: number | string
+  name: string | null
+  address: string | null
+  label: string
+  postal_code: string | null
+  is_default: boolean
+}
+
 /** What ShipStation said when asked about a tracking key. `ok` is null when
  *  nobody has asked yet. */
 interface TrackingCheck {
@@ -1338,6 +1348,8 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
   const [selectedStore, setSelectedStore] = useState<number | null>(
     status.detail.store_id ?? null,
   )
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
+  const [shipFrom, setShipFrom] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const disconnect = useDisconnect('shipstation', onChange)
@@ -1353,7 +1365,32 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
         setSelectedStore(data.selected_store_id)
       })
       .catch((err) => setError(errorMessage(err)))
+    api
+      .get<{ warehouses: Warehouse[]; selected_warehouse_id: string | null }>(
+        '/api/integrations/shipstation/warehouses',
+      )
+      .then((data) => {
+        setWarehouses(data.warehouses)
+        setShipFrom(data.selected_warehouse_id ? String(data.selected_warehouse_id) : '')
+      })
+      .catch((err) => setError(errorMessage(err)))
   }, [status.connected])
+
+  const chooseShipFrom = async (warehouseId: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/integrations/shipstation/ship-from', {
+        warehouse_id: warehouseId || null,
+      })
+      setShipFrom(warehouseId)
+      await onChange()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const save = async () => {
     setBusy(true)
@@ -1442,6 +1479,41 @@ export function ShipStationPanel({ status, onChange }: PanelProps) {
       ) : null}
       {status.connected && !selectedStore ? (
         <Alert tone="warning">Pick the ShipStation store that receives your Etsy orders.</Alert>
+      ) : null}
+
+      {/* Where parcels leave from. ShipStation owns the addresses — this only
+          says which of them PrintFlow should use, so an address edited there
+          is never stale here. */}
+      {status.connected ? (
+        warehouses.length ? (
+          <Field
+            label="Ship from"
+            hint="Where labels are posted from, and the origin every quote is priced from. Any label can be sent from a different one without changing this."
+          >
+            <select
+              className={inputClass}
+              value={shipFrom}
+              disabled={busy}
+              onChange={(e) => chooseShipFrom(e.target.value)}
+            >
+              <option value="">
+                Let ShipStation decide (the order's own warehouse)
+              </option>
+              {warehouses.map((row) => (
+                <option key={row.warehouse_id} value={String(row.warehouse_id)}>
+                  {row.label}
+                  {row.is_default ? ' — ShipStation default' : ''}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          <Alert tone="warning">
+            ShipStation has no ship-from address, so it cannot price or post
+            anything. Add a warehouse origin in ShipStation, then reload this
+            page to pick it.
+          </Alert>
+        )
       ) : null}
 
       {/* Delivery detection. A second credential from the same ShipStation

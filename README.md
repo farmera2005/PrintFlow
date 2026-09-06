@@ -375,12 +375,44 @@ nearly always right is worth a great deal when the question is *is this the $28
 service or the $523 one*; presenting it as the price would be a promise nobody
 here can make.
 
-Quoting needs a **ship-from** postcode, which an order does not carry. It comes
-from the warehouse the ShipStation order names, falling back to the default
-warehouse and then to any of them. An instance with no warehouse origin at all
-says so rather than guessing — and, like a carrier that refuses to quote, does
-not block the purchase. Not knowing the price makes for a worse screen, not a
-broken one.
+### Ship from
+
+Where a parcel leaves from decides what it costs and who collects it, and an
+order does not carry it — so PrintFlow asks ShipStation.
+
+**Settings → ShipStation → Ship from** picks the shop's default from the
+warehouses ShipStation already has, shown as addresses rather than ids: choosing
+the wrong origin means a carrier sent to a building nobody is standing in, and
+that is discovered when the parcel does not turn up. The label dialog shows the
+same choice and can override it **for that one label**, without changing the
+default.
+
+One resolution order, used by the quote and by the purchase, so a price can
+never have come from a different address than the parcel leaves from:
+
+1. what was picked for this label;
+2. the shop's default;
+3. the warehouse the ShipStation order itself names;
+4. ShipStation's own default, then whichever exists.
+
+The shop default beating the order is deliberate. A shop that has set one has
+said where it packs parcels *now*, and an order imported weeks ago carries
+whatever warehouse it was given then — letting that quietly win would mean the
+setting appears to do nothing for exactly the orders somebody is trying to fix.
+
+**Addresses stay ShipStation's.** PrintFlow stores only which warehouse to use,
+never a copy of the address, so one edited in ShipStation is never stale here.
+ShipStation's `createlabelfororder` has no `shipFrom` field — an address is only
+accepted by `shipments/createlabel`, which produces a label *not attached to the
+order*, and tracking gets back to Etsy and Wix through ShipStation's store
+connection **per order**. So the origin is named the only way that endpoint
+understands: by warehouse, through `advancedOptions`.
+
+Leave it on *Let ShipStation decide* and nothing is sent at all — not a null,
+nothing — which is exactly what every label bought before this feature existed
+carried. An instance with no warehouse origin at all says so rather than
+guessing, and, like a carrier that refuses to quote, does not block the
+purchase. Not knowing the price makes for a worse screen, not a broken one.
 
 **After.** The price is recorded on the order and shown in three places: on the
 **card**, next to the tracking number; in the **drawer**, on the line that

@@ -799,6 +799,7 @@ async def label_rates(
     weight_units: str = "ounces",
     package_code: str = "",
     confirmation: str = "",
+    warehouse_id: str = "",
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -817,6 +818,7 @@ async def label_rates(
             weight_units=weight_units,
             package_code=package_code,
             confirmation=confirmation,
+            warehouse_id=warehouse_id or None,
         )
     except IntegrationNotConfigured as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
@@ -833,6 +835,10 @@ class CreateLabelRequest(BaseModel):
     weight_value: float = Field(gt=0)
     weight_units: str = "ounces"
     confirmation: str | None = None
+    # Which ship-from location this parcel leaves from. Omitted means "whatever
+    # the shop default and the order resolve to" — the behaviour every label
+    # before this had.
+    warehouse_id: str | None = None
     test_label: bool = False
     allow_not_ready: bool = False
 
@@ -862,6 +868,7 @@ async def create_label(
             weight_value=body.weight_value,
             weight_units=body.weight_units,
             confirmation=body.confirmation,
+            warehouse_id=body.warehouse_id,
             test_label=body.test_label,
         )
     except shipping.LabelError as exc:
@@ -880,6 +887,9 @@ async def create_label(
             "carrier_code": body.carrier_code,
             "service_code": body.service_code,
             "tracking_number": result["tracking_number"],
+            # Which building it actually left from. A label bought from the
+            # wrong origin is a real cost, and the audit trail should say.
+            "ship_from": (result.get("ship_from") or {}).get("label"),
             "forced": body.allow_not_ready,
         },
         actor=user.username,

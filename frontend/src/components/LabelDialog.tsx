@@ -21,7 +21,21 @@ interface Quote {
   reason?: string
   from_postal_code?: string
   to_postal_code?: string
+  ship_from?: ShipFrom | null
   rates?: { service_code: string; service_name: string | null; total: string | null }[]
+}
+
+/** One ship-from location, as a person picks it: the name they call it,
+ *  and enough address to tell two of them apart. A warehouse id on its own
+ *  is a number nobody recognises, and picking the wrong one means a carrier
+ *  collecting from the wrong building. */
+interface ShipFrom {
+  warehouse_id: number | string
+  name: string | null
+  address: string | null
+  label: string
+  postal_code: string | null
+  is_default: boolean
 }
 
 interface LabelContext {
@@ -37,6 +51,9 @@ interface LabelContext {
     ship_to: Record<string, any>
   }
   carriers?: { code: string; name: string }[]
+  /** Where it would ship from as things stand, and the alternatives. */
+  ship_from?: ShipFrom | null
+  ship_from_options?: ShipFrom[]
 }
 
 export default function LabelDialog({
@@ -56,6 +73,9 @@ export default function LabelDialog({
   const [packageCode, setPackageCode] = useState('package')
   const [weight, setWeight] = useState('')
   const [units, setUnits] = useState('ounces')
+  // Empty means "whatever the shop default and the order resolve to", which is
+  // what every label bought before this feature used.
+  const [warehouse, setWarehouse] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -79,6 +99,7 @@ export default function LabelDialog({
         weight_value: String(grams),
         weight_units: units,
         package_code: packageCode || '',
+        ...(warehouse ? { warehouse_id: warehouse } : {}),
       })
       api
         .get<Quote>(`/api/orders/${order.id}/label-rates?${query}`)
@@ -92,7 +113,7 @@ export default function LabelDialog({
       window.clearTimeout(timer)
       setQuoting(false)
     }
-  }, [order.id, carrier, weight, units, packageCode])
+  }, [order.id, carrier, weight, units, packageCode, warehouse])
 
   useEffect(() => {
     api
@@ -138,6 +159,7 @@ export default function LabelDialog({
         package_code: packageCode || 'package',
         weight_value: Number(weight),
         weight_units: units,
+        ...(warehouse ? { warehouse_id: warehouse } : {}),
         allow_not_ready: order.status !== 'ready_to_ship',
       })
       // The dialog stays up to say what it cost. This is the one action in
@@ -211,6 +233,41 @@ export default function LabelDialog({
                   .join(', ')}
               </p>
             </div>
+          ) : null}
+
+          {/* Where it leaves from, above the carrier because that is the
+              order the questions are actually asked in: which building, then
+              who collects, then how fast. Shown even with one location, so a
+              label's origin is never something you have to already know. */}
+          {(context.ship_from_options ?? []).length ? (
+            <Field
+              label="Ship from"
+              hint={
+                warehouse
+                  ? 'This label only. The shop default is unchanged.'
+                  : context.ship_from
+                    ? 'The shop default, set under Settings → ShipStation.'
+                    : undefined
+              }
+            >
+              <select
+                className={inputClass}
+                value={warehouse || String(context.ship_from?.warehouse_id ?? '')}
+                onChange={(e) => setWarehouse(e.target.value)}
+              >
+                {(context.ship_from_options ?? []).map((row) => (
+                  <option key={row.warehouse_id} value={String(row.warehouse_id)}>
+                    {row.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : context.available ? (
+            <Alert tone="warning">
+              ShipStation has no ship-from address, so nothing can be priced or
+              posted. Add a warehouse origin in ShipStation, then pick it under
+              Settings → ShipStation.
+            </Alert>
           ) : null}
 
           <Field label="Carrier">

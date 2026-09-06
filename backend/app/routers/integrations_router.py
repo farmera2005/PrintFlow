@@ -36,6 +36,7 @@ from ..models import (
     WixProductLink,
 )
 from ..services import audit, catalog, credentials, intake, public_url, settings_store
+from ..services import shipping
 from ..services import wix_catalog as wix_catalog_svc
 from ..services.credentials import IntegrationNotConfigured
 
@@ -1538,6 +1539,59 @@ async def shipstation_select_store(
     await credentials.mark_ok(session, PROVIDER_SHIPSTATION)
     await session.commit()
     return {"store_id": body.store_id}
+
+
+@router.get("/shipstation/warehouses")
+async def shipstation_warehouses(
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The ship-from locations ShipStation knows about, and which is ours.
+
+    Addresses, not ids: choosing the wrong origin means a carrier collecting
+    from the wrong building, and that is only noticed when nothing turns up.
+    """
+    client = await ss_api.client_for(session)
+    rows = await client.list_warehouses()
+    chosen = await shipping.default_warehouse_id(session)
+    return {
+        "warehouses": [ss_api.warehouse_summary(row) for row in rows],
+        "selected_warehouse_id": chosen,
+    }
+
+
+class ShipStationShipFromRequest(BaseModel):
+    # Null clears it, which hands the choice back to ShipStation — the
+    # behaviour before anybody set one.
+    warehouse_id: str | None = None
+
+
+@router.post("/shipstation/ship-from")
+async def shipstation_set_ship_from(
+    body: ShipStationShipFromRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Set the shop's default ship-from location.
+
+    Stored as the id alone. The name is not kept alongside it on purpose: an
+    address edited in ShipStation would leave a stale copy here, and a screen
+    naming the wrong building is worse than one that has to go and ask.
+    """
+    chosen = (body.warehouse_id or "").strip() or None
+    await credentials.merge(
+        session, PROVIDER_SHIPSTATION, {shipping.KEY_SHIP_FROM: chosen}
+    )
+    await audit.record(
+        session,
+        entity_type="settings",
+        entity_id=None,
+        action="shipstation_ship_from_changed",
+        detail={"warehouse_id": chosen},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"warehouse_id": chosen}
 
 
 @router.get("/oauth-states/count")

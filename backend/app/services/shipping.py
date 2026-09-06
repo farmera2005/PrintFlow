@@ -93,6 +93,43 @@ async def match_orders(session: AsyncSession, *, limit: int = 50) -> dict[str, i
     return stats
 
 
+KEY_SHIP_FROM = "ship_from_warehouse_id"
+
+
+async def default_warehouse_id(session: AsyncSession) -> Any:
+    """The shop's chosen ship-from, or None to leave it to ShipStation."""
+    payload = await credentials.load(session, "shipstation")
+    return payload.get(KEY_SHIP_FROM) or None
+
+
+async def resolve_origin(
+    session: AsyncSession,
+    client: ss_api.ShipStationClient,
+    remote: dict[str, Any],
+    chosen: Any = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Which location this parcel ships from, and everything it could ship from.
+
+    One resolution order, used by the quote and by the purchase, so the price
+    the operator was shown cannot have come from a different address than the
+    parcel leaves from:
+
+    1. what was picked for this label;
+    2. the shop's default, set in Settings;
+    3. the warehouse the order itself names in ShipStation;
+    4. ShipStation's own default, then whatever exists.
+
+    The order comes third deliberately. A shop that has chosen a ship-from has
+    said something about where it packs parcels *now*, and an order imported
+    weeks ago carrying an old warehouse should not quietly override that.
+    """
+    warehouses = await client.list_warehouses()
+    wanted = chosen or await default_warehouse_id(session)
+    if not wanted:
+        wanted = (remote.get("advancedOptions") or {}).get("warehouseId")
+    return ss_api.origin_warehouse(warehouses, wanted), warehouses
+
+
 async def label_context(session: AsyncSession, order: Order) -> dict[str, Any]:
     """Everything the label dialog needs, pre-populated from ShipStation."""
     if order.shipstation_order_id is None:
@@ -101,6 +138,7 @@ async def label_context(session: AsyncSession, order: Order) -> dict[str, Any]:
     remote = await client.get_order(order.shipstation_order_id)
     defaults = ss_api.order_defaults(remote)
     carriers = await client.list_carriers()
+    origin, warehouses = await resolve_origin(session, client, remote)
     return {
         "available": True,
         "shipstation_order_id": order.shipstation_order_id,
@@ -110,6 +148,11 @@ async def label_context(session: AsyncSession, order: Order) -> dict[str, Any]:
             for c in carriers
             if isinstance(c, dict)
         ],
+        # Where it would ship from, and the alternatives. Both, because the
+        # dialog has to show the address it is about to use *and* let it be
+        # changed for this one parcel.
+        "ship_from": ss_api.warehouse_summary(origin) if origin else None,
+        "ship_from_options": [ss_api.warehouse_summary(row) for row in warehouses],
     }
 
 
@@ -122,6 +165,7 @@ async def label_rates(
     weight_units: str = "ounces",
     package_code: str | None = None,
     confirmation: str | None = None,
+    warehouse_id: Any = None,
 ) -> dict[str, Any]:
     """What this carrier would charge to ship this order, per service.
 
@@ -151,16 +195,17 @@ async def label_rates(
             "reason": "This order has no destination postcode in ShipStation.",
         }
 
-    advanced = remote.get("advancedOptions") or {}
-    origin = ss_api.origin_postal_code(
-        await client.list_warehouses(), advanced.get("warehouseId")
+    origin_row, _warehouses = await resolve_origin(
+        session, client, remote, warehouse_id
     )
+    origin = (ss_api.warehouse_summary(origin_row) or {}).get("postal_code") if origin_row else None
     if not origin:
         return {
             "available": False,
             "reason": (
                 "ShipStation has no ship-from address, so it cannot price "
-                "anything. Add a warehouse origin in ShipStation."
+                "anything. Add a warehouse origin in ShipStation, then choose "
+                "it under Settings → ShipStation."
             ),
         }
 
@@ -179,6 +224,9 @@ async def label_rates(
     return {
         "available": True,
         "from_postal_code": origin,
+        # Named, not just numbered. A quote priced from the wrong building is
+        # only obvious if the screen says which building.
+        "ship_from": ss_api.warehouse_summary(origin_row),
         "to_postal_code": to_postal,
         "rates": [
             {
@@ -202,6 +250,7 @@ async def create_label(
     weight_value: float,
     weight_units: str = "ounces",
     confirmation: str | None = None,
+    warehouse_id: Any = None,
     test_label: bool = False,
 ) -> dict[str, Any]:
     """Buy a label. Always explicitly user-triggered — labels cost money (§4.4)."""
@@ -213,6 +262,18 @@ async def create_label(
         raise LabelError("Enter a shipping weight greater than zero.")
 
     client = await ss_api.client_for(session)
+    # Only resolved when somebody has actually chosen a ship-from — for this
+    # label, or as the shop default. With neither, nothing is sent and
+    # ShipStation uses the order's own warehouse, which is precisely what every
+    # label before this feature was bought with. A shop that never touches this
+    # gets the behaviour it already had, and one fewer round trip on the path
+    # that spends money.
+    wanted = warehouse_id or await default_warehouse_id(session)
+    origin = None
+    if wanted:
+        row = ss_api.origin_warehouse(await client.list_warehouses(), wanted)
+        origin = ss_api.warehouse_summary(row) if row else None
+
     response = await client.create_label_for_order(
         order_id=order.shipstation_order_id,
         carrier_code=carrier_code,
@@ -220,6 +281,7 @@ async def create_label(
         package_code=package_code or "package",
         weight={"value": float(weight_value), "units": weight_units},
         confirmation=confirmation,
+        warehouse_id=origin["warehouse_id"] if origin else None,
         test_label=test_label,
     )
 
@@ -251,4 +313,7 @@ async def create_label(
         "label_cost": str(money(order.label_cost)) if order.label_cost is not None else None,
         "label_currency": order.label_currency,
         "has_pdf": order.label_pdf is not None,
+        # What it actually shipped from, echoed back so the confirmation can
+        # say so rather than leaving it to be assumed.
+        "ship_from": origin,
     }

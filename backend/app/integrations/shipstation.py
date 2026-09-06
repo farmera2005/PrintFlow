@@ -221,6 +221,7 @@ class ShipStationClient:
         weight: dict[str, Any],
         confirmation: str | None = None,
         ship_date: str | None = None,
+        warehouse_id: Any = None,
         test_label: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -235,6 +236,17 @@ class ShipStationClient:
             body["confirmation"] = confirmation
         if ship_date:
             body["shipDate"] = ship_date
+        # Where it ships from. This endpoint has no `shipFrom` — an address is
+        # only accepted by `shipments/createlabel`, which produces a label that
+        # is not attached to the order, and ShipStation pushes tracking back to
+        # the sales channel *per order*. So the origin is named the way this
+        # endpoint understands it: by warehouse, through advancedOptions.
+        #
+        # Omitted entirely when nothing was chosen, rather than sent as null —
+        # that is what leaves ShipStation on the order's own warehouse, which
+        # is the behaviour every existing label was bought with.
+        if warehouse_id not in (None, ""):
+            body["advancedOptions"] = {"warehouseId": _as_int(warehouse_id)}
         # Labels cost money: never retry a create automatically. A duplicate
         # would be a duplicate purchase.
         return await self._call(
@@ -276,24 +288,97 @@ def parse_rate(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def origin_postal_code(warehouses: list[dict[str, Any]], warehouse_id: Any) -> str | None:
-    """Where the parcel ships from — the one thing a quote needs that an order
-    does not carry. The order's own warehouse if it names one, else the default,
-    else whichever came first: any of them prices better than none of them."""
+def _as_int(value: Any) -> Any:
+    """ShipStation wants warehouseId as a number, and a form gives us a string.
+
+    Left alone when it is not a number at all: sending it back as it arrived
+    lets ShipStation say what is wrong with it, which beats a coercion error
+    from here naming a field the operator never saw.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return value
+
+
+def rank_warehouses(
+    warehouses: list[dict[str, Any]], warehouse_id: Any
+) -> list[dict[str, Any]]:
+    """The ship-from locations, most wanted first.
+
+    One ordering used by everything that needs an origin, so the address a
+    quote is priced from cannot disagree with the one a label ships from.
+    """
     rows = [row for row in warehouses if isinstance(row, dict)]
-    ranked = sorted(
+    return sorted(
         rows,
         key=lambda row: (
             str(row.get("warehouseId")) != str(warehouse_id),
             not row.get("isDefault"),
         ),
     )
-    for row in ranked:
+
+
+def origin_postal_code(warehouses: list[dict[str, Any]], warehouse_id: Any) -> str | None:
+    """Where the parcel ships from — the one thing a quote needs that an order
+    does not carry. The named warehouse if there is one, else the default,
+    else whichever came first: any of them prices better than none of them."""
+    for row in rank_warehouses(warehouses, warehouse_id):
         address = row.get("originAddress") or {}
         code = address.get("postalCode") if isinstance(address, dict) else None
         if code:
             return str(code)
     return None
+
+
+def origin_warehouse(
+    warehouses: list[dict[str, Any]], warehouse_id: Any
+) -> dict[str, Any] | None:
+    """The whole warehouse a parcel would ship from, not just its postcode.
+
+    The label needs the id and the operator needs the address; resolving both
+    from one ranking is what stops the screen naming one place and the carrier
+    collecting from another.
+    """
+    for row in rank_warehouses(warehouses, warehouse_id):
+        if row.get("warehouseId") is not None:
+            return row
+    return None
+
+
+def warehouse_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """One ship-from location, in the words a person picks it by.
+
+    A warehouse id is a number nobody recognises, so the address goes with it
+    everywhere — choosing the wrong origin is a parcel collected from the wrong
+    building, and it is only noticed when it does not turn up.
+    """
+    address = row.get("originAddress") or {}
+    if not isinstance(address, dict):
+        address = {}
+    parts = [
+        address.get("street1"),
+        address.get("city"),
+        " ".join(
+            str(bit).strip()
+            for bit in (address.get("state"), address.get("postalCode"))
+            if str(bit or "").strip()
+        ),
+    ]
+    where = ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+    name = str(row.get("warehouseName") or "").strip()
+    return {
+        "warehouse_id": row.get("warehouseId"),
+        "name": name or None,
+        "address": where or None,
+        # What the picker shows on one line: the name people call it, then
+        # enough address to tell two of them apart.
+        "label": " — ".join(bit for bit in (name, where) if bit) or str(
+            row.get("warehouseId")
+        ),
+        "postal_code": str(address.get("postalCode") or "").strip() or None,
+        "is_default": bool(row.get("isDefault")),
+    }
 
 
 def label_cost(response: dict[str, Any]) -> Decimal | None:
