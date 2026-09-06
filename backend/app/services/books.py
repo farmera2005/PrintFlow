@@ -64,8 +64,12 @@ and need no hand-over. They are at the bottom of this file, deliberately apart.
   has to know that the removal did not happen.
 * Removals can be taken back. Cancelling a line that was already booked deletes
   its Purchase, because stock that never left the shop should not stay gone.
-* Nothing here writes without a stable idempotency key, so a timeout followed by
-  a retry cannot produce a second document.
+* Nothing here writes without an idempotency key, so a timeout followed by a
+  retry cannot produce a second document. The key also has to *move on* when a
+  document is deliberately undone: QuickBooks replays a repeated `requestid`
+  rather than creating anything, so keying on the order alone made "retry this
+  attempt" and "raise another after voiding" indistinguishable — and the second
+  quietly handed back the voided invoice. See `_attempt`.
 """
 
 from __future__ import annotations
@@ -76,7 +80,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -85,6 +89,7 @@ from ..integrations import wix as wix_api
 from ..integrations.base import IntegrationError
 from ..models import (
     JOB_DONE,
+    AuditLog,
     LINE_CANCELLED,
     LINE_PRINTED,
     SOURCE_WIX,
@@ -112,6 +117,44 @@ class BooksError(RuntimeError):
 
 def _key(*parts: str) -> str:
     return str(uuid.uuid5(NAMESPACE, "|".join(parts)))
+
+
+async def _attempt(
+    session: AsyncSession, *, entity_type: str, entity_id: Any, undone: str
+) -> int:
+    """Which go at this document we are on, counted by how often it was undone.
+
+    QuickBooks' `requestid` is an idempotency key: replay the same one and it
+    hands back the *original* document instead of making a new one. That is
+    exactly what a retry wants, and exactly what a second, deliberate attempt
+    does not.
+
+    Keying it on the order alone made those two indistinguishable. Void an
+    invoice and raise another and QuickBooks quietly returned the voided one —
+    so PrintFlow recorded the order as invoiced, the operator saw a document
+    number, and the books had a zero-value voided invoice and nothing else.
+    Nothing failed anywhere, which is what made it so hard to see.
+
+    Counting the undos separates them. Within one attempt the number does not
+    move, so a retry after a timeout still dedupes the way it must; each void
+    moves it on, so the next attempt is a new document. The audit trail already
+    records every undo and is never deleted, which is why this needs no column
+    of its own.
+    """
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.entity_type == entity_type,
+                    AuditLog.entity_id == entity_id,
+                    AuditLog.action == undone,
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
 
 
 # What took a line's units out of stock. Stored on the row rather than worked
@@ -393,10 +436,19 @@ async def remove_stock(
         reason=reason,
     )
 
+    # Same reasoning as the invoice: a removal that was taken back and is being
+    # booked again is a new Purchase, not a replay of the deleted one.
+    attempt = await _attempt(
+        session,
+        entity_type="order_line",
+        entity_id=line.id,
+        undone="qbo_stock_restored",
+    )
+
     try:
         client = await qbo_api.client_for(session)
         created = await client.create_purchase(
-            body, request_id=_key("stock", str(line.id))
+            body, request_id=_key("stock", str(line.id), str(attempt))
         )
     except (IntegrationError, IntegrationNotConfigured) as exc:
         # Recorded, not swallowed. If this was a timeout the Purchase may well
@@ -1055,6 +1107,15 @@ async def invoice_order(
             "Settings → QuickBooks → Orders in the books."
         )
 
+    # Which go at this invoice this is. Read before the write, because a void
+    # in between is exactly what has to make the next one a new document.
+    attempt = await _attempt(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        undone="qbo_invoice_voided",
+    )
+
     try:
         client = await qbo_api.client_for(session)
         customer = await find_or_create_customer(session, client, order)
@@ -1096,7 +1157,8 @@ async def invoice_order(
             doc_number=doc_number,
         )
         created = await client.create_invoice(
-            body, request_id=_key("invoice", str(order.id))
+            body,
+            request_id=_key("invoice", str(order.id), str(attempt)),
         )
     except (IntegrationError, IntegrationNotConfigured) as exc:
         order.qbo_invoice_error = str(exc)
@@ -1371,10 +1433,17 @@ async def post_expense(
         note=note,
     )
 
+    attempt = await _attempt(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        undone=f"qbo_{kind}_expense_voided",
+    )
+
     try:
         client = await qbo_api.client_for(session)
         created = await client.create_purchase(
-            body, request_id=_key("expense", kind, str(order.id))
+            body, request_id=_key("expense", kind, str(order.id), str(attempt))
         )
     except (IntegrationError, IntegrationNotConfigured) as exc:
         setattr(order, fields["error"], str(exc))

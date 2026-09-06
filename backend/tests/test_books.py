@@ -232,6 +232,18 @@ def _stub(
         "customer": {"Id": "77", "DisplayName": "Dana Buyer"},
         **(responses or {}),
     }
+    # What QuickBooks has already been asked to do, by `requestid`.
+    #
+    # Intuit's replay protection is the whole point of sending one: the same
+    # requestid returns the *original* document rather than making a second.
+    # Without that here the stub was more forgiving than the real thing, and a
+    # bug where two deliberate attempts shared a key looked fine in every test
+    # while quietly handing back a voided invoice in production.
+    seen: dict[str, dict] = {}
+    # The first document of each kind keeps the canonical id above, so every
+    # test that asserts on it still reads plainly; a *second*, genuinely new
+    # one is visibly different, which is what a void-then-reinvoice must produce.
+    counter: dict[str, int] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
@@ -278,12 +290,34 @@ def _stub(
 
         entity = request.url.path.rstrip("/").rsplit("/", 1)[-1]
         body = json.loads(request.content or b"{}")
+        operation = request.url.params.get("operation") or ""
         if posted is not None:
             # A delete is a POST with ?operation=delete, so the path alone
             # cannot tell one from a create. Whoever is asserting needs to know.
-            operation = request.url.params.get("operation") or ""
-            posted.append((f"{entity}:{operation}" if operation else entity, body))
+            # The requestid rides along under a name no QuickBooks body uses,
+            # so a test can assert on replay protection rather than only on the
+            # document.
+            posted.append(
+                (
+                    f"{entity}:{operation}" if operation else entity,
+                    {**body, "__requestid": request.url.params.get("requestid")},
+                )
+            )
         key = entity.capitalize() if entity != "customer" else "Customer"
+
+        request_id = request.url.params.get("requestid")
+        if request_id and not operation:
+            if request_id in seen:
+                # Replayed. QuickBooks hands back what it made the first time
+                # and creates nothing — including when that document has since
+                # been voided.
+                return httpx.Response(200, json={key: seen[request_id]})
+            nth = counter.get(entity, 0) + 1
+            counter[entity] = nth
+            base = replies[entity]
+            made = base if nth == 1 else {**base, "Id": f"{base['Id']}-{nth}"}
+            seen[request_id] = made
+            return httpx.Response(200, json={key: made})
         return httpx.Response(200, json={key: replies[entity]})
 
     return handler
@@ -1204,11 +1238,92 @@ class TestInvoiceOrder:
         await _line(db, order, product, quantity=2, transaction_id=1)
         await books.invoice_order(db, order, actor="adam")
 
+        first = order.qbo_invoice_id
         await books.void_invoice(db, order, actor="adam")
-
         assert order.qbo_invoice_id is None
+
         await books.invoice_order(db, order, actor="adam")
-        assert order.qbo_invoice_id == "301"
+
+        # A *new* document, not the voided one handed back.
+        #
+        # QuickBooks' requestid is replay protection: send the same one twice
+        # and it returns the original instead of creating anything. Keyed on
+        # the order alone, a void-then-reinvoice replayed the voided invoice —
+        # PrintFlow recorded the order as invoiced, showed a document number,
+        # and the books held a voided invoice worth nothing. Nothing errored
+        # anywhere, which is exactly what made it invisible.
+        assert order.qbo_invoice_id is not None
+        assert order.qbo_invoice_id != first
+
+
+class TestReplayProtection:
+    """The idempotency key has to tell two different things apart.
+
+    A *retry* of one attempt must never make a second document — that is the
+    whole reason PrintFlow sends QuickBooks a requestid, since a create that
+    times out may well have succeeded. A *deliberate* second attempt, after
+    somebody voided the first, must never be answered with the voided one.
+
+    Keyed on the order alone those were the same key, so the second case
+    silently replayed the first. Nothing failed: PrintFlow stored the voided
+    invoice's number and showed the order as invoiced, while QuickBooks held a
+    void worth nothing. Counting the undos is what separates them.
+    """
+
+    TRANSACTIONS = [{"transaction_id": 1, "price": {"amount": 1250, "divisor": 100}}]
+
+    async def _order_ready(self, db, monkeypatch, posted):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, product, quantity=2, transaction_id=1)
+        return order
+
+    async def test_the_same_attempt_replayed_makes_one_document(self, db, monkeypatch):
+        """What requestid is for. A timeout followed by a retry bills once."""
+        posted: list = []
+        order = await self._order_ready(db, monkeypatch, posted)
+
+        await books.invoice_order(db, order, actor="adam")
+        first = order.qbo_invoice_id
+
+        # The same attempt again, as a retry would: nothing was voided in
+        # between, so the key has not moved.
+        order.qbo_invoice_id = None
+        await books.invoice_order(db, order, actor="adam")
+
+        assert order.qbo_invoice_id == first
+        keys = [
+            body["__requestid"] for entity, body in posted if entity == "invoice"
+        ]
+        # Two requests went out; both carried the same key, so QuickBooks made
+        # one document. That is the property, not the count of calls.
+        assert len(keys) == 2
+        assert len(set(keys)) == 1
+
+    async def test_a_void_makes_the_next_attempt_a_new_document(self, db, monkeypatch):
+        posted: list = []
+        order = await self._order_ready(db, monkeypatch, posted)
+
+        await books.invoice_order(db, order, actor="adam")
+        first = order.qbo_invoice_id
+        await books.void_invoice(db, order, actor="adam")
+        await books.invoice_order(db, order, actor="adam")
+
+        assert order.qbo_invoice_id != first
+
+    async def test_it_keeps_moving_across_repeated_voids(self, db, monkeypatch):
+        """Two voids is two more documents, not the second one again."""
+        order = await self._order_ready(db, monkeypatch, [])
+        seen = []
+        for _ in range(3):
+            await books.invoice_order(db, order, actor="adam")
+            seen.append(order.qbo_invoice_id)
+            await books.void_invoice(db, order, actor="adam")
+
+        assert len(set(seen)) == 3
 
 
 # --------------------------------------------------------------------------
