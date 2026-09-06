@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -107,6 +108,114 @@ async def _https_redirect_enabled() -> bool:
     _redirect_cache["value"] = value
     _redirect_cache["expires"] = now + _REDIRECT_CACHE_TTL
     return value
+
+
+# How long any one API request may take before PrintFlow answers for itself.
+#
+# PrintFlow sits behind a reverse proxy — a Cloudflare Tunnel, usually — and
+# Cloudflare stops waiting at 100 seconds and serves its own 502 page. That page
+# names PrintFlow's hostname rather than whatever was actually unreachable, so
+# an operator is told PrintFlow is broken and goes looking there, while the real
+# answer never gets a chance to be rendered.
+#
+# Every integration call is meant to be bounded, and each time one has not been
+# it has cost an afternoon of looking in the wrong place. This is the backstop:
+# whatever anybody forgets, PrintFlow answers first, in its own words, well
+# inside the proxy's patience. 75s leaves 25 for the network and the tunnel.
+REQUEST_BUDGET_SECONDS = 75.0
+
+# The exceptions, and they are genuinely exceptional: moving a whole database
+# over a wire has no business finishing in a minute, and cutting a restore off
+# half way would be far worse than making somebody wait.
+UNBOUNDED_PATHS = (
+    "/api/backup/download",
+    "/api/backup/restore",
+    "/api/backup/inspect",
+)
+
+
+class RequestBudget:
+    """Answer within the budget, whatever a third party is doing.
+
+    Pure ASGI rather than `@app.middleware("http")` on purpose. Starlette's
+    BaseHTTPMiddleware runs the rest of the app in a *separate* task, so a
+    timeout around `call_next` cancels the waiting, not the work — the request
+    hangs on instead of being given up on, which is worse than the problem this
+    is here to solve. Wrapping the downstream call directly keeps it in this
+    task, where cancelling means cancelling.
+
+    A 504 rather than a 502: PrintFlow *is* the gateway to Etsy, Wix,
+    QuickBooks, Bambuddy and ShipStation, and saying "timed out" distinguishes
+    this from the proxy's own page without anybody having to read a log.
+
+    Deliberately covers the label purchase too, even though that path is
+    already bounded well under the budget. Every time this has gone wrong it
+    was a *newly added* call on a path that used to be fine, so the guard
+    belongs where the mistakes happen. The purchase commits the moment
+    ShipStation answers, so a cancellation here cannot lose the record of a
+    label that was paid for.
+    """
+
+    def __init__(self, app, budget: float = REQUEST_BUDGET_SECONDS) -> None:
+        self.app = app
+        self.budget = budget
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or not path.startswith("/api/")
+            or path.startswith(UNBOUNDED_PATHS)
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        started = time.monotonic()
+        # Once the status line is out there is no taking it back, so a timeout
+        # after that can only be logged. In practice an API handler produces
+        # its response in one go at the end, so this stays False until the work
+        # is done.
+        answered = False
+
+        async def watch(message):
+            nonlocal answered
+            if message["type"] == "http.response.start":
+                answered = True
+            await send(message)
+
+        try:
+            async with asyncio.timeout(self.budget):
+                await self.app(scope, receive, watch)
+        except TimeoutError:
+            took = time.monotonic() - started
+            # Loudly, with the path: this means something upstream is not
+            # bounded, and the log is where that gets diagnosed.
+            log.error(
+                "Gave up on %s %s after %.0fs — over the %.0fs request budget",
+                scope.get("method", "?"),
+                path,
+                took,
+                self.budget,
+            )
+            if answered:
+                return
+            await JSONResponse(
+                status_code=504,
+                content={
+                    "detail": (
+                        f"PrintFlow gave up on this after {int(self.budget)}s. "
+                        "That is almost always one of the connected services "
+                        "not answering rather than PrintFlow itself — check "
+                        "Settings for an integration showing an error, then "
+                        "try again."
+                    ),
+                    "path": path,
+                    "timed_out": True,
+                },
+            )(scope, receive, send)
+
+
+app.add_middleware(RequestBudget)
 
 
 @app.middleware("http")

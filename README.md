@@ -2079,6 +2079,37 @@ stock and warns on the card if QuickBooks says there is not enough. If
 QuickBooks is unreachable, printed lines fall back to printing the full
 quantity and say so on the line — intake never blocks on a third party.
 
+## Answering before the proxy gives up
+
+PrintFlow usually sits behind a Cloudflare Tunnel, and **Cloudflare stops
+waiting at 100 seconds** and serves its own 502 page. That page names
+PrintFlow's hostname rather than whatever was actually unreachable, so it sends
+you looking at PrintFlow when the truth was "Etsy never answered" — and the real
+error, which PrintFlow had ready, never gets rendered.
+
+So every `/api` request is capped at **75 seconds** and answers for itself: a
+**504** carrying what went wrong, rather than nothing at all. 504 rather than
+502 on purpose — the proxy's page is a 502, and the two should never be
+confusable again.
+
+The cap is a backstop, not the design. Integration calls are meant to be bounded
+individually — an interactive check tries once rather than four times, and
+multi-request operations run under `deadline()`. The cap is there for the ones
+somebody forgets, and it logs loudly with the path when it fires, because a
+request hitting it means something upstream is not bounded and that is worth
+fixing at the source.
+
+Two exceptions, in `UNBOUNDED_PATHS`: backup download and restore. Moving a
+whole database over a wire has no business finishing in a minute, and cutting a
+restore off half way would be far worse than making somebody wait.
+
+Buying a label is covered too, even though that path finishes in well under the
+budget — every time this has gone wrong it was a *newly added* call on a path
+that used to be fine, so the guard belongs where the mistakes happen. The
+purchase also commits the moment ShipStation answers, before the roll-up or the
+audit entry, so nothing after the money is spent can lose the record that it
+was.
+
 ## Background jobs
 
 | Job                        | Default   | Notes                                    |
