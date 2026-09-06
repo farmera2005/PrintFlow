@@ -28,6 +28,7 @@ from sqlalchemy.orm import selectinload
 from app.integrations import qbo as qbo_api
 from app.models import (
     JOB_DONE,
+    AuditLog,
     JOB_PRINTING,
     LINE_CANCELLED,
     LINE_PRINTED,
@@ -1254,6 +1255,109 @@ class TestInvoiceOrder:
         # anywhere, which is exactly what made it invisible.
         assert order.qbo_invoice_id is not None
         assert order.qbo_invoice_id != first
+
+
+class TestClearingAnInvoice:
+    """Letting go of an invoice QuickBooks no longer has.
+
+    Void is the right tool while the document exists: it cancels it there and
+    leaves the numbered void an accountant expects. When somebody has already
+    deleted the invoice in QuickBooks, void can only fail — and failing leaves
+    the order insisting it is invoiced and refusing to raise another. Clear is
+    the way out of that, and only that.
+    """
+
+    TRANSACTIONS = [{"transaction_id": 1, "price": {"amount": 1250, "divisor": 100}}]
+
+    async def _invoiced(self, db, monkeypatch, posted=None):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub(posted=posted if posted is not None else []))
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        await _line(db, order, product, quantity=2, transaction_id=1)
+        await books.invoice_order(db, order, actor="adam")
+        return order
+
+    async def test_it_lets_go_of_the_link(self, db, monkeypatch):
+        order = await self._invoiced(db, monkeypatch)
+        assert order.qbo_invoice_id
+
+        await books.clear_invoice(db, order, actor="adam")
+
+        assert order.qbo_invoice_id is None
+        assert order.qbo_invoice_doc_number is None
+        assert order.qbo_invoice_total is None
+        assert order.qbo_invoice_at is None
+
+    async def test_it_never_calls_quickbooks(self, db, monkeypatch):
+        """The whole point: the document is already gone from there."""
+        posted: list = []
+        order = await self._invoiced(db, monkeypatch, posted)
+        before = len(posted)
+
+        await books.clear_invoice(db, order, actor="adam")
+
+        assert len(posted) == before
+
+    async def test_what_was_let_go_of_is_written_down(self, db, monkeypatch):
+        """Once the columns are cleared nothing else says this order was
+        invoiced, and "where did 1005 go" gets asked months later."""
+        order = await self._invoiced(db, monkeypatch)
+        was = order.qbo_invoice_id
+
+        await books.clear_invoice(db, order, actor="adam")
+
+        entries = (await db.execute(select(AuditLog))).scalars().all()
+        entry = next(e for e in entries if e.action == "qbo_invoice_cleared")
+        assert entry.detail["qbo_invoice_id"] == was
+        assert entry.entity_id == order.id
+
+    async def test_clearing_frees_a_genuinely_new_invoice(self, db, monkeypatch):
+        """The interaction that matters.
+
+        Clearing has to move the idempotency key exactly as voiding does. If it
+        did not, the replacement invoice would be QuickBooks replaying the one
+        that was let go of — which is the failure this whole area was fixed for.
+        """
+        order = await self._invoiced(db, monkeypatch)
+        first = order.qbo_invoice_id
+
+        await books.clear_invoice(db, order, actor="adam")
+        await books.invoice_order(db, order, actor="adam")
+
+        assert order.qbo_invoice_id is not None
+        assert order.qbo_invoice_id != first
+
+    async def test_an_order_with_no_invoice_has_nothing_to_clear(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(monkeypatch, _stub())
+        order = await _order(db, transactions=self.TRANSACTIONS)
+
+        with pytest.raises(books.BooksError):
+            await books.clear_invoice(db, order, actor="adam")
+
+    async def test_a_void_that_cannot_find_it_points_at_clear(self, db, monkeypatch):
+        """The one failure with an obvious next step, said out loud.
+
+        Without this the order is stuck: void is the only offered way out and
+        it can never succeed.
+        """
+        order = await self._invoiced(db, monkeypatch)
+
+        def gone(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400, json={"Fault": {"Error": [{"Message": "Object Not Found"}]}}
+            )
+
+        _patch_qbo(monkeypatch, gone)
+        with pytest.raises(books.BooksError) as caught:
+            await books.void_invoice(db, order, actor="adam")
+
+        assert "Clear" in str(caught.value)
+        # And it is still invoiced, because nothing was actually undone.
+        assert order.qbo_invoice_id is not None
 
 
 class TestReplayProtection:

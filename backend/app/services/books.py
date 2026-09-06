@@ -120,7 +120,7 @@ def _key(*parts: str) -> str:
 
 
 async def _attempt(
-    session: AsyncSession, *, entity_type: str, entity_id: Any, undone: str
+    session: AsyncSession, *, entity_type: str, entity_id: Any, undone: tuple[str, ...]
 ) -> int:
     """Which go at this document we are on, counted by how often it was undone.
 
@@ -136,10 +136,14 @@ async def _attempt(
     Nothing failed anywhere, which is what made it so hard to see.
 
     Counting the undos separates them. Within one attempt the number does not
-    move, so a retry after a timeout still dedupes the way it must; each void
+    move, so a retry after a timeout still dedupes the way it must; each undo
     moves it on, so the next attempt is a new document. The audit trail already
     records every undo and is never deleted, which is why this needs no column
     of its own.
+
+    `undone` is a tuple because a document can be let go of in more than one
+    way — voided in QuickBooks, or forgotten here when QuickBooks no longer has
+    it. Both free the order to be invoiced again, so both have to move the key.
     """
     return int(
         (
@@ -149,7 +153,7 @@ async def _attempt(
                 .where(
                     AuditLog.entity_type == entity_type,
                     AuditLog.entity_id == entity_id,
-                    AuditLog.action == undone,
+                    AuditLog.action.in_(undone),
                 )
             )
         ).scalar_one()
@@ -442,7 +446,7 @@ async def remove_stock(
         session,
         entity_type="order_line",
         entity_id=line.id,
-        undone="qbo_stock_restored",
+        undone=("qbo_stock_restored",),
     )
 
     try:
@@ -1113,7 +1117,7 @@ async def invoice_order(
         session,
         entity_type="order",
         entity_id=order.id,
-        undone="qbo_invoice_voided",
+        undone=INVOICE_LET_GO,
     )
 
     try:
@@ -1224,6 +1228,75 @@ async def invoice_order(
     }
 
 
+# The two ways an order stops being invoiced, both of which free it to be
+# invoiced again — and both of which must move the idempotency key, or the
+# replacement would be QuickBooks replaying the one being let go of.
+INVOICE_LET_GO = ("qbo_invoice_voided", "qbo_invoice_cleared")
+
+
+def _is_gone(exc: Exception) -> bool:
+    """Whether QuickBooks is saying the document is not there any more.
+
+    Intuit answers a missing entity with an ordinary 400 carrying "Object Not
+    Found" in the body, so the status alone cannot tell this from a dozen other
+    refusals — the words have to be read. Matched loosely and used only to add
+    a suggestion, never to decide anything: a false positive costs a slightly
+    wrong sentence, and the real message is still shown.
+    """
+    said = str(exc).lower()
+    return "object not found" in said or "invalid reference id" in said
+
+
+async def clear_invoice(
+    session: AsyncSession, order: Order, *, actor: str
+) -> dict[str, Any]:
+    """Forget this order's invoice without touching QuickBooks.
+
+    Void is the right tool when the invoice is still there: it tells QuickBooks
+    to cancel the document, leaving the numbered, auditable void that an
+    accountant expects. This is for when it is *not* there — deleted in
+    QuickBooks by hand — where a void can only fail, and failing leaves the
+    order stuck claiming an invoice that does not exist and refusing to raise
+    another.
+
+    So this changes nothing in QuickBooks and says so. It only lets go of the
+    link. That makes it the wrong button in every case where void would work,
+    which is why the two are named differently on screen and why this one asks
+    what it is going to do rather than what it is called.
+
+    It counts as an undo, so the next invoice is a genuinely new document
+    rather than QuickBooks handing back the one that was let go of.
+    """
+    if not order.qbo_invoice_id:
+        raise BooksError("This order has no QuickBooks invoice to clear.")
+
+    invoice_id = order.qbo_invoice_id
+    doc_number = order.qbo_invoice_doc_number
+    order.qbo_invoice_id = None
+    order.qbo_invoice_doc_number = None
+    order.qbo_invoice_total = None
+    order.qbo_invoice_at = None
+    order.qbo_invoice_error = None
+    await session.flush()
+
+    # Written down in full. Nothing else records that this order was ever
+    # invoiced once the columns are cleared, and "where did invoice 1042 go"
+    # is a question somebody will ask of the books months later.
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="qbo_invoice_cleared",
+        detail={
+            "qbo_invoice_id": invoice_id,
+            "doc_number": doc_number,
+            "note": "Link cleared in PrintFlow; QuickBooks was not called.",
+        },
+        actor=actor,
+    )
+    return {"cleared": True, "qbo_invoice_id": invoice_id, "doc_number": doc_number}
+
+
 async def void_invoice(
     session: AsyncSession, order: Order, *, actor: str
 ) -> dict[str, Any]:
@@ -1240,6 +1313,17 @@ async def void_invoice(
     except (IntegrationError, IntegrationNotConfigured) as exc:
         order.qbo_invoice_error = str(exc)
         await session.flush()
+        if _is_gone(exc):
+            # The one failure with an obvious next step. Without saying this,
+            # an order whose invoice was deleted in QuickBooks is stuck: void
+            # is the only offered way out and it cannot ever succeed.
+            raise BooksError(
+                f"QuickBooks has no invoice "
+                f"{order.qbo_invoice_doc_number or invoice_id} any more — it "
+                "looks like it was deleted there. Use Clear instead, which "
+                "lets go of the link here without asking QuickBooks to void "
+                "anything, and then this order can be invoiced again."
+            ) from exc
         raise BooksError(f"QuickBooks would not void the invoice: {exc}") from exc
 
     doc_number = order.qbo_invoice_doc_number
@@ -1437,7 +1521,7 @@ async def post_expense(
         session,
         entity_type="order",
         entity_id=order.id,
-        undone=f"qbo_{kind}_expense_voided",
+        undone=(f"qbo_{kind}_expense_voided",),
     )
 
     try:

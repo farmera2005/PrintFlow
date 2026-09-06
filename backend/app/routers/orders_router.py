@@ -719,6 +719,28 @@ async def void_invoice(
     return await board.load_order_detail(session, order_id)
 
 
+@router.post("/orders/{order_id}/invoice/clear")
+async def clear_invoice(
+    order_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Let go of the invoice link without calling QuickBooks.
+
+    For an invoice that has already been deleted in QuickBooks, where a void
+    can only fail — and where failing leaves the order claiming an invoice
+    that does not exist and refusing to raise another.
+    """
+    order = await _get_order(session, order_id)
+    try:
+        await books.clear_invoice(session, order, actor=user.username)
+    except BooksError as exc:
+        await session.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await session.commit()
+    return await board.load_order_detail(session, order_id)
+
+
 # --------------------------------------------------------------------------
 # ShipStation
 # --------------------------------------------------------------------------

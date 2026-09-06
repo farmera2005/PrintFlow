@@ -1510,20 +1510,53 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
             against each item sold. Stock the invoice relieves was handed back by
             the printed lines, so each unit is deducted once.
           </p>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={() =>
-              run(
-                '/void',
-                'Void this invoice in QuickBooks? It stays visible there with a ' +
-                  'zero total, and this order can then be invoiced again.',
-              )
-            }
-          >
-            {busy ? 'Working…' : 'Void invoice'}
-          </Button>
+          {/* Two ways to stop being invoiced, and they are not interchangeable.
+              Void is the one to reach for: it cancels the document in
+              QuickBooks and leaves the numbered void an accountant expects.
+              Clear touches nothing there — it is only for an invoice that has
+              already been deleted in QuickBooks, where a void can only fail
+              and failing leaves the order stuck claiming an invoice that is
+              not there. Both free the order to be invoiced again. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                run(
+                  '/void',
+                  'Void this invoice in QuickBooks? It stays visible there with a ' +
+                    'zero total, and this order can then be invoiced again.',
+                )
+              }
+            >
+              {busy ? 'Working…' : 'Void invoice'}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                run(
+                  '/clear',
+                  `Clear invoice ${
+                    order.qbo_invoice_doc_number ?? order.qbo_invoice_id
+                  } from this order?\n\n` +
+                    'QuickBooks is not called and nothing changes there. Only ' +
+                    'use this if the invoice has already been deleted in ' +
+                    'QuickBooks — otherwise Void it, or the document stays ' +
+                    'there with nothing pointing at it.\n\n' +
+                    'The order can then be invoiced again.',
+                )
+              }
+            >
+              Clear
+            </Button>
+            <span className="text-xs text-ink-500">
+              Clear only if it was already deleted in QuickBooks — it changes
+              nothing there.
+            </span>
+          </div>
         </div>
       ) : (
         <div className="mt-1.5 space-y-1.5">

@@ -1475,6 +1475,19 @@ zero-total document in QuickBooks — rather than deleting it and leaving a gap 
 the numbering that somebody has to explain — and frees the order to be invoiced
 again.
 
+**Clearing**, next to it, is for an invoice that is *already gone from
+QuickBooks* — deleted there by hand. Voiding one of those can only fail, and
+failing leaves the order insisting it is invoiced and refusing to raise another.
+Clear calls QuickBooks not at all: it lets go of the link here and nothing else.
+That makes it the wrong button whenever Void would work, so it says as much
+where it sits, and asks what it is about to do rather than what it is called.
+What was let go of goes into the audit trail in full, because once the columns
+are cleared nothing else records that the order was ever invoiced.
+
+Both free the order to be invoiced again, and both move the idempotency key — a
+replacement is a new document, never QuickBooks replaying the one that was let
+go of.
+
 ### Stock out when a bundle is assembled
 
 Printing is not the only way a part gets used up. A component the shop already
