@@ -318,3 +318,78 @@ async def test_a_new_link_clears_the_orders_waiting_on_it(db):
     assert fixed == 1
     await db.refresh(line)
     assert line.product_id == product.id
+
+
+# --------------------------------------------------------------------------
+# Staying inside the proxy's patience
+# --------------------------------------------------------------------------
+
+
+async def test_the_backlog_pass_stops_at_its_budget(db, monkeypatch):
+    """Linking a whole catalogue must answer, not run until a proxy gives up.
+
+    Every link re-resolves the orders waiting on it, and each of those asks
+    QuickBooks about stock and Bambuddy about plates. Two hundred links is
+    two hundred rounds of that, which is minutes — and Cloudflare stops
+    waiting at 100s and serves its own 502 page.
+    """
+    from app.routers import integrations_router as router
+
+    product = await a_product(db, "A-1", "A")
+    made = []
+    for n in range(5):
+        db.add(
+            WixProductLink(product_id=product.id, wix_catalog_item_id=f"w{n}")
+        )
+        made.append({"wix_catalog_item_id": f"w{n}"})
+    await db.commit()
+
+    # Each link "costs" more than the whole budget, so only the first runs.
+    calls = []
+
+    async def slow(session, link):
+        calls.append(link.wix_catalog_item_id)
+        clock["now"] += router.BACKLOG_BUDGET_SECONDS + 1
+        return 1
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(router.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(router.intake, "apply_wix_link", slow)
+
+    fixed, remaining = await router._clear_wix_backlog(db, made)
+
+    assert len(calls) == 1
+    assert fixed == 1
+    # And it says what it did not reach rather than pretending it finished.
+    assert remaining == 4
+
+
+async def test_one_unresolvable_order_does_not_cost_the_pass(db, monkeypatch):
+    """The links are already committed; a bad order must not undo the rest."""
+    from app.routers import integrations_router as router
+
+    product = await a_product(db, "A-1", "A")
+    for n in range(3):
+        db.add(WixProductLink(product_id=product.id, wix_catalog_item_id=f"w{n}"))
+    await db.commit()
+
+    seen = []
+
+    async def sometimes(session, link):
+        seen.append(link.wix_catalog_item_id)
+        if link.wix_catalog_item_id == "w1":
+            raise RuntimeError("this one will not resolve")
+        return 1
+
+    monkeypatch.setattr(router.intake, "apply_wix_link", sometimes)
+
+    fixed, remaining = await router._clear_wix_backlog(
+        db, [{"wix_catalog_item_id": f"w{n}"} for n in range(3)]
+    )
+
+    assert seen == ["w0", "w1", "w2"]
+    assert fixed == 2
+    assert remaining == 0
+    # The links themselves survive, because they were never in doubt.
+    links = (await db.execute(select(WixProductLink))).scalars().all()
+    assert len(links) == 3

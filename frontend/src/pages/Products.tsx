@@ -2657,14 +2657,23 @@ function WixCatalogCheck({
         linked: unknown[]
         skipped: unknown[]
         also_fixed: number
+        backlog_remaining: number
       }>('/api/integrations/wix/catalog/link', {
         wix_catalog_item_ids: [...chosen],
       })
       const fixed = result.also_fixed
+      const left = result.backlog_remaining
       setDone(
         `Linked ${result.linked.length} item${result.linked.length === 1 ? '' : 's'}` +
           (fixed ? `, and ${fixed} waiting order line${fixed === 1 ? '' : 's'} now match` : '') +
-          '.',
+          '.' +
+          // Said out loud. Clearing the backlog is bounded by the clock, and a
+          // pass that quietly stopped half way is indistinguishable from one
+          // that found nothing more to do.
+          (left
+            ? ` ${left} link${left === 1 ? '' : 's'} still had orders waiting when ` +
+              'this ran out of time — press it again to finish them off.'
+            : ''),
       )
       await onChanged()
       await load()

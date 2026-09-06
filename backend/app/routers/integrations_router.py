@@ -1219,32 +1219,25 @@ async def wix_catalog_link(
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Link the catalogue items the operator confirmed, and clear the backlog."""
+    """Link the catalogue items the operator confirmed, and clear the backlog.
+
+    Two phases, committed separately and on purpose. Making the links is pure
+    database work and is what was actually asked for; clearing the backlog
+    behind them is the slow part, because re-resolving a line asks QuickBooks
+    about stock and Bambuddy about plates. Running both under one commit means
+    a big catalogue can spend minutes in here and lose the links to a timeout —
+    which is how the operator ends up pressing a button that appears to do
+    nothing.
+    """
     client = await wix_api.client_for(session)
     async with base_api.deadline(
-        PROVIDER_WIX, "Reading the Wix catalogue", seconds=45.0
+        PROVIDER_WIX, "Reading the Wix catalogue", seconds=30.0
     ):
         items, _version = await client.iter_catalog()
 
     result = await wix_catalog_svc.link_items(
         session, items, body.wix_catalog_item_ids
     )
-
-    # A link is only worth making because it fixes orders, so fix them now
-    # rather than waiting for the next one to arrive.
-    fixed = 0
-    for made in result["linked"]:
-        link = (
-            await session.execute(
-                select(WixProductLink).where(
-                    WixProductLink.wix_catalog_item_id == made["wix_catalog_item_id"],
-                    WixProductLink.wix_variant_id.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if link is not None:
-            fixed += await intake.apply_wix_link(session, link)
-
     await audit.record(
         session,
         entity_type="settings",
@@ -1253,12 +1246,70 @@ async def wix_catalog_link(
         detail={
             "linked": len(result["linked"]),
             "skipped": len(result["skipped"]),
-            "also_fixed": fixed,
         },
         actor=user.username,
     )
+    # Banked before anything slow runs. From here on, the worst case is that
+    # some orders stay unmatched a little longer — never that the links vanish.
     await session.commit()
-    return {**result, "also_fixed": fixed}
+
+    fixed, remaining = await _clear_wix_backlog(session, result["linked"])
+    return {**result, "also_fixed": fixed, "backlog_remaining": remaining}
+
+
+# What clearing the backlog is allowed to take. Each link re-resolves the
+# orders waiting on it, and each of those asks QuickBooks about stock and
+# Bambuddy about plates — so this is bounded by two third parties, not by us.
+# Well inside a proxy's patience once the catalogue read is paid for.
+BACKLOG_BUDGET_SECONDS = 25.0
+
+
+async def _clear_wix_backlog(
+    session: AsyncSession, linked: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """Re-resolve the orders these new links cover. Returns (fixed, not reached).
+
+    Bounded by the clock rather than by the list, and committed per link, so a
+    catalogue of hundreds answers in time and keeps whatever it finished. What
+    is not reached stays unmatched and is cleared by pressing again — the same
+    button, now with far less to do, because the links are already made.
+    """
+    deadline_at = time.monotonic() + BACKLOG_BUDGET_SECONDS
+    fixed = 0
+    remaining = 0
+    for index, made in enumerate(linked):
+        if time.monotonic() >= deadline_at:
+            remaining = len(linked) - index
+            log.info(
+                "Wix backlog pass stopped after %s of %s links; %s left for the "
+                "next press",
+                index,
+                len(linked),
+                remaining,
+            )
+            break
+        link = (
+            await session.execute(
+                select(WixProductLink).where(
+                    WixProductLink.wix_catalog_item_id == made["wix_catalog_item_id"],
+                    WixProductLink.wix_variant_id.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if link is None:
+            continue
+        try:
+            fixed += await intake.apply_wix_link(session, link)
+            await session.commit()
+        except Exception:
+            # One order that will not resolve must not cost the whole pass, nor
+            # the links, which are already committed.
+            log.exception(
+                "Could not clear the backlog for Wix item %s",
+                made["wix_catalog_item_id"],
+            )
+            await session.rollback()
+    return fixed, remaining
 
 
 class WixOrdersSinceRequest(BaseModel):
