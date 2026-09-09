@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -1255,6 +1255,118 @@ class TestInvoiceOrder:
         # anywhere, which is exactly what made it invisible.
         assert order.qbo_invoice_id is not None
         assert order.qbo_invoice_id != first
+
+
+class TestInventoryStartDate:
+    """QuickBooks will not date a transaction before an item started counting.
+
+    Error 6270: "Transactions with inventory (QOH) products cant be dated
+    earlier than the Inventory Start Date for the product". A shop that set its
+    items up in September and is invoicing an August order hits it on every
+    line, and the raw fault names neither the item nor the date — so it reads
+    as "invoicing is broken" rather than "move the date".
+
+    The catalogue the invoice already fetches carries the answer, so this is
+    settled before the write rather than by a validation code coming back.
+    """
+
+    TRANSACTIONS = [{"transaction_id": 1, "price": {"amount": 1250, "divisor": 100}}]
+    EARLY = datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+    def _catalogue(self, start="2026-09-01"):
+        return {"500": {"Id": "500", "Name": "Dragon egg", "Type": "Inventory",
+                        "InvStartDate": start}}
+
+    async def test_it_names_the_item_and_the_date(self, db, monkeypatch):
+        await _qbo_connected(db)
+        await _configured(db)
+        _patch_qbo(
+            monkeypatch,
+            _stub(items=[{"Id": "500", "Name": "Dragon egg", "Type": "Inventory",
+                          "InvStartDate": "2026-09-01"}]),
+        )
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        order.placed_at = self.EARLY
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        with pytest.raises(books.BooksError) as caught:
+            await books.invoice_order(db, order, actor="adam")
+
+        said = str(caught.value)
+        assert "Dragon egg" in said
+        assert "2026-09-01" in said
+        # And says both ways out, because only one of them is PrintFlow's.
+        assert "date the invoice" in said.lower()
+        assert "quickbooks" in said.lower()
+        assert order.qbo_invoice_id is None
+
+    async def test_a_later_date_gets_through(self, db, monkeypatch):
+        """The way out that does not need QuickBooks changing."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(
+            monkeypatch,
+            _stub(
+                items=[{"Id": "500", "Name": "Dragon egg", "Type": "Inventory",
+                        "InvStartDate": "2026-09-01"}],
+                posted=posted,
+            ),
+        )
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        order.placed_at = self.EARLY
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        await books.invoice_order(
+            db, order, actor="adam", invoice_date=date(2026, 9, 5)
+        )
+
+        assert order.qbo_invoice_id is not None
+        body = next(b for e, b in posted if e == "invoice")
+        assert body["TxnDate"] == "2026-09-05"
+
+    async def test_the_order_s_own_day_is_still_the_default(self, db, monkeypatch):
+        """A sale happened when it happened; nothing moves it without being asked."""
+        await _qbo_connected(db)
+        await _configured(db)
+        posted: list = []
+        _patch_qbo(monkeypatch, _stub(posted=posted))
+        product = await _product(db)
+        order = await _order(db, transactions=self.TRANSACTIONS)
+        order.placed_at = datetime(2026, 9, 3, tzinfo=timezone.utc)
+        await _line(db, order, product, quantity=2, transaction_id=1)
+
+        await books.invoice_order(db, order, actor="adam")
+
+        body = next(b for e, b in posted if e == "invoice")
+        assert body["TxnDate"] == "2026-09-03"
+
+    async def test_an_item_with_no_start_date_is_no_floor(self):
+        assert books.too_early_for(self._catalogue(start=""), ["500"], date(2026, 1, 1)) is None
+
+    async def test_a_service_item_never_blocks(self):
+        """Only Inventory items carry a quantity that can be dated wrongly."""
+        catalogue = {"9": {"Id": "9", "Type": "Service", "InvStartDate": "2026-09-01"}}
+        assert books.too_early_for(catalogue, ["9"], date(2026, 1, 1)) is None
+
+    async def test_the_latest_start_date_wins(self):
+        """One date has to satisfy every item on the invoice."""
+        catalogue = {
+            "1": {"Id": "1", "Name": "Early", "Type": "Inventory",
+                  "InvStartDate": "2026-07-01"},
+            "2": {"Id": "2", "Name": "Late", "Type": "Inventory",
+                  "InvStartDate": "2026-09-01"},
+        }
+        found = books.too_early_for(catalogue, ["1", "2"], date(2026, 6, 1))
+        assert found is not None
+        assert found[0] == date(2026, 9, 1)
+        assert found[1]["Name"] == "Late"
+
+    async def test_a_date_on_the_start_day_is_allowed(self):
+        """Not before means not before — the day itself is fine."""
+        assert books.too_early_for(self._catalogue(), ["500"], date(2026, 9, 1)) is None
 
 
 class TestClearingAnInvoice:

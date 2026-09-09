@@ -1477,12 +1477,24 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
 
   const discount = Number(order.discount_total ?? 0) > 0 ? order.discount_total : null
 
-  const run = async (path: string, confirmText?: string) => {
+  // Pre-filled with the order's own day, in the YYYY-MM-DD an <input type=date>
+  // wants. Local time deliberately: an order placed late on the 31st in the
+  // shop's evening is still the 31st to whoever is reconciling.
+  const placedDay = order.placed_at
+    ? (() => {
+        const d = new Date(order.placed_at)
+        const pad = (n: number) => String(n).padStart(2, '0')
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      })()
+    : ''
+  const [invoiceDate, setInvoiceDate] = useState(placedDay)
+
+  const run = async (path: string, confirmText?: string, body?: unknown) => {
     if (confirmText && !window.confirm(confirmText)) return
     setBusy(true)
     setError(null)
     try {
-      await api.post(`/api/orders/${order.id}/invoice${path}`)
+      await api.post(`/api/orders/${order.id}/invoice${path}`, body)
       onChanged()
     } catch (err) {
       setError(errorMessage(err))
@@ -1587,7 +1599,32 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
               )}
             </p>
           ) : null}
-          <Button size="sm" variant="primary" disabled={busy} onClick={() => run('')}>
+          {/* The day the invoice is dated. Defaults to the day the order was
+              placed, because that is when the sale happened. It is editable
+              because QuickBooks refuses to date anything touching an inventory
+              item before the day it began counting that item — so an order
+              placed before the items were set up cannot be invoiced on its own
+              date, and the only way through is to move it. */}
+          <Field
+            label="Invoice date"
+            hint="The day the order was placed. Move it forward only if QuickBooks refuses the order's own date."
+          >
+            <div className="w-44">
+              <input
+                className={inputClass}
+                type="date"
+                value={invoiceDate}
+                disabled={busy}
+                onChange={(e) => setInvoiceDate(e.target.value)}
+              />
+            </div>
+          </Field>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={busy}
+            onClick={() => run('', undefined, { invoice_date: invoiceDate || null })}
+          >
             {busy ? 'Creating…' : 'Create invoice'}
           </Button>
         </div>

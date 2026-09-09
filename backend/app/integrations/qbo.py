@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
@@ -491,6 +492,26 @@ def item_moves_stock(item: dict[str, Any]) -> bool:
     the printed line has already done it.
     """
     return item_is_inventory(item) or bool(item.get("TrackQtyOnHand"))
+
+
+def item_inventory_start(item: dict[str, Any]) -> date | None:
+    """The day QuickBooks began counting this item, if it counts it at all.
+
+    Nothing touching an inventory item may be dated before this — QuickBooks
+    refuses with code 6270, because a quantity cannot move on a day it did not
+    yet have one. Only Inventory items have it, and an item created without one
+    may not carry it at all, so this is often None and None means "no floor".
+    """
+    if not item_is_inventory(item):
+        return None
+    raw = str(item.get("InvStartDate") or "").strip()
+    if not raw:
+        return None
+    try:
+        # QuickBooks sends a plain date; be forgiving about a datetime.
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
 
 
 def item_qty_on_hand(item: dict[str, Any]) -> float | None:

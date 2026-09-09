@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -680,9 +680,19 @@ async def invoice_number(
     return await books.invoice_numbering(session)
 
 
+class CreateInvoiceRequest(BaseModel):
+    # What day the invoice is dated. Omitted means the day the order was
+    # placed, which is the honest default — the sale happened when it happened.
+    # It exists because QuickBooks refuses to date anything touching an
+    # inventory item before the day it started counting that item, which an
+    # order placed before the items were set up trips on every line.
+    invoice_date: date | None = None
+
+
 @router.post("/orders/{order_id}/invoice")
 async def create_invoice(
     order_id: uuid.UUID,
+    body: CreateInvoiceRequest | None = None,
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -694,7 +704,12 @@ async def create_invoice(
     """
     order = await _get_order(session, order_id)
     try:
-        await books.invoice_order(session, order, actor=user.username)
+        await books.invoice_order(
+            session,
+            order,
+            actor=user.username,
+            invoice_date=(body.invoice_date if body else None),
+        )
     except BooksError as exc:
         await session.commit()  # keep the recorded reason, not the write
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

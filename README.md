@@ -1470,6 +1470,18 @@ than assumes:
 Either way the Money tab says which it will be **before** you press the button,
 since the two are indistinguishable until an invoice turns up unnumbered.
 
+**The invoice date** defaults to the day the order was placed, because that is
+when the sale happened. It is editable for one reason: QuickBooks refuses to
+date anything touching an **inventory item** before the day it began counting
+that item — error 6270 — so an order placed before the items were set up cannot
+be invoiced on its own date at all.
+
+PrintFlow settles that before writing rather than letting the refusal come back:
+the item catalogue it already fetches carries each item's inventory start date,
+so it can say *which* item and *which* date, and offer the two ways out — move
+the invoice date forward, or change the item's start date in QuickBooks. The
+raw fault names neither, which is why it reads as "invoicing is broken".
+
 **Voiding.** An invoice can be voided from the Money tab, which leaves a
 zero-total document in QuickBooks — rather than deleting it and leaving a gap in
 the numbering that somebody has to explain — and frees the order to be invoiced

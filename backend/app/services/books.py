@@ -76,7 +76,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -931,6 +931,7 @@ def build_invoice(
     item_for: dict[Any, str],
     discount: Decimal | None = None,
     doc_number: str | None = None,
+    txn_date: date | None = None,
 ) -> dict[str, Any]:
     """The exact Invoice body sent to QuickBooks. Pure.
 
@@ -1003,8 +1004,8 @@ def build_invoice(
     # arrangement to want, and the one nothing here should be second-guessing.
     if doc_number:
         body["DocNumber"] = str(doc_number)[:21]
-    if order.placed_at:
-        body["TxnDate"] = order.placed_at.date().isoformat()
+    if txn_date:
+        body["TxnDate"] = txn_date.isoformat()
     if order.currency:
         body["CurrencyRef"] = {"value": str(order.currency)}
     return body
@@ -1048,7 +1049,7 @@ async def find_or_create_customer(
 
 
 async def invoice_order(
-    session: AsyncSession, order: Order, *, actor: str
+    session: AsyncSession, order: Order, *, actor: str, invoice_date: date | None = None
 ) -> dict[str, Any]:
     """Raise the QuickBooks invoice for an order. Once per order.
 
@@ -1135,6 +1136,27 @@ async def invoice_order(
         # What this company's settings allow, which decides two things about
         # the body: whether PrintFlow has to supply the reference, and whether
         # the discount can be a discount line at all.
+        # What day this is dated, and whether QuickBooks will have it. An
+        # inventory item cannot be moved before the day QuickBooks started
+        # counting it, and an order placed before the items were set up trips
+        # that on every line. The catalogue above already carries the answer,
+        # so this is settled here rather than by a validation code coming back.
+        txn_date = invoice_date_for(order, invoice_date)
+        clash = too_early_for(
+            catalogue, [str(i) for i in item_for.values() if i], txn_date
+        )
+        if clash is not None:
+            earliest, item = clash
+            name = item.get("Name") or item.get("FullyQualifiedName") or "an item"
+            raise BooksError(
+                f"QuickBooks will not date this invoice {txn_date}: it started "
+                f"counting stock of “{name}” on {earliest}, and nothing "
+                "touching an inventory item can be dated before that. Either "
+                f"date the invoice {earliest} or later using the date box "
+                "above, or change that item's inventory start date in "
+                "QuickBooks and try again."
+            )
+
         rules = await company_rules(client)
         doc_number = None
         if rules["custom_numbers"]:
@@ -1159,6 +1181,7 @@ async def invoice_order(
             item_for={key: str(value) for key, value in item_for.items() if value},
             discount=discount,
             doc_number=doc_number,
+            txn_date=txn_date,
         )
         created = await client.create_invoice(
             body,
@@ -1167,6 +1190,20 @@ async def invoice_order(
     except (IntegrationError, IntegrationNotConfigured) as exc:
         order.qbo_invoice_error = str(exc)
         await session.flush()
+        if _too_early_fault(exc):
+            # The pre-flight above catches this for every item it can see, so
+            # reaching here means one it could not — the shipping or fallback
+            # item, or an item resolved after the catalogue was read. Worth
+            # translating anyway: 6270 says nothing to anyone who has not met
+            # it before.
+            raise BooksError(
+                f"QuickBooks will not date this invoice {txn_date}: one of the "
+                "items on it is an inventory item that QuickBooks only started "
+                "counting later, and nothing touching one can be dated before "
+                "that. Date the invoice later using the date box above, or "
+                "change that item's inventory start date in QuickBooks. "
+                "Nothing was saved as invoiced."
+            ) from exc
         raise BooksError(
             f"QuickBooks would not take the invoice: {exc}. Nothing was saved "
             "as invoiced — check QuickBooks before trying again."
@@ -1231,6 +1268,62 @@ async def invoice_order(
 # The two ways an order stops being invoiced, both of which free it to be
 # invoiced again — and both of which must move the idempotency key, or the
 # replacement would be QuickBooks replaying the one being let go of.
+def _too_early_fault(exc: Exception) -> bool:
+    """Whether QuickBooks refused this for being dated before an item's start.
+
+    Matched on the code rather than the sentence, which Intuit words
+    differently between endpoints; the sentence is checked too for the case
+    where the code is not carried through.
+    """
+    said = str(exc).lower()
+    return "6270" in said or "prior to start date for inventory" in said
+
+
+def invoice_date_for(order: Order, chosen: date | None = None) -> date | None:
+    """What day the invoice is dated. The order's, unless somebody said otherwise.
+
+    An invoice is a record of a sale that happened on a particular day, so the
+    order's day is the honest default and the only reason to move it is that
+    QuickBooks will not accept it — see `too_early_for`.
+    """
+    if chosen is not None:
+        return chosen
+    return order.placed_at.date() if order.placed_at else None
+
+
+def too_early_for(
+    catalogue: dict[str, dict[str, Any]], item_ids: list[str], when: date | None
+) -> tuple[date, dict[str, Any]] | None:
+    """The inventory item, if any, that this date is before the start of.
+
+    QuickBooks refuses a transaction dated before an inventory item's Inventory
+    Start Date — code 6270, "Transactions with inventory (QOH) products cant be
+    dated earlier than the Inventory Start Date for the product". A shop that
+    set its items up in September and is invoicing an August order hits it on
+    every line, and the raw fault names neither the item nor the date.
+
+    Asked here rather than left to QuickBooks because the answer is already in
+    the catalogue this invoice fetched, and knowing it up front is the
+    difference between "here is the item and the date" and a validation code.
+
+    Returns the *latest* start date among the items being billed, with its
+    item, since that is the earliest the whole invoice could be dated.
+    """
+    if when is None:
+        return None
+    worst: tuple[date, dict[str, Any]] | None = None
+    for item_id in item_ids:
+        item = catalogue.get(str(item_id))
+        if not item:
+            continue
+        start = qbo_api.item_inventory_start(item)
+        if start is None or start <= when:
+            continue
+        if worst is None or start > worst[0]:
+            worst = (start, item)
+    return worst
+
+
 INVOICE_LET_GO = ("qbo_invoice_voided", "qbo_invoice_cleared")
 
 
