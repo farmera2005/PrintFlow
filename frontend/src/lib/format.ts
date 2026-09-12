@@ -51,11 +51,15 @@ export const COLUMN_LABELS: Record<OrderStatus, string> = {
 export const SOURCE_LABELS: Record<OrderSource, string> = {
   etsy: 'Etsy',
   wix: 'Wix',
+  manual: 'By hand',
 }
 
 export const SOURCE_CLASSES: Record<OrderSource, string> = {
   etsy: 'bg-orange-100 text-orange-800 ring-orange-300',
   wix: 'bg-blue-100 text-blue-800 ring-blue-300',
+  // Grey on purpose: the other two are brands, and this one is the absence of
+  // a brand rather than a third of them.
+  manual: 'bg-ink-100 text-ink-700 ring-ink-300',
 }
 
 /** Whether to mark these cards with where they came from.

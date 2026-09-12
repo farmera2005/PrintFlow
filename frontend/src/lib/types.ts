@@ -102,7 +102,7 @@ export interface OrderSummary {
   pending_assembly: { line_id: string; sku: string | null }[]
 }
 
-export type OrderSource = 'etsy' | 'wix'
+export type OrderSource = 'etsy' | 'wix' | 'manual'
 
 export interface Order {
   id: string
@@ -185,6 +185,9 @@ export interface Order {
   carrier_code?: string | null
   service_code?: string | null
   has_label_pdf?: boolean
+  /** Whether there is a channel payload behind this order to look at. False
+   *  for one typed in by hand: nothing sent it, so there is nothing to read. */
+  raw_available?: boolean
   bambuddy_base_url?: string | null
   /** Where it is going, as Etsy sent it. Drawer only. */
   ship_to?: {

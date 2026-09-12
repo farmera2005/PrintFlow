@@ -253,6 +253,21 @@ class ShipStationClient:
             "POST", "/orders/createlabelfororder", json=body, retries=0
         )
 
+    async def create_order(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Put an order into ShipStation that nothing imported for us.
+
+        For orders PrintFlow was told about rather than polled — typed in from
+        a phone call or a stall — which no sales channel is ever going to hand
+        ShipStation. Everything after this is the ordinary label path.
+
+        Safe to repeat, and that is what `orderKey` is for: ShipStation treats
+        a body carrying a key it has seen as an update to that order rather
+        than as a second one. So a retry after a timeout leaves one parcel to
+        pack, not two — which is why this keeps the ordinary retry budget
+        where buying a label does not.
+        """
+        return await self._call("POST", "/orders/createorder", json=body)
+
 
 def order_defaults(order: dict[str, Any]) -> dict[str, Any]:
     """Pre-populate the label dialog from ShipStation's own defaults for the order."""

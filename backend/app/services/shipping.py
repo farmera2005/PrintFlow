@@ -12,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..integrations import shipstation as ss_api
 from ..integrations.base import IntegrationError
 from ..models import (
+    LINE_CANCELLED,
     ORDER_CANCELLED,
     ORDER_SHIPPED,
+    SOURCE_MANUAL,
     Order,
+    OrderLine,
 )
 from ..services import credentials
 from ..services.manufacturing import money
@@ -47,8 +50,159 @@ class LabelError(RuntimeError):
     pass
 
 
+# What ShipStation cannot make a label without, and the words to ask for it in.
+REQUIRED_ADDRESS = (
+    ("name", "a name"),
+    ("first_line", "a street address"),
+    ("city", "a city"),
+    ("zip", "a postcode"),
+    ("country", "a country"),
+)
+
+
+def address_problem(order: Order) -> str | None:
+    """Why this order cannot be shipped yet, in a sentence, or None.
+
+    Asked before ShipStation is called rather than after: "postalCode is
+    required" coming back from an API is a worse version of the same news, and
+    it costs a round trip to find out.
+    """
+    to = order.ship_to or {}
+    missing = [
+        what for field, what in REQUIRED_ADDRESS if not str(to.get(field) or "").strip()
+    ]
+    if missing:
+        return (
+            "This order needs "
+            + ", ".join(missing[:-1] + [f"and {missing[-1]}"] if len(missing) > 1 else missing)
+            + " before ShipStation can ship it. Open Ship to and fill it in."
+        )
+    country = str(to.get("country") or "").strip()
+    if len(country) != 2 or not country.isalpha():
+        return (
+            f"ShipStation wants a two-letter country code, and this order says "
+            f"“{country}”. US, GB, CA and so on."
+        )
+    if country.upper() == "US" and not str(to.get("state") or "").strip():
+        return "A US address needs a state before ShipStation can ship it."
+    return None
+
+
+def shipstation_body(order: Order, lines: list[OrderLine]) -> dict[str, Any]:
+    """The ShipStation order for one PrintFlow order. Pure.
+
+    Top-level lines only, for the same reason the invoice uses them: the buyer
+    bought a bundle, and a packing slip itemising its BOM describes a different
+    parcel from the one being packed.
+    """
+    to = order.ship_to or {}
+    placed = order.placed_at or datetime.now(timezone.utc)
+    if placed.tzinfo is None:
+        placed = placed.replace(tzinfo=timezone.utc)
+    address = {
+        "name": str(to.get("name") or order.buyer_name or "").strip(),
+        "street1": str(to.get("first_line") or "").strip(),
+        "city": str(to.get("city") or "").strip(),
+        "postalCode": str(to.get("zip") or "").strip(),
+        "country": str(to.get("country") or "").strip().upper(),
+    }
+    if str(to.get("second_line") or "").strip():
+        address["street2"] = str(to["second_line"]).strip()
+    if str(to.get("state") or "").strip():
+        address["state"] = str(to["state"]).strip()
+
+    body: dict[str, Any] = {
+        "orderNumber": order.order_number,
+        # Stable, and the whole reason this call can be repeated: ShipStation
+        # updates the order carrying this key instead of making another.
+        "orderKey": str(order.id),
+        "orderDate": placed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        # What every imported order arrives as, so it lands in the same queue
+        # the shop already packs from.
+        "orderStatus": "awaiting_shipment",
+        "billTo": {"name": order.buyer_name or address["name"]},
+        "shipTo": address,
+        "items": [
+            {
+                "sku": line.sku_raw or "",
+                "name": line.title or (line.sku_raw or "Item"),
+                "quantity": int(line.quantity),
+                "unitPrice": float(money(line.unit_price)) if line.unit_price else 0,
+            }
+            for line in lines
+        ],
+    }
+    if str(to.get("email") or "").strip():
+        body["customerEmail"] = str(to["email"]).strip()
+    if order.revenue is not None:
+        body["amountPaid"] = float(money(order.revenue))
+    if order.tax_total is not None:
+        body["taxAmount"] = float(money(order.tax_total))
+    if order.shipping_total is not None:
+        body["shippingAmount"] = float(money(order.shipping_total))
+    return body
+
+
+async def packable_lines(session: AsyncSession, order: Order) -> list[OrderLine]:
+    return list(
+        (
+            await session.execute(
+                select(OrderLine)
+                .where(
+                    OrderLine.order_id == order.id,
+                    OrderLine.parent_line_id.is_(None),
+                    OrderLine.state != LINE_CANCELLED,
+                )
+                .order_by(OrderLine.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def send_to_shipstation(
+    session: AsyncSession, order: Order, *, resend: bool = False
+) -> int:
+    """Create this order in ShipStation, and remember which one it became.
+
+    The counterpart of `match_orders` for an order no channel will ever import.
+    Raises LabelError with a sentence worth showing when the address is not
+    enough to ship from.
+
+    `resend` sends an order ShipStation already has, which is how a corrected
+    address gets there: the body carries the same `orderKey`, so ShipStation
+    updates that order rather than making a second one.
+    """
+    if order.shipstation_order_id is not None and not resend:
+        return order.shipstation_order_id
+    problem = address_problem(order)
+    if problem:
+        raise LabelError(problem)
+
+    client = await ss_api.client_for(session)
+    created = await client.create_order(
+        shipstation_body(order, await packable_lines(session, order))
+    )
+    remote_id = created.get("orderId")
+    if not remote_id:
+        raise LabelError(f"ShipStation did not return an order id: {created}")
+    order.shipstation_order_id = int(remote_id)
+    order.shipstation_attempts += 1
+    order.shipstation_last_attempt_at = datetime.now(timezone.utc)
+    # Banked now. The order exists in ShipStation either way, and losing which
+    # one it became is what would have somebody packing the same parcel twice.
+    await session.commit()
+    return order.shipstation_order_id
+
+
 async def match_orders(session: AsyncSession, *, limit: int = 50) -> dict[str, int]:
-    """Find each unmatched order in ShipStation by its Etsy receipt id."""
+    """Find each unmatched order in ShipStation by its Etsy receipt id.
+
+    Except the ones nothing is going to import: a typed-in order is *sent*
+    rather than looked for, which is the same sweep doing the same job — after
+    it, every order that can be shipped has a ShipStation order behind it.
+    """
     candidates = (
         (
             await session.execute(
@@ -70,7 +224,7 @@ async def match_orders(session: AsyncSession, *, limit: int = 50) -> dict[str, i
         if next_attempt_due(order.shipstation_attempts, order.shipstation_last_attempt_at)
     ][:limit]
 
-    stats = {"checked": len(due), "matched": 0, "not_found": 0}
+    stats = {"checked": len(due), "matched": 0, "not_found": 0, "sent": 0, "no_address": 0}
     if not due:
         return stats
 
@@ -79,6 +233,21 @@ async def match_orders(session: AsyncSession, *, limit: int = 50) -> dict[str, i
     for order in due:
         order.shipstation_attempts += 1
         order.shipstation_last_attempt_at = now
+        if order.source == SOURCE_MANUAL:
+            # An order being collected or handed over has no address and needs
+            # none. It is not a failure to match, so it is counted apart.
+            if address_problem(order) is not None:
+                stats["no_address"] += 1
+                continue
+            created = await client.create_order(
+                shipstation_body(order, await packable_lines(session, order))
+            )
+            if created.get("orderId"):
+                order.shipstation_order_id = int(created["orderId"])
+                stats["sent"] += 1
+            else:
+                stats["not_found"] += 1
+            continue
         try:
             found = await client.find_order_by_number(order.order_number)
         except IntegrationError as exc:

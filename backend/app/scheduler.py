@@ -238,6 +238,13 @@ async def match_shipstation() -> dict[str, Any]:
             record.note(
                 f"checked {stats['checked']}, matched {stats['matched']}, "
                 f"still missing {stats['not_found']}"
+                # Only where there were any, so the ordinary line stays short.
+                + (f", sent {stats['sent']}" if stats.get("sent") else "")
+                + (
+                    f", {stats['no_address']} with no address"
+                    if stats.get("no_address")
+                    else ""
+                )
             )
             await session.commit()
             return stats

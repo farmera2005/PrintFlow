@@ -744,13 +744,20 @@ def channel_name(order: Order) -> str:
 
 
 def line_unit_price(order: Order, line: OrderLine) -> Decimal | None:
-    """What one of this line cost the buyer, whichever channel sold it.
+    """What one of this line cost the buyer, however the order got here.
 
-    The price is not on PrintFlow's line — it is in the payload the channel
-    sent, which is kept whole on the order — so finding it means knowing where
-    that channel puts it. This is the only place in the books that has to care
-    which shop window an order came through.
+    A price stored on the line wins. That is the only thing an order typed in
+    by hand has — there is no payload behind it to read one out of — and where
+    a polled order has one it means somebody corrected it deliberately, which
+    should not be quietly overruled by the receipt.
+
+    Otherwise it comes out of the payload the channel sent, which the order
+    keeps whole, so finding it means knowing where that channel puts it. This
+    is the only place in the books that has to care which shop window an order
+    came through.
     """
+    if line.unit_price is not None:
+        return money(line.unit_price)
     if order.source == SOURCE_WIX:
         for item in wix_api.parse_order(order.raw or {})["lines"]:
             if item.get("wix_line_item_id") and item["wix_line_item_id"] == line.wix_line_item_id:
@@ -1085,8 +1092,7 @@ async def invoice_order(
     billable = invoice_lines(order, list(lines))
     if not billable:
         raise BooksError(
-            "Nothing on this order has a price from Etsy, so there is nothing "
-            "to invoice."
+            "Nothing on this order has a price, so there is nothing to invoice."
         )
 
     item_for = {line.id: invoice_item_for(line, books) for line, _, _ in billable}

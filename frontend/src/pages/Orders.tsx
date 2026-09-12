@@ -9,8 +9,9 @@ import {
 } from '../lib/format'
 import type { Order, OrderStatus } from '../lib/types'
 import InvoiceAction from '../components/InvoiceAction'
+import NewOrderDialog from '../components/NewOrderDialog'
 import OrderDrawer from '../components/OrderDrawer'
-import { Alert, Badge, Card, EmptyState, Spinner, cx, inputClass } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState, Spinner, cx, inputClass } from '../components/ui'
 
 /** Every order, including the ones the board does not draw.
  *
@@ -54,6 +55,7 @@ export default function Orders() {
   const [filter, setFilter] = useState<OrderStatus | 'all'>('all')
   const [error, setError] = useState<string | null>(null)
   const [openOrderId, setOpenOrderId] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +86,12 @@ export default function Orders() {
           {data ? (
             <span className="text-sm text-ink-500">{data.total} in total</span>
           ) : null}
+          {/* Here rather than on the board: the board is for orders that
+              already exist, and this is the list that owns every order
+              whatever its status. */}
+          <Button className="ml-auto" variant="primary" onClick={() => setAdding(true)}>
+            New order
+          </Button>
         </div>
 
         <div className="flex flex-wrap gap-1 text-xs">
@@ -173,6 +181,10 @@ export default function Orders() {
           </Card>
         )}
       </div>
+
+      {adding ? (
+        <NewOrderDialog onClose={() => setAdding(false)} onCreated={load} />
+      ) : null}
 
       {openOrderId ? (
         <OrderDrawer

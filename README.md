@@ -10,14 +10,16 @@ tissue between them and the single pane of glass over the whole fulfilment flow.
 | Wix                | Sales channel — source of orders            | Read only (poll orders)         |
 | QuickBooks Online  | Inventory system of record — quantity on hand | Read for orders; writes only a made-items sheet you post |
 | Bambuddy           | Print farm manager — queue, archives, library | Read/write (queue, track) |
-| ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, buy labels) |
+| ShipStation        | Shipping — labels, tracking pushback to Etsy | Read/write (match, send typed-in orders, buy labels) |
 
 PrintFlow itself owns the order state machine, the flow board, the bundle
 (BOM) definitions and the product → print-file mappings.
 
 ## The workflow
 
-1. An order arrives from Etsy or Wix and is polled in.
+1. An order arrives from Etsy or Wix and is polled in — or is typed in on the
+   Orders tab, which joins the same pipeline at step 3 (see
+   [An order typed in by hand](#an-order-typed-in-by-hand)).
 2. Line items are matched to products — by SKU, or by the **listing and
    variation ids** the order carries (see
    [How orders find their product](#how-orders-find-their-product)).
@@ -512,6 +514,58 @@ Two ways back from a wrong match:
   from scratch. This is the one to use after the catalogue changed underneath an
   order — a listing linked, variations added, a BOM corrected. Plain **Re-run
   intake** keeps whatever each line already matched; reset throws it away first.
+
+## An order typed in by hand
+
+Not every order arrives through an API. A phone call, a market stall, a trade
+order, a replacement sent out free — **New order** on the Orders tab puts one in,
+and from that moment it is an order like any other: its lines are already matched
+(the product is picked from a list rather than guessed at from a SKU), its
+bundles explode, its stock is decided against QuickBooks and its plates are
+planned by exactly the code a polled order runs. It appears on the board, in the
+drawer, on the manufacturing sheets, and it can be invoiced.
+
+What it collects is what a receipt would otherwise have carried:
+
+* **Reference.** Leave it blank and PrintFlow generates the next `M-1001`,
+  `M-1002` — counted from the highest already used, so cancelling one never
+  hands its number out twice. Type your own (a stall docket, a works order) and
+  it is kept as typed. Either way it has to be unique.
+* **Buyer** and **Placed**, which default to today.
+* **Lines.** A product, a quantity, and a price *each*. The price is the
+  interesting one: a polled order keeps the payload it arrived in and the
+  invoice reads each line's price back out of it, and there is no payload here,
+  so a line with no price typed cannot be billed. It is optional rather than
+  required because a replacement sent out free is a real order with nothing to
+  bill — and blank means exactly that: **a line with no price is left off the
+  invoice rather than billed at zero**, because a zero looks like a decision
+  somebody made.
+* **Shipping, tax and discount**, again blank rather than zero when they do not
+  apply. The total is worked out from the parts rather than typed again — asking
+  for both is asking for two numbers that disagree.
+* **Ship to**, only needed to buy a label.
+
+**Nothing is ever going to look at it again, and that is the only real
+difference.** A polled order is re-read on every poll, which is how its address
+gets backfilled and its fees arrive days later. There is no second look here, so
+what was typed is the whole truth — the fee sweep and the totals backfill both
+leave a typed order alone rather than overwriting it with nothing.
+
+**Posting one.** No sales channel is going to hand ShipStation an order that was
+typed in here, so waiting to be matched would be waiting for good: the Shipping
+tab offers **Send to ShipStation** instead, which creates it there as
+*awaiting shipment*, and the label is then bought exactly as any other. The
+background matching sweep does the same thing for typed orders it finds with an
+address. Sending is safe to repeat — ShipStation is given the PrintFlow order's
+own id as the order key, so a retry updates that order instead of leaving two
+parcels to pack.
+
+**The address can be typed in afterwards**, which is often the part somebody has
+to go and ask for: **Add an address** (or **Edit**) on the Shipping tab. Where
+ShipStation already has the order, saving carries the correction across under the
+same key. Once a label has been bought the address is fixed, because changing it
+then would not change the label. A polled order's address is not editable at all
+— it belongs to the shop it sold on, which re-sends it on every poll.
 
 ## Print files, and which machines can make them
 
@@ -1416,7 +1470,8 @@ books, and which orders get one is a decision about the business.
 
 It bills the buyer's **name and address from the order** — finding that customer
 in QuickBooks by display name, or creating them. Lines come from the order's
-top-level lines at the price Etsy recorded, plus postage the buyer paid when
+top-level lines at the price the channel recorded — or, on an order typed in by
+hand, the price typed on the line — plus postage the buyer paid when
 Settings names an item for it. Bundle
 components are not itemised: the buyer bought a bundle, not its bill of
 materials. A line whose price cannot be found is left off rather than billed at

@@ -37,6 +37,19 @@ const TABS = [
 
 type Tab = (typeof TABS)[number]['key']
 
+/** What to call the cut somebody took out of this sale.
+ *
+ * The column is `etsy_fees` and the label follows the channel, because "Etsy
+ * fees" on a Wix order is a figure nobody can account for. An order typed in
+ * by hand was charged by nobody at all, so it gets a plain word rather than
+ * "By hand fees" — which reads as if the fees had been typed rather than the
+ * order. */
+function feesName(order: Order): string {
+  return order.source === 'manual'
+    ? 'Selling fees'
+    : `${SOURCE_LABELS[order.source]} fees`
+}
+
 /** What to remember about the listing or catalogue item when a product is picked. */
 export interface RememberChoice {
   remember: boolean
@@ -864,12 +877,24 @@ export default function OrderDrawer({
                       <p className="text-sm text-ink-600">
                         {order.shipstation_order_id
                           ? `Matched in ShipStation (order ${order.shipstation_order_id}).`
-                          : 'Not matched in ShipStation yet — its Etsy import can lag by up to an hour.'}
+                          : order.source === 'manual'
+                            ? // Waiting would never end: no sales channel is
+                              // going to hand ShipStation an order that was
+                              // typed in here, so PrintFlow sends it across.
+                              'Nothing imports a typed-in order into ShipStation. ' +
+                              'Send it across and the label is bought the usual way.'
+                            : 'Not matched in ShipStation yet — its Etsy import can lag by up to an hour.'}
                       </p>
                       <div className="flex flex-wrap gap-2">
                         {!order.shipstation_order_id ? (
                           <Button size="sm" onClick={matchShipStation} disabled={matching}>
-                            {matching ? 'Checking…' : 'Check ShipStation now'}
+                            {order.source === 'manual'
+                              ? matching
+                                ? 'Sending…'
+                                : 'Send to ShipStation'
+                              : matching
+                                ? 'Checking…'
+                                : 'Check ShipStation now'}
                           </Button>
                         ) : null}
                         <Button
@@ -891,7 +916,7 @@ export default function OrderDrawer({
                   )}
                 </section>
 
-                {tab === 'shipping' ? <ShipTo order={order} /> : null}
+                {tab === 'shipping' ? <ShipTo order={order} onChanged={load} /> : null}
                 {tab === 'money' ? <Money order={order} onRefreshed={load} /> : null}
 
                 <section className="flex flex-wrap gap-2">
@@ -934,14 +959,19 @@ export default function OrderDrawer({
                   >
                     Reset matching
                   </Button>
-                  <a
-                    className="inline-flex items-center rounded-md px-2.5 py-1 text-xs text-ink-600 underline"
-                    href={`/api/orders/${order.id}/raw`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    View raw {SOURCE_LABELS[order.source]} payload
-                  </a>
+                  {/* Only where something sent one. An order typed in by hand
+                      has no payload behind it, and a link to an empty one is a
+                      question mark where there should not be one. */}
+                  {order.raw_available === false ? null : (
+                    <a
+                      className="inline-flex items-center rounded-md px-2.5 py-1 text-xs text-ink-600 underline"
+                      href={`/api/orders/${order.id}/raw`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      View raw {SOURCE_LABELS[order.source]} payload
+                    </a>
+                  )}
                 </section>
               </>
             )}
@@ -1006,24 +1036,142 @@ export default function OrderDrawer({
  *  is the version to copy onto a label — address order is not the same
  *  everywhere, and reassembling the parts here would get some countries wrong.
  *  The parts are shown only when there is no formatted version. */
-function ShipTo({ order }: { order: Order }) {
+/** The seven fields ShipStation's shipTo is made of, in reading order. */
+const ADDRESS_FIELDS = [
+  ['name', 'Name'],
+  ['first_line', 'Address'],
+  ['second_line', 'Address line 2'],
+  ['city', 'City'],
+  ['state', 'State'],
+  ['zip', 'Postcode'],
+  ['country', 'Country (two letters)'],
+] as const
+
+/** Type or correct where a hand-typed order is going.
+ *
+ * Only offered for those. A polled order's address belongs to the shop it sold
+ * on and is re-read on every poll, so an edit would be quietly undone — and a
+ * box that throws the typing away is worse than no box. */
+function ShipToEditor({
+  order,
+  onSaved,
+  onClose,
+}: {
+  order: Order
+  onSaved: () => void
+  onClose: () => void
+}) {
+  const [draft, setDraft] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      ADDRESS_FIELDS.map(([field]) => [field, (order.ship_to as any)?.[field] ?? '']),
+    ),
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
+  const save = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const saved = await api.patch<{ note: string | null }>(
+        `/api/orders/${order.id}/ship-to`,
+        draft,
+      )
+      onSaved()
+      // Saved either way. A note means ShipStation did not take the
+      // correction, which is worth staying open to show rather than
+      // flashing past as the form closes.
+      setNote(saved.note)
+      if (!saved.note) onClose()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="grid gap-2 sm:grid-cols-2">
+        {ADDRESS_FIELDS.map(([field, label]) => (
+          <Field key={field} label={label}>
+            <input
+              className={inputClass}
+              value={draft[field] ?? ''}
+              onChange={(e) =>
+                setDraft((was) => ({ ...was, [field]: e.target.value }))
+              }
+            />
+          </Field>
+        ))}
+      </div>
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {note ? <Alert tone="warning">{note}</Alert> : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="primary" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : 'Save address'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          {note ? 'Close' : 'Cancel'}
+        </Button>
+        {order.shipstation_order_id ? (
+          <span className="text-xs text-ink-500">
+            ShipStation already has this order — saving sends it the correction.
+          </span>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function ShipTo({ order, onChanged }: { order: Order; onChanged: () => void }) {
   const to = order.ship_to
   const channel = SOURCE_LABELS[order.source]
+  const [editing, setEditing] = useState(false)
+  // Typed in here, so PrintFlow owns it — and a label already bought fixes it,
+  // because changing the address afterwards would not change the label.
+  const editable = order.source === 'manual' && !order.label_created_at
+  const stopEditing = () => setEditing(false)
   // An empty block that explains itself, rather than one that is simply not
   // there: "PrintFlow has not read it" and "the shop did not send one" are
   // different, and only one of them is worth anybody's time.
-  if (!to) {
+  if (!to || (editable && editing)) {
     return (
       <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-          Ship to
-        </h3>
-        <p className="mt-2 text-sm text-ink-500">
-          What {channel} sent for this order carries no address. Older orders
-          predate PrintFlow reading it — the next poll fills them in; if this
-          one stays empty, <em>View raw {channel} payload</em> below shows what
-          arrived.
-        </p>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+            Ship to
+          </h3>
+          {editable && !editing ? (
+            <button
+              type="button"
+              className="ml-auto text-xs text-ink-500 underline"
+              onClick={() => setEditing(true)}
+            >
+              Add an address
+            </button>
+          ) : null}
+        </div>
+        {editable && editing ? (
+          <ShipToEditor order={order} onSaved={onChanged} onClose={stopEditing} />
+        ) : order.source === 'manual' ? (
+          /* And a typed order gets its own sentence: nothing is ever going to
+             poll it, so "the next poll fills them in" would be a promise that
+             never comes true. */
+          <p className="mt-2 text-sm text-ink-500">
+            This order was typed in without an address. One is only needed to
+            buy a label — an order being collected or handed over does not need
+            one at all.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-ink-500">
+            What {channel} sent for this order carries no address. Older orders
+            predate PrintFlow reading it — the next poll fills them in; if this
+            one stays empty, <em>View raw {channel} payload</em> below shows what
+            arrived.
+          </p>
+        )}
       </section>
     )
   }
@@ -1048,9 +1196,18 @@ function ShipTo({ order }: { order: Order }) {
         <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
           Ship to
         </h3>
+        {editable ? (
+          <button
+            type="button"
+            className="ml-auto text-xs text-ink-500 underline"
+            onClick={() => setEditing(true)}
+          >
+            Edit
+          </button>
+        ) : null}
         <button
           type="button"
-          className="ml-auto text-xs text-ink-500 underline"
+          className={cx('text-xs text-ink-500 underline', editable ? '' : 'ml-auto')}
           onClick={() =>
             navigator.clipboard?.writeText(
               [to.name, ...lines].filter(Boolean).join('\n'),
@@ -1094,7 +1251,7 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
   // fees" on a Wix order is a figure nobody can account for.
   const sweepable = order.source === 'etsy'
   const costs: [string, string | null][] = [
-    [`${SOURCE_LABELS[order.source]} fees`, show(order.etsy_fees)],
+    [feesName(order), show(order.etsy_fees)],
     ['Marketing fees', show(order.marketing_fees)],
     ['Processing fees', show(order.processing_fees)],
     ['Shipping label', show(order.label_cost)],
@@ -1118,7 +1275,12 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
         ) : null}
       </div>
 
-      {!order.revenue ? (
+      {!order.revenue && order.source === 'manual' ? (
+        <p className="mt-2 text-sm text-ink-500">
+          No prices were entered for this order, so there is nothing to bill —
+          which is what a replacement sent out free looks like.
+        </p>
+      ) : !order.revenue ? (
         <p className="mt-2 text-sm text-ink-500">
           What {SOURCE_LABELS[order.source]} sent for this order carries no
           totals. The next poll reads them out of the payload already stored,
@@ -1162,7 +1324,10 @@ function Money({ order, onRefreshed }: { order: Order; onRefreshed: () => void }
 
       {!anyFees ? (
         <p className="mt-2 text-xs text-ink-500">
-          {!sweepable
+          {order.source === 'manual'
+            ? 'No marketplace took a cut of this one. Anything it did cost can ' +
+              'be typed below and counts towards net the same way.'
+            : !sweepable
             ? // Only Etsy has a fee ledger PrintFlow reads. Saying "not read
               // yet" on a Wix order would be a promise nothing is going to keep.
               `PrintFlow reads no fee ledger from ${SOURCE_LABELS[order.source]}. ` +
@@ -1231,7 +1396,7 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
     // The column is `etsy_fees` for historical reasons; the label says which
     // shop actually charged them, because that is what somebody typing a
     // figure off a statement is looking at.
-    ['etsy_fees', `${SOURCE_LABELS[order.source]} fees`],
+    ['etsy_fees', feesName(order)],
     ['marketing_fees', 'Marketing'],
     ['processing_fees', 'Processing'],
   ]
@@ -1240,7 +1405,7 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
     <div className="mt-3 border-t border-ink-200 pt-3">
       <div className="flex flex-wrap items-baseline gap-2">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-          {SOURCE_LABELS[order.source]} fees
+          {feesName(order)}
         </h4>
         {manual ? (
           <Badge className="bg-sky-100 text-sky-800">entered by hand</Badge>
@@ -1264,9 +1429,16 @@ function FeesByHand({ order, onChanged }: { order: Order; onChanged: () => void 
             </>
           ) : (
             <>
-              Typed by hand, which is the only way fees reach a{' '}
-              {SOURCE_LABELS[order.source]} order — PrintFlow reads no fee
-              ledger there.
+              Typed by hand, which is the only way fees reach{' '}
+              {order.source === 'manual' ? (
+                'an order that was typed in — no marketplace charged a fee on it'
+              ) : (
+                <>
+                  a {SOURCE_LABELS[order.source]} order — PrintFlow reads no fee
+                  ledger there
+                </>
+              )}
+              .
             </>
           )}
         </p>
@@ -1359,7 +1531,7 @@ function ExpensePanel({ order, onChanged }: { order: Order; onChanged: () => voi
     },
     {
       kind: 'fees',
-      label: `${SOURCE_LABELS[order.source]}'s fees`,
+      label: feesName(order),
       amount:
         order.etsy_fees || order.marketing_fees || order.processing_fees
           ? String(
@@ -1574,15 +1746,27 @@ function InvoicePanel({ order, onChanged }: { order: Order; onChanged: () => voi
         <div className="mt-1.5 space-y-1.5">
           <p className="text-xs text-ink-500">
             Bills the buyer's name and address from this order, at the prices{' '}
-            {SOURCE_LABELS[order.source]} recorded, each line against its own
+            {order.source === 'manual'
+              ? 'entered on it'
+              : `${SOURCE_LABELS[order.source]} recorded`}
+            , each line against its own
             QuickBooks item. Where that item carries stock the invoice relieves
             it, and the printed line's removal is taken back so nothing is
             deducted twice.
           </p>
           {discount ? (
             <p className="text-xs text-ink-600">
-              {SOURCE_LABELS[order.source]} took{' '}
-              {formatMoney(discount, order.currency)} off this order.
+              {order.source === 'manual' ? (
+                <>
+                  A discount of {formatMoney(discount, order.currency)} was
+                  entered on this order.
+                </>
+              ) : (
+                <>
+                  {SOURCE_LABELS[order.source]} took{' '}
+                  {formatMoney(discount, order.currency)} off this order.
+                </>
+              )}{' '}
               That goes on as a discount line, so the invoice totals what the
               buyer actually paid.
             </p>

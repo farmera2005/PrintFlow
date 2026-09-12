@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -25,12 +26,13 @@ from ..models import (
     LINE_PRINTED,
     LINE_READY,
     ORDER_READY_TO_SHIP,
+    SOURCE_MANUAL,
     Order,
     OrderLine,
     Product,
     User,
 )
-from ..services import audit, board, books, finance, intake, shipping
+from ..services import audit, board, books, finance, intake, manual_orders, shipping
 from ..services.books import BooksError
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import ALLOWED_LINE_OVERRIDES, recompute_order
@@ -114,6 +116,81 @@ async def list_orders(
         "counts": {name: counts.get(name, 0) for name in ORDER_STATUSES},
         "total": sum(counts.values()),
     }
+
+
+class ManualLineRequest(BaseModel):
+    product_id: uuid.UUID
+    quantity: int = Field(gt=0, le=10000)
+    # A string, not a float: this is money on its way into somebody's books.
+    # Blank means no price, which is not the same as free — a line with no
+    # price is simply left off the invoice rather than billed at zero.
+    unit_price: str | None = None
+
+
+class ManualOrderRequest(BaseModel):
+    """An order typed in rather than polled: a phone call, a stall, a trade sale."""
+
+    # Optional. Blank generates the next M- reference, so nothing has to be
+    # invented to get an order in.
+    order_number: str | None = Field(default=None, max_length=100)
+    buyer_name: str | None = Field(default=None, max_length=200)
+    # Blank means now. An order being typed in a week later says so instead.
+    placed_at: datetime | None = None
+    currency: str | None = Field(default=None, max_length=8)
+    ship_to: dict[str, Any] | None = None
+    shipping_total: str | None = None
+    tax_total: str | None = None
+    discount_total: str | None = None
+    lines: list[ManualLineRequest] = Field(min_length=1, max_length=200)
+
+
+@router.post("/orders", status_code=status.HTTP_201_CREATED)
+async def create_manual_order(
+    body: ManualOrderRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Add an order by hand, and run it through the same pipeline as a polled one."""
+    try:
+        order = await manual_orders.create_order(
+            session,
+            {
+                "order_number": body.order_number,
+                "buyer_name": body.buyer_name,
+                "placed_at": body.placed_at,
+                "currency": body.currency,
+                "ship_to": body.ship_to,
+                "shipping_total": body.shipping_total,
+                "tax_total": body.tax_total,
+                "discount_total": body.discount_total,
+                "lines": [line.model_dump() for line in body.lines],
+            },
+        )
+    except manual_orders.ManualOrderError as exc:
+        await session.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"An order with the reference “{body.order_number}” already exists. "
+            "Give it a different one, or leave it blank to have one generated.",
+        ) from exc
+
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="manual_order_created",
+        detail={
+            "order_number": order.order_number,
+            "lines": len(body.lines),
+            "revenue": str(order.revenue) if order.revenue is not None else None,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return await board.load_order_detail(session, order.id)
 
 
 @router.get("/orders/{order_id}")
@@ -761,6 +838,75 @@ async def clear_invoice(
 # --------------------------------------------------------------------------
 
 
+class ShipToRequest(BaseModel):
+    """Where a typed-in order is going. Every part optional — an address that
+    is half known is worth keeping, and the ship check names what is missing."""
+
+    name: str | None = Field(default=None, max_length=200)
+    first_line: str | None = Field(default=None, max_length=200)
+    second_line: str | None = Field(default=None, max_length=200)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    zip: str | None = Field(default=None, max_length=40)
+    country: str | None = Field(default=None, max_length=60)
+    email: str | None = Field(default=None, max_length=200)
+
+
+@router.patch("/orders/{order_id}/ship-to")
+async def set_ship_to(
+    order_id: uuid.UUID,
+    body: ShipToRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Correct the address on an order PrintFlow owns the address for.
+
+    Only a typed-in one. A polled order's address belongs to the shop it sold
+    on, which re-sends it on every poll, so an edit here would be undone
+    without anybody being told.
+    """
+    order = await _get_order(session, order_id)
+    if order.source != SOURCE_MANUAL:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"This order's address comes from {order.source.title()} and is "
+            "re-read on every poll, so it cannot be edited here.",
+        )
+    if order.label_created_at is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A label has already been bought for this address. Changing it now "
+            "would not change the label.",
+        )
+
+    order.ship_to = {
+        field: value.strip()
+        for field, value in body.model_dump().items()
+        if value and value.strip()
+    } or None
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="ship_to_edited",
+        detail={"city": (order.ship_to or {}).get("city")},
+        actor=user.username,
+    )
+    await session.commit()
+
+    # ShipStation already has this order, and the correction is only real once
+    # it has it too — the same order key carries it as an update.
+    note = None
+    if order.shipstation_order_id is not None:
+        try:
+            await shipping.send_to_shipstation(session, order, resend=True)
+        except (shipping.LabelError, IntegrationError, IntegrationNotConfigured) as exc:
+            # The address is saved either way. This is worth saying, not worth
+            # losing the edit over.
+            note = f"Saved, but ShipStation was not updated: {exc}"
+    return {"ship_to": order.ship_to, "note": note}
+
+
 @router.post("/orders/{order_id}/match-shipstation")
 async def match_shipstation(
     order_id: uuid.UUID,
@@ -770,6 +916,23 @@ async def match_shipstation(
     from ..integrations import shipstation as ss_api
 
     order = await _get_order(session, order_id)
+    # An order typed in by hand is sent rather than looked for: nothing is ever
+    # going to import it, so there is nothing there to find.
+    if order.source == SOURCE_MANUAL:
+        try:
+            await shipping.send_to_shipstation(session, order)
+        except shipping.LabelError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except IntegrationNotConfigured as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except IntegrationError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        return {
+            "matched": True,
+            "sent": True,
+            "shipstation_order_id": order.shipstation_order_id,
+        }
+
     try:
         client = await ss_api.client_for(session)
         found = await client.find_order_by_number(order.order_number)

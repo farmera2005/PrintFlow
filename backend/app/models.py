@@ -186,7 +186,13 @@ PROVIDERS = (
 # which door it came through, and which poll owns re-reading it.
 SOURCE_ETSY = "etsy"
 SOURCE_WIX = "wix"
-ORDER_SOURCES = (SOURCE_ETSY, SOURCE_WIX)
+# Typed in by hand rather than polled from anywhere: a phone order, a market
+# stall, a trade sale, a replacement sent out free. It goes through the same
+# pipeline as a polled order and is invoiced and labelled the same way; the
+# only difference is that nothing will ever come along and update it, so what
+# was typed is the whole truth.
+SOURCE_MANUAL = "manual"
+ORDER_SOURCES = (SOURCE_ETSY, SOURCE_WIX, SOURCE_MANUAL)
 
 
 # --------------------------------------------------------------------------
@@ -925,6 +931,14 @@ class OrderLine(Base):
     wix_line_item_id: Mapped[str | None] = mapped_column(Text)
     sku_raw: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
+    # What one of these cost the buyer.
+    #
+    # Null for a polled order, where the price lives in the channel payload the
+    # order keeps whole and is read back out of it — see books.line_unit_price.
+    # An order typed in by hand has no payload to read, so the price has to
+    # live where it is actually known: on the line. Set here it wins, for any
+    # source, which also makes a wrong price on a polled order correctable.
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     # The options the buyer chose on Etsy, normalised to
     # [{"name": "Color", "value": "Red", ...}]. Kept on the line rather than
     # only in the receipt payload because they decide what gets made: a colour
