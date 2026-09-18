@@ -156,3 +156,20 @@ export function formatDateTime(iso: string | null): string {
     minute: '2-digit',
   })
 }
+
+/** A plain calendar day — "22 Jun 2026".
+ *
+ * Read as a date, never parsed as a timestamp: these arrive as YYYY-MM-DD and
+ * `new Date('2026-06-22')` is midnight UTC, which is the previous day west of
+ * Greenwich. The parts are split rather than handed to a Date for that reason.
+ */
+export function formatDay(iso: string | null): string {
+  if (!iso) return '—'
+  const [year, month, day] = iso.split('-').map(Number)
+  if (!year || !month || !day) return iso
+  const MONTHS = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ]
+  return `${day} ${MONTHS[month - 1]} ${year}`
+}

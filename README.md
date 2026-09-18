@@ -498,6 +498,53 @@ The ledger is one stream for the whole shop, so it is read **once** per sweep
 and shared out across every order in the window, rather than asked about per
 order. The window is 45 days; fees older than that settled long ago.
 
+## The sales report
+
+**Sales** is the same figures the orders already carry, grouped four ways —
+**weekly, monthly, quarterly, annual** — with a total row, a per-channel split,
+and a CSV of exactly what is on screen for whoever wants it in a spreadsheet.
+No new arithmetic happens here and no integration is called: a report is a
+question about orders that already exist, so it is a single read and the
+grouping is done in the database rather than by shipping a year of orders to
+the browser to be added up there.
+
+Three things about it are decisions rather than details, and each is the kind
+that is quietly wrong everywhere else:
+
+**A sale is dated when it was placed.** Not when the parcel left. An order
+posted late belongs to the month it was bought in, because "what did we sell in
+December" is the question a sales report is asked. An order whose channel sent
+no timestamp falls back to when PrintFlow first saw it, so nothing is invisible
+to every report forever.
+
+**Periods are cut on your calendar, not on UTC's.** A week is only a week
+somewhere: a Sunday-evening sale in Ohio is already Monday in Greenwich, and a
+weekly report that uses UTC is off by a week every time somebody sells in the
+evening. The browser sends its own timezone and the report says which one it
+used. An unknown zone falls back to UTC rather than failing — a report in the
+wrong zone is still a report, an error page where the sales were is not.
+
+**Processed and in progress are shown apart.** An order still being printed has
+sold — the buyer has paid — but it is not the same money as one that went out
+of the door, and a shop deciding what it can spend needs to see the difference.
+So every row splits: **Processed** is shipped and complete, **In progress** is
+everything still on the board, and each period shows both plus the total. The
+bar in each row is those same two numbers and nothing else; it is there so a
+glance finds the period worth reading. **Cancelled orders are in none of the
+figures** and are counted separately on the period's own breakdown — opening a
+row shows the items, postage, tax and fee lines behind it, and says how many
+were cancelled.
+
+Alongside those sits a fourth number, because fulfilment and billing are
+different kinds of done: **Invoiced** is how much of the period has reached
+QuickBooks, and `24/30` beside it is how many orders that is. The gap between
+that and the total is the billing left to do.
+
+Below the table, **Still in progress** lists every order currently in the shop,
+oldest first and regardless of when it was placed — an order stuck since spring
+is exactly the one worth seeing, and a report of the last three months would
+hide it. Each row opens the same order drawer as everywhere else.
+
 ## Finding an order, and changing a match
 
 The board draws the five live columns, so a cancelled order is not on it and a

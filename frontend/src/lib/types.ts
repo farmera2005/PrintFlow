@@ -814,3 +814,84 @@ export interface SetupStatus {
   poll_intervals: Record<string, number>
   public_base_url: string | null
 }
+
+/** One period's money, as the report sends it: decimal strings, because these
+ *  are figures somebody reconciles against a statement. `revenue` is the whole
+ *  sale and the rest is how it was made up — adding them would count it twice. */
+export interface SalesFigures {
+  revenue: string
+  items_total: string
+  shipping_total: string
+  tax_total: string
+  discount_total: string
+  etsy_fees: string
+  marketing_fees: string
+  processing_fees: string
+  label_cost: string
+  /** Revenue less every fee and the postage. */
+  net: string
+}
+
+export interface SalesPeriod {
+  /** First and last day of the period, in the timezone the report was cut in. */
+  start: string
+  end: string
+  label: string
+  /** The period being read from inside it — "Sep 2026 so far". */
+  partial: boolean
+  /** Everything not cancelled, then the two halves of it. */
+  all: SalesFigures
+  done: SalesFigures
+  live: SalesFigures
+  all_orders: number
+  done_orders: number
+  live_orders: number
+  cancelled_orders: number
+  /** How much of it has reached QuickBooks, which is a different kind of done. */
+  invoiced_orders: number
+  invoiced_total: string
+}
+
+export interface SalesChannel {
+  source: string
+  orders: number
+  revenue: string
+  done_revenue: string
+  live_revenue: string
+}
+
+export interface SalesOpenOrder {
+  id: string
+  order_number: string
+  source: string
+  buyer_name: string | null
+  placed_at: string | null
+  status: string
+  revenue: string | null
+  currency: string | null
+  invoiced: boolean
+}
+
+export interface SalesReport {
+  grain: 'week' | 'month' | 'quarter' | 'year'
+  grain_label: string
+  /** Which calendar the periods were cut on. A week is only a week somewhere. */
+  timezone: string
+  from: string
+  to: string
+  currency: string | null
+  periods: SalesPeriod[]
+  totals: {
+    all: SalesFigures
+    done: SalesFigures
+    live: SalesFigures
+    all_orders: number
+    done_orders: number
+    live_orders: number
+    cancelled_orders: number
+    invoiced_orders: number
+    invoiced_total: string
+  }
+  channels: SalesChannel[]
+  open_orders: SalesOpenOrder[]
+}

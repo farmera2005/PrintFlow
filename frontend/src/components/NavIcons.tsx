@@ -98,6 +98,18 @@ export function ActivityIcon(props: IconProps) {
   )
 }
 
+/** Bars of different heights: what the tab draws, and what it is for. */
+export function SalesIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 20h16" />
+      <path d="M7 20v-6" />
+      <path d="M12 20V8" />
+      <path d="M17 20v-9" />
+    </Svg>
+  )
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <Svg {...props}>
