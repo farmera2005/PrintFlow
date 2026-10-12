@@ -614,6 +614,46 @@ same key. Once a label has been bought the address is fixed, because changing it
 then would not change the label. A polled order's address is not editable at all
 — it belongs to the shop it sold on, which re-sends it on every poll.
 
+## Files on an order
+
+Orders arrive with things that are not in the order: the model a customer sent,
+a photo of the proof they approved, a trade buyer's purchase order, the message
+where a change was agreed. All of that lives in whichever inbox received it,
+which is the one place the shop floor cannot reach while packing. The order
+drawer's **Files** tab takes them — drop them on it or pick them, several at
+once, up to 100 MB each — and the tab carries a count so there is no need to
+open it to find out whether there is anything there. Each file can have a note
+(*"approved by the customer on the 3rd"*), and the audit trail records who
+attached and who deleted one.
+
+**The bytes go on disk, in the data directory, with only a card in the
+database.** The alternative — a column, the way a shipping label is stored —
+rides along in backups for free, but the backup builds its database dump in
+memory, and one 80 MB model would make the archive 110 MB of base64 inside a
+single string. On disk, an attachment is tarred into the backup and written
+back out of it exactly as the secret key and the certificate already are. The
+cost of that choice is that a row and a file can disagree, so a file that is no
+longer on disk says so in the list rather than failing when somebody clicks it.
+
+**Nothing a filename contains decides anything.** The name on disk is the
+attachment's own id; the name a person typed is kept beside it as a label, so
+`../../etc/passwd` is just an odd label. Accents and non-Latin scripts survive —
+what does not is the invisible characters that make a name read as something
+else, like the right-to-left override that displays `report<RLO>gnp.exe` as
+`report.png`.
+
+**And everything downloads rather than opens.** PrintFlow's pages are on the
+same origin as its API and hold the session cookie, so a file a browser agreed
+to render would be running as PrintFlow. Every download is sent as an
+attachment with sniffing turned off, whatever it claims to be; only a short
+list of image types that cannot carry script is served inline, which is what
+lets a proof photo show as a thumbnail. SVG is deliberately not on that list.
+
+**A restore clears them first.** Every other file in the data directory is the
+machine's own and is overwritten by name; attachments are named after rows a
+restore has just replaced, so without clearing them another shop's customers'
+files would sit on disk belonging to nobody.
+
 ## Print files, and which machines can make them
 
 A printed product needs two answers: which file, and what can print it.
@@ -2086,6 +2126,12 @@ wrong. The database holds the orders, products, plates, money and the encrypted
 credentials; the data directory holds the key those credentials are encrypted
 *with*. Either alone restores to nothing useful — a database with no key comes
 up unable to talk to Etsy, and a key with no database comes up empty.
+
+The data directory is also where [files attached to orders](#files-on-an-order)
+live, so they travel in the same archive — which does mean a shop that attaches
+models to everything will have backups the size of those models. A restore
+clears the attachments this install had before writing the ones the archive
+carries, so nothing is left behind pointing at rows that no longer exist.
 
 **A passphrase is offered and worth using.** Without one, anybody holding the
 file holds your Etsy, QuickBooks and ShipStation credentials in readable form,

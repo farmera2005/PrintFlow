@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timezone
+from urllib.parse import quote
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -28,11 +29,22 @@ from ..models import (
     ORDER_READY_TO_SHIP,
     SOURCE_MANUAL,
     Order,
+    OrderAttachment,
     OrderLine,
     Product,
     User,
 )
-from ..services import audit, board, books, finance, intake, manual_orders, shipping
+from ..services import (
+    attachments,
+    audit,
+    board,
+    books,
+    finance,
+    intake,
+    manual_orders,
+    shipping,
+)
+from ..services.attachments import AttachmentError
 from ..services.books import BooksError
 from ..services.credentials import IntegrationNotConfigured
 from ..services.state import ALLOWED_LINE_OVERRIDES, recompute_order
@@ -1114,3 +1126,174 @@ async def download_label(
             "Content-Disposition": f'inline; filename="label-{order.order_number}.pdf"'
         },
     )
+
+
+# --------------------------------------------------------------------------
+# Files on an order
+# --------------------------------------------------------------------------
+
+
+async def _get_attachment(
+    session: AsyncSession, order_id: uuid.UUID, file_id: uuid.UUID
+) -> OrderAttachment:
+    """One attachment, and only if it belongs to the order in the path.
+
+    Checked rather than assumed: without it, any attachment id would be
+    readable through any order, which turns a tidy URL into a way of walking
+    somebody else's files.
+    """
+    found = await session.get(OrderAttachment, file_id)
+    if found is None or found.order_id != order_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file on this order")
+    return found
+
+
+@router.get("/orders/{order_id}/files")
+async def list_files(
+    order_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    await _get_order(session, order_id)
+    rows = await attachments.for_order(session, order_id)
+    return {"files": [attachments.serialize(row) for row in rows]}
+
+
+@router.post("/orders/{order_id}/files", status_code=status.HTTP_201_CREATED)
+async def upload_file(
+    order_id: uuid.UUID,
+    file: UploadFile = File(...),
+    note: str = Form(""),
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Attach a file to an order.
+
+    The upload is handed to the store as a stream rather than read here: a
+    hundred megabytes through `await file.read()` is a hundred megabytes of
+    this process, per upload, at once.
+    """
+    order = await _get_order(session, order_id)
+    try:
+        saved = await attachments.save(
+            session,
+            order,
+            stream=file.file,
+            filename=file.filename,
+            content_type=file.content_type,
+            note=note,
+            actor=user.username,
+        )
+    except AttachmentError as exc:
+        await session.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="file_attached",
+        detail={
+            "filename": saved.filename,
+            "size_bytes": saved.size_bytes,
+            "sha256": saved.sha256,
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return attachments.serialize(saved)
+
+
+class AttachmentNoteRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.patch("/orders/{order_id}/files/{file_id}")
+async def set_file_note(
+    order_id: uuid.UUID,
+    file_id: uuid.UUID,
+    body: AttachmentNoteRequest,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Say what a file is for. The bytes are never touched again after upload."""
+    found = await _get_attachment(session, order_id, file_id)
+    found.note = (body.note or "").strip() or None
+    await session.commit()
+    return attachments.serialize(found)
+
+
+@router.get("/orders/{order_id}/files/{file_id}")
+async def download_file(
+    order_id: uuid.UUID,
+    file_id: uuid.UUID,
+    _: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Send a file back.
+
+    Served off disk by the framework rather than read into memory, and served
+    under PrintFlow's rules rather than the uploader's: an attachment
+    disposition and no sniffing for everything except a few image types that
+    cannot carry script. PrintFlow's own pages are on this origin and hold
+    this session's cookie, so a file that could run here would be running as
+    PrintFlow.
+    """
+    found = await _get_attachment(session, order_id, file_id)
+    try:
+        path = attachments.path_of(found)
+    except AttachmentError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    if not path.is_file():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"“{found.filename}” is recorded on this order but its bytes are not "
+            "in the data directory.",
+        )
+
+    media_type, disposition = attachments.serve_as(found)
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            # The filename is quoted and also sent RFC 5987-encoded, so a name
+            # with a comma or an accent in it survives the trip.
+            "Content-Disposition": (
+                f'{disposition}; filename="{_ascii_name(found.filename)}"; '
+                f"filename*=UTF-8''{quote(found.filename)}"
+            ),
+            # Without this a browser is free to decide for itself that an
+            # octet-stream looks like HTML, which is the whole attack.
+            "X-Content-Type-Options": "nosniff",
+            # Belt and braces for the inline image case: nothing on the page
+            # may be fetched, framed or scripted.
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; sandbox",
+        },
+    )
+
+
+def _ascii_name(name: str) -> str:
+    """A filename safe to put inside a quoted header value."""
+    return "".join(c for c in name if 32 <= ord(c) < 127 and c not in '"\\') or "file"
+
+
+@router.delete("/orders/{order_id}/files/{file_id}")
+async def delete_file(
+    order_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    found = await _get_attachment(session, order_id, file_id)
+    name, size = found.filename, found.size_bytes
+    await attachments.remove(session, found)
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order_id,
+        action="file_removed",
+        detail={"filename": name, "size_bytes": size},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"deleted": True, "filename": name}

@@ -21,7 +21,7 @@ from ..models import (
     OrderLine,
     PrintJob,
 )
-from ..services import credentials, finance, tracking
+from ..services import attachments, credentials, finance, tracking
 from ..services.manufacturing import money
 from ..services.state import suggested_status
 
@@ -270,6 +270,7 @@ async def load_order_detail(session: AsyncSession, order_id) -> dict[str, Any] |
             .options(
                 selectinload(Order.lines).selectinload(OrderLine.print_jobs),
                 selectinload(Order.lines).selectinload(OrderLine.product),
+                selectinload(Order.attachments),
             )
         )
     ).scalar_one_or_none()
@@ -285,6 +286,10 @@ async def load_order_detail(session: AsyncSession, order_id) -> dict[str, Any] |
     # read when packing and the other when somebody queries a number.
     payload["ship_to"] = order.ship_to
     payload["fee_lines"] = order.fee_lines or []
+    # Loaded with the order rather than fetched by the drawer: the tab shows a
+    # count before anybody opens it, and a second request to find out whether
+    # there is anything to count is a request for nothing most of the time.
+    payload["files"] = [attachments.serialize(row) for row in order.attachments]
     bambuddy = await credentials.load(session, "bambuddy")
     base_url = (bambuddy.get("base_url") or "").rstrip("/") if bambuddy else ""
     payload["bambuddy_base_url"] = base_url or None

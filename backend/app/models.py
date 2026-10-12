@@ -895,6 +895,64 @@ class Order(Base):
     lines: Mapped[list[OrderLine]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
+    attachments: Mapped[list[OrderAttachment]] = relationship(
+        back_populates="order",
+        cascade="all, delete-orphan",
+        order_by="OrderAttachment.created_at",
+    )
+
+
+class OrderAttachment(Base):
+    """A file somebody put on an order: a customer's model, a proof, a PO.
+
+    **The bytes are not in here.** This row is the card in the index; the file
+    itself sits under the data directory, because the two places PrintFlow
+    could keep it fail in opposite directions. A `bytea` column rides along in
+    every backup automatically — but the backup builds its JSON in memory, and
+    one 80MB model would make the whole archive 110MB of base64 in a single
+    string. On disk it is a file the backup tars like any other, restores like
+    any other, and can be looked at with a file manager when something has gone
+    wrong enough that somebody is in the data directory anyway.
+
+    The cost of that choice is that a row and a file can disagree, so both
+    directions are handled rather than assumed: a failed write takes its file
+    with it, and a missing file reports itself as missing instead of as a
+    server error.
+    """
+
+    __tablename__ = "order_attachments"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # What the person called it, exactly as their computer had it. Shown, and
+    # sent back on download — but never used to build a path: the name on disk
+    # is this row's id, so nothing a filename contains can decide where bytes
+    # land.
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    # Where it actually is, relative to the data directory, so a shop that
+    # moves its volume does not have to rewrite every row.
+    stored_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # What the browser said it was. Believed for choosing an icon and never
+    # for deciding how to serve it — see the attachments service.
+    content_type: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # SHA-256 of the bytes, taken while they were being written. Cheap then,
+    # and the only way afterwards to answer "is this the same file" or "did
+    # this survive the restore".
+    sha256: Mapped[str | None] = mapped_column(Text)
+    # Why it is here. "Customer's approved proof" is the difference between a
+    # file somebody keeps and a file nobody dares delete.
+    note: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint("size_bytes >= 0", name="ck_order_attachments_size_nonneg"),
+    )
+
+    order: Mapped[Order] = relationship(back_populates="attachments")
 
 
 class OrderLine(Base):

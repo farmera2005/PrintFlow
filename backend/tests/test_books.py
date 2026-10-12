@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -78,7 +78,9 @@ async def _order(session, *, number="9001", buyer="Dana Buyer", transactions=Non
         etsy_receipt_id=int(number),
         order_number=number,
         buyer_name=buyer,
-        placed_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+        # A fixed day, so an invoice's own date is predictable — and
+        # overridable, for the tests that care how long ago the sale was.
+        placed_at=fields.pop("placed_at", datetime(2026, 8, 14, tzinfo=timezone.utc)),
         currency="USD",
         ship_to={
             "name": buyer,
@@ -2861,7 +2863,15 @@ class TestFeesByHand:
         expensed — is how the books and the screen stop agreeing."""
         from app.services import finance
 
-        order = await _order(db, etsy_fees=Decimal("2.55"), fees_source="manual")
+        # Dated against today rather than against a fixed day: the sweep only
+        # looks back 45 days, so a hard-coded date turns this into a test that
+        # passes until the calendar walks past it.
+        order = await _order(
+            db,
+            etsy_fees=Decimal("2.55"),
+            fees_source="manual",
+            placed_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
         await db.commit()
 
         class Ledger:

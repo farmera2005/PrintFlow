@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import SECRET_KEY_FILENAME, get_config, reset_config_cache
 from ..models import Base
+from .attachments import FOLDER as ATTACHMENT_FOLDER
 
 log = logging.getLogger("printflow.backup")
 
@@ -475,6 +476,21 @@ def check(manifest: dict[str, Any]) -> None:
         )
 
 
+def clear_attachments(root: Path | None = None) -> None:
+    """Drop the order files this install had before a restore replaces it.
+
+    Every other file in the data directory is this machine's own — a key, a
+    certificate — and is overwritten by name if the archive carries one. Order
+    attachments are not: they are named after rows that the restore has just
+    deleted, so without this they would sit on disk belonging to nobody, with
+    another shop's customers' files among them. The archive's own attachments
+    are written immediately afterwards.
+    """
+    folder = (root or get_config().data_dir) / ATTACHMENT_FOLDER
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def write_data_files(files: dict[str, bytes], root: Path | None = None) -> list[str]:
     """Put the secret key and the certificate back where they live.
 
@@ -563,6 +579,7 @@ async def restore(
     with _stage("replacing the database"):
         counts = await load_database(session, database)
     with _stage("writing the data directory"):
+        clear_attachments(data_dir)
         written = write_data_files(files, data_dir)
     log.warning(
         "Restored a backup taken %s: %s rows across %s tables, %s data files",

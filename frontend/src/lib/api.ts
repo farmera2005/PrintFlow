@@ -95,6 +95,49 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
   return payload as T
 }
 
+/** A POST of a form that reports how far it has got.
+ *
+ *  XHR rather than fetch, for the one thing fetch still cannot do: tell you
+ *  how much of a large upload has gone. A model file can be eighty megabytes
+ *  over a shop's broadband, and a dialog that sits there saying nothing for a
+ *  minute is one somebody presses again.
+ */
+function uploadForm<T>(
+  path: string,
+  form: FormData,
+  onProgress?: (fraction: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', path)
+    request.withCredentials = true
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total)
+    }
+    request.onload = () => {
+      let payload: any = null
+      try {
+        payload = request.responseText ? JSON.parse(request.responseText) : null
+      } catch {
+        payload = { detail: summariseErrorBody(request.responseText, request.status) }
+      }
+      if (request.status >= 200 && request.status < 300) return resolve(payload as T)
+      reject(
+        new ApiError(
+          request.status,
+          typeof payload?.detail === 'string'
+            ? payload.detail
+            : `Upload failed (${request.status})`,
+        ),
+      )
+    }
+    request.onerror = () =>
+      reject(new ApiError(0, 'The upload did not reach PrintFlow. Check the connection.'))
+    request.onabort = () => reject(new ApiError(0, 'Upload cancelled.'))
+    request.send(form)
+  })
+}
+
 /** A POST whose reply is a file to save, not JSON.
  *
  *  A POST rather than a link because it carries a passphrase, and a passphrase
@@ -133,6 +176,8 @@ export const api = {
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body ?? {}),
   del: <T>(path: string) => request<T>('DELETE', path),
   postForm: <T>(path: string, form: FormData) => requestForm<T>(path, form),
+  upload: <T>(path: string, form: FormData, onProgress?: (fraction: number) => void) =>
+    uploadForm<T>(path, form, onProgress),
   postBlob: (path: string, body?: unknown) => requestBlob(path, body),
 }
 

@@ -582,6 +582,7 @@ async def _one_of_everything(db) -> dict[str, int]:
         MadeSheetLine,
         MaintenanceLog,
         OAuthState,
+        OrderAttachment,
         OrderLine,
         PrintJob,
         PrintFile,
@@ -621,6 +622,19 @@ async def _one_of_everything(db) -> dict[str, int]:
     db.add_all(
         [
             User(username="restored-admin", password_hash="not-a-real-hash"),
+            # The row half of an attachment. Its bytes are a file under the
+            # data directory, which this archive carries the same way it
+            # carries the secret key — see test_order_files.py.
+            OrderAttachment(
+                order_id=order.id,
+                filename="bracket.stl",
+                stored_path=f"attachments/{order.id}/stored.stl",
+                content_type="model/stl",
+                size_bytes=2048,
+                sha256="cd" * 32,
+                note="The customer's own model",
+                uploaded_by="admin",
+            ),
             AppSetting(key="a_setting", value={"v": {"nested": [1, 2, 3]}}),
             AuditLog(
                 entity_type="order",

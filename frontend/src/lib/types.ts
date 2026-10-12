@@ -104,6 +104,29 @@ export interface OrderSummary {
 
 export type OrderSource = 'etsy' | 'wix' | 'manual'
 
+/** A file attached to an order: a model, a proof, a purchase order.
+ *
+ * The bytes live under the data directory rather than in the database, which
+ * is why `missing` exists — a row whose file is not there is a thing that can
+ * happen, and saying so beats a download that fails from a list that showed
+ * it as present. */
+export interface OrderFile {
+  id: string
+  filename: string
+  content_type: string | null
+  size_bytes: number
+  /** Already in words — "1.4 MB" — because the server knows the rounding it
+   *  wants and every screen showing it would otherwise repeat the arithmetic. */
+  size_label: string
+  /** Whether the server will serve this one inline. It decides; this only
+   *  draws a thumbnail where it already said yes. */
+  previewable: boolean
+  note: string | null
+  uploaded_by: string | null
+  created_at: string
+  missing: boolean
+}
+
 export interface Order {
   id: string
   order_number: string
@@ -188,6 +211,9 @@ export interface Order {
   /** Whether there is a channel payload behind this order to look at. False
    *  for one typed in by hand: nothing sent it, so there is nothing to read. */
   raw_available?: boolean
+  /** Files somebody attached. Drawer only, and loaded with the order so the
+   *  tab can show a count without a second request. */
+  files?: OrderFile[]
   bambuddy_base_url?: string | null
   /** Where it is going, as Etsy sent it. Drawer only. */
   ship_to?: {

@@ -21,6 +21,7 @@ import type {
   Product,
 } from '../lib/types'
 import LabelDialog from './LabelDialog'
+import OrderFiles from './OrderFiles'
 import { Alert, Badge, Button, Field, Modal, Spinner, cx, inputClass } from './ui'
 
 /** The drawer's three views of one order.
@@ -33,6 +34,7 @@ const TABS = [
   { key: 'lines', label: 'Lines' },
   { key: 'shipping', label: 'Shipping' },
   { key: 'money', label: 'Money' },
+  { key: 'files', label: 'Files' },
 ] as const
 
 type Tab = (typeof TABS)[number]['key']
@@ -768,6 +770,13 @@ export default function OrderDrawer({
                       {order.summary.line_count}
                     </span>
                   ) : null}
+                  {/* Only when there are any: a 0 beside every tab on every
+                      order is a number nobody is reading. */}
+                  {key === 'files' && order.files?.length ? (
+                    <span className="ml-1.5 text-xs text-ink-400">
+                      {order.files.length}
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </nav>
@@ -917,6 +926,14 @@ export default function OrderDrawer({
                 </section>
 
                 {tab === 'shipping' ? <ShipTo order={order} onChanged={load} /> : null}
+
+                {tab === 'files' ? (
+                  <OrderFiles
+                    orderId={order.id}
+                    files={order.files ?? []}
+                    onChanged={load}
+                  />
+                ) : null}
                 {tab === 'money' ? <Money order={order} onRefreshed={load} /> : null}
 
                 <section className="flex flex-wrap gap-2">
