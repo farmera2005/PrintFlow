@@ -31,6 +31,7 @@ from .routers import (
     setup_router,
     system_router,
 )
+from .services import tunnel as tunnel_service
 from .services.credentials import IntegrationNotConfigured
 from .services.settings_store import KEY_HTTPS_REDIRECT, get_setting
 
@@ -54,6 +55,14 @@ async def lifespan(app: FastAPI):
                 await tunnel.start_from_db(session)
         except Exception as exc:  # a tunnel problem must not block startup
             log.error("Cloudflare tunnel did not start: %s", exc)
+    # Ask the cloudflared binaries their versions once, here, off the event
+    # loop. The answer is cached until the file changes, so every settings page
+    # afterwards is a dictionary lookup rather than a fork in the middle of a
+    # request handler.
+    try:
+        await asyncio.to_thread(tunnel_service.binary_summary)
+    except Exception as exc:  # pragma: no cover - never block startup for this
+        log.info("Could not read the cloudflared version at startup: %s", exc)
     log.info("PrintFlow started")
     try:
         yield

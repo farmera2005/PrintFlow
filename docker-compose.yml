@@ -48,6 +48,14 @@ services:
         # by hand just leaves it "unknown", which is harmless.
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+        # The bundled cloudflared. Its download layer is cached, so a plain
+        # rebuild keeps whatever version the first build fetched — which is
+        # usually fine, because Settings → Access & security updates
+        # cloudflared in place without rebuilding anything. To refresh it in
+        # the image instead: ./update.sh --refresh-tunnel, or pin a version
+        # here (CLOUDFLARED_VERSION=2026.10.3).
+        CLOUDFLARED_VERSION: ${CLOUDFLARED_VERSION:-latest}
+        CLOUDFLARED_REFRESH: ${CLOUDFLARED_REFRESH:-pinned-by-cache}
     restart: unless-stopped
     depends_on:
       postgres:

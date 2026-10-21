@@ -1978,7 +1978,59 @@ Two things worth knowing before you expose the app:
 
 If the image was built without network access the binary will be missing; the
 UI says so plainly and you can run `cloudflared` yourself against
-`http://<host>:8000` instead.
+`http://<host>:8000` instead — or press **Update cloudflared**, which fetches
+one into the data volume.
+
+### Keeping cloudflared up to date
+
+**Settings → Access & security shows which cloudflared is running** —
+`cloudflared 2026.10.3 · amd64 · bundled with the image` — with **Check for
+updates** and **Update cloudflared** beside it. This matters more than it
+looks: Cloudflare ships releases continuously and eventually stops supporting
+old connectors, and the way an unsupported one announces itself is a tunnel
+that will not connect one morning for no visible reason.
+
+**A plain rebuild does not refresh it.** The binary is downloaded while the
+image is *built*, and Docker caches that layer — the command never changes, so
+it is never re-run. An install that pulls PrintFlow updates every week can
+still be running the cloudflared it fetched the day it was set up. Nothing
+warns you, which is exactly why the version is on the screen.
+
+So there are two ways to move it, and the first is the one to use:
+
+* **Update cloudflared** downloads the current release into the data volume
+  and restarts the tunnel on it. No rebuild, no Docker, and — because the data
+  volume outlives the image — it survives every later `./update.sh`.
+* `./update.sh --refresh-tunnel` refreshes the copy *inside* the image
+  instead, by changing a build argument so Docker re-runs the download. Pin a
+  specific release with `CLOUDFLARED_VERSION=2026.10.3 docker compose build` if
+  you would rather decide the version yourself.
+
+**PrintFlow runs whichever of the two is newer**, which is the bit that keeps
+this honest. Updating in the app and later rebuilding the image does not pin
+you to the older downloaded copy: if the rebuilt image is ahead, the image's
+binary wins and the screen says so. **Use the bundled one** removes the
+downloaded copy outright if it ever turns out to be the wrong one for your
+machine; the bundled binary was never touched, so there is nothing to
+reinstall.
+
+Nothing downloads on its own and nothing is checked on a schedule — the only
+time PrintFlow talks to github.com is when one of those buttons is pressed.
+If it cannot reach it, the check says so rather than reporting "up to date",
+because those two are not the same thing.
+
+### Updating PrintFlow while a tunnel is running
+
+Nothing to do: `./update.sh` rebuilds and restarts the container, cloudflared
+goes down with it and comes back up from the stored configuration a few seconds
+later. The connector token lives in the database, so nothing is re-entered, and
+a **named** tunnel keeps its hostname — which is what the Etsy and Intuit
+redirect URIs are registered against, so they keep working across every update.
+
+The exception is a **quick** tunnel: Cloudflare hands out a new
+`*.trycloudflare.com` hostname on every start, so an update changes the public
+address and any redirect URI registered against it stops working. That is the
+same reason quick tunnels are only for trying things out.
 
 ### "502 Bad gateway" on the OAuth callback
 
@@ -2060,7 +2112,10 @@ cd PrintFlow
 ./update.sh
 ```
 
-That pulls, rebuilds and restarts. Or by hand:
+That pulls, rebuilds and restarts. `./update.sh --refresh-tunnel` does the same
+and fetches a current cloudflared into the image as well — see
+[Keeping cloudflared up to date](#keeping-cloudflared-up-to-date), which is
+usually done from the app instead. Or by hand:
 
 ```bash
 git pull && docker compose up -d --build

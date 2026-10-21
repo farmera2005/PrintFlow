@@ -1,12 +1,34 @@
 #!/bin/sh
 # Update PrintFlow in place: pull, rebuild, restart.
 #
-#   ./update.sh
+#   ./update.sh                     pull, rebuild, restart
+#   ./update.sh --refresh-tunnel    the same, and fetch a current cloudflared
+#
+# The bundled cloudflared is downloaded when the image is built and that layer
+# is cached, so an ordinary rebuild keeps the version it already had. Normally
+# that does not matter: Settings → Access & security updates cloudflared in
+# place, into the data volume, without rebuilding anything. --refresh-tunnel is
+# for refreshing the copy inside the image itself.
 #
 # Your data is in Docker volumes (printflow-db, printflow-data), not in the
 # image, so rebuilding does not touch it. Database migrations are applied
 # automatically when the container starts.
 set -e
+
+REFRESH_TUNNEL=""
+for arg in "$@"; do
+  case "$arg" in
+    --refresh-tunnel) REFRESH_TUNNEL=1 ;;
+    -h|--help)
+      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option $arg (try --help)" >&2
+      exit 1
+      ;;
+  esac
+done
 
 cd "$(dirname "$0")"
 
@@ -54,6 +76,15 @@ fi
 GIT_SHA=$AFTER
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 export GIT_SHA BUILD_TIME
+
+# Changing this value is what makes Docker re-run the download rather than
+# reuse the cached layer. Left alone otherwise, so an ordinary update does not
+# pull 40MB it already has.
+if [ -n "$REFRESH_TUNNEL" ]; then
+  CLOUDFLARED_REFRESH=$BUILD_TIME
+  export CLOUDFLARED_REFRESH
+  echo "PrintFlow: will fetch a current cloudflared into the image."
+fi
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE="docker compose"

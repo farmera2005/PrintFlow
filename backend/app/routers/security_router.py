@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_user
 from ..config import get_config
 from ..db import get_session
+from ..integrations import base
 from ..integrations.base import new_client
 from ..models import User
 from ..services import audit, public_url, tls, tunnel
@@ -97,6 +98,10 @@ async def _payload(request: Request, session: AsyncSession) -> dict[str, Any]:
             **tunnel.public_config(tunnel_config),
             "status": tunnel_status,
             "supervised": tunnel_supervisor is not None,
+            # Which cloudflared would run, and what else is on the machine.
+            # Local and cached, so it costs nothing to show every time; what
+            # Cloudflare has published is only asked for on request.
+            "binary": tunnel.binary_summary(),
         },
         "https": (supervisor.status() if supervisor else {"running": False, "port": config.https_port}),
         "https_port": config.https_port,
@@ -411,6 +416,88 @@ async def test_tunnel(
         "diagnosis": "unexpected",
         "detail": f"Unexpected response {response.status_code} from {base}.",
     }
+
+
+@router.get("/tunnel/version")
+async def tunnel_version(
+    _: User = Depends(require_user),
+) -> dict:
+    """What cloudflared is running here, and what Cloudflare has published.
+
+    Asked when somebody presses the button rather than on a schedule: this is
+    the only outbound call PrintFlow makes to anything that is not one of the
+    shop's own integrations, and a background poll to GitHub is not something
+    to start without being asked.
+    """
+    async with base.deadline(
+        "cloudflared",
+        "checking for a newer cloudflared",
+        20.0,
+        hint="this machine needs to reach github.com for the version check",
+    ):
+        found = await tunnel.check_for_update()
+    return {**found, "binary": tunnel.binary_summary()}
+
+
+@router.post("/tunnel/update")
+async def update_tunnel_binary(
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Fetch the current cloudflared and run it instead.
+
+    Into the data volume, so the next image rebuild cannot take it away again
+    — and so this works on a NAS where nobody is going to pass build arguments
+    to Docker.
+    """
+    try:
+        result = await tunnel.install_latest()
+    except tunnel.TunnelError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    await audit.record(
+        session,
+        entity_type="tunnel",
+        entity_id=None,
+        action="cloudflared_updated",
+        detail={"from": result["previous"], "to": result["installed"]},
+        actor=user.username,
+    )
+    await session.commit()
+
+    # A running tunnel keeps running the old binary until it is replaced, and
+    # the point of the update was not to have it next time.
+    supervisor = _tunnel(request)
+    restarted = False
+    if supervisor is not None and supervisor.running:
+        await supervisor.restart()
+        restarted = True
+    return {**result, "restarted": restarted, "binary": tunnel.binary_summary()}
+
+
+@router.post("/tunnel/binary/revert")
+async def revert_tunnel_binary(
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Go back to the cloudflared that came in the image."""
+    removed = tunnel.remove_downloaded()
+    if removed:
+        await audit.record(
+            session,
+            entity_type="tunnel",
+            entity_id=None,
+            action="cloudflared_reverted",
+            detail={"to": tunnel.installed_version(tunnel.bundled_path())},
+            actor=user.username,
+        )
+        await session.commit()
+    supervisor = _tunnel(request)
+    if removed and supervisor is not None and supervisor.running:
+        await supervisor.restart()
+    return {"removed": removed, "binary": tunnel.binary_summary()}
 
 
 @router.get("/tunnel/logs")

@@ -18,6 +18,22 @@ export interface CertificateInfo {
   source: 'generated' | 'uploaded'
 }
 
+/** Which cloudflared is on this machine.
+ *
+ * Two can be: the one baked into the image and the one PrintFlow downloaded
+ * into the data volume. Both are reported, because after an image rebuild the
+ * bundled one can be the newer of the two and win — which is right, and
+ * surprising if the screen only ever named the downloaded one. */
+export interface TunnelBinary {
+  available: boolean
+  path: string | null
+  version: string | null
+  bundled_version: string | null
+  downloaded_version: string | null
+  using_downloaded: boolean
+  arch: string
+}
+
 export interface TunnelInfo {
   mode: 'off' | 'named' | 'quick'
   enabled: boolean
@@ -25,6 +41,7 @@ export interface TunnelInfo {
   has_token: boolean
   token_hint: string | null
   supervised: boolean
+  binary?: TunnelBinary
   status: {
     binary_available: boolean
     running: boolean

@@ -1,7 +1,170 @@
 import { useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import type { SecurityStatus, TunnelInfo } from './SecurityPanel'
+import type { SecurityStatus, TunnelBinary, TunnelInfo } from './SecurityPanel'
 import { Alert, Badge, Button, Field, inputClass } from './ui'
+
+interface VersionCheck {
+  installed: string | null
+  latest: string | null
+  arch: string
+  /** Null when GitHub could not be reached: "no update" and "could not ask"
+   *  must not look the same on a screen. */
+  update_available: boolean | null
+  binary: TunnelBinary
+}
+
+/** Which cloudflared is running, and how to get a newer one.
+ *
+ * It is worth a panel of its own because of where the binary comes from: it is
+ * downloaded when the image is *built*, and that build layer is cached on the
+ * shop's machine — so rebuilding PrintFlow a year later leaves cloudflared
+ * exactly as it was. Cloudflare keeps shipping releases and eventually stops
+ * supporting old connectors, and the first sign of that is a tunnel that will
+ * not connect on a Tuesday morning.
+ *
+ * So the version is shown without being asked for, and the update lands in the
+ * data volume rather than in the image — it survives the next rebuild, and
+ * nobody has to pass a build argument to Docker on a NAS. */
+function CloudflaredVersion({
+  tunnel,
+  onApplied,
+}: {
+  tunnel: TunnelInfo
+  onApplied: () => Promise<void>
+}) {
+  const [check, setCheck] = useState<VersionCheck | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
+  const binary = check?.binary ?? tunnel.binary
+  if (!binary?.available) return null
+
+  const act = async (label: string, run: () => Promise<void>) => {
+    setBusy(label)
+    setError(null)
+    setNote(null)
+    try {
+      await run()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const look = () =>
+    act('check', async () => {
+      const found = await api.get<VersionCheck>('/api/security/tunnel/version')
+      setCheck(found)
+      if (found.update_available === null) {
+        setNote(
+          'Could not reach github.com to ask what the latest version is. ' +
+            'Update anyway and PrintFlow will tell you what it got.',
+        )
+      } else if (!found.update_available) {
+        setNote(`This is the current release (${found.installed}).`)
+      }
+    })
+
+  const update = () =>
+    act('update', async () => {
+      const done = await api.post<{
+        installed: string | null
+        previous: string | null
+        changed: boolean
+        restarted: boolean
+        binary: TunnelBinary
+      }>('/api/security/tunnel/update')
+      setCheck((was) => (was ? { ...was, binary: done.binary, installed: done.installed } : was))
+      setNote(
+        done.changed
+          ? `Updated ${done.previous ?? 'the bundled binary'} → ${done.installed}.` +
+            (done.restarted ? ' The tunnel restarted on the new one.' : '')
+          : `Already on ${done.installed}; nothing changed.`,
+      )
+      await onApplied()
+    })
+
+  const revert = () =>
+    act('revert', async () => {
+      const done = await api.post<{ removed: boolean; binary: TunnelBinary }>(
+        '/api/security/tunnel/binary/revert',
+      )
+      setCheck((was) => (was ? { ...was, binary: done.binary } : was))
+      setNote(
+        done.removed
+          ? `Back on the bundled binary (${done.binary.bundled_version ?? 'unknown version'}).`
+          : 'There was no downloaded copy to remove.',
+      )
+      await onApplied()
+    })
+
+  return (
+    <div className="rounded-lg bg-ink-50 p-3 ring-1 ring-ink-200">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-ink-700">
+          cloudflared{' '}
+          <span className="font-mono text-ink-900">{binary.version ?? 'unknown'}</span>
+          <span className="text-ink-500">
+            {' '}
+            · {binary.arch} · {binary.using_downloaded ? 'downloaded' : 'bundled with the image'}
+          </span>
+        </span>
+        {check?.update_available ? (
+          <Badge className="bg-amber-100 text-amber-900 ring-amber-300">
+            {check.latest} available
+          </Badge>
+        ) : null}
+        <div className="ml-auto flex flex-wrap gap-2">
+          <Button size="sm" onClick={look} disabled={busy !== null}>
+            {busy === 'check' ? 'Checking…' : 'Check for updates'}
+          </Button>
+          <Button
+            size="sm"
+            variant={check?.update_available ? 'primary' : undefined}
+            onClick={update}
+            disabled={busy !== null}
+          >
+            {busy === 'update' ? 'Downloading…' : 'Update cloudflared'}
+          </Button>
+          {binary.using_downloaded ? (
+            <Button size="sm" variant="ghost" onClick={revert} disabled={busy !== null}>
+              {busy === 'revert' ? 'Reverting…' : 'Use the bundled one'}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <p className="mt-1 text-xs text-ink-500">
+        The bundled binary is fixed when the image is built, so rebuilding
+        PrintFlow does not refresh it. Updating here downloads the current
+        release into the data volume, which survives rebuilds — and PrintFlow
+        runs whichever of the two is newer.
+      </p>
+
+      {binary.using_downloaded && binary.bundled_version ? (
+        <p className="mt-1 text-xs text-ink-500">
+          The image carries {binary.bundled_version}; this install is running the
+          downloaded {binary.downloaded_version}.
+        </p>
+      ) : null}
+      {!binary.using_downloaded && binary.downloaded_version ? (
+        <p className="mt-1 text-xs text-ink-500">
+          A downloaded copy ({binary.downloaded_version}) is present but older than
+          the one in the image, so the image's is being used.
+        </p>
+      ) : null}
+
+      {note ? <p className="mt-2 text-xs text-ink-700">{note}</p> : null}
+      {error ? (
+        <div className="mt-2">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 const MODES: { value: TunnelInfo['mode']; label: string; hint: string }[] = [
   { value: 'off', label: 'Off', hint: 'PrintFlow is reachable on your LAN only.' },
@@ -111,6 +274,8 @@ export default function TunnelSection({
           yourself pointing at <code>http://&lt;host&gt;:8000</code>.
         </Alert>
       ) : null}
+
+      <CloudflaredVersion tunnel={tunnel} onApplied={onApplied} />
 
       <Field label="Mode" hint={MODES.find((m) => m.value === mode)?.hint}>
         <select

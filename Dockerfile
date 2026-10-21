@@ -19,6 +19,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
 # cloudflared, so a Cloudflare Tunnel can be set up entirely from the wizard
 # rather than needing a second container. Best-effort: if the download fails
 # (offline build, GitHub unreachable) the image still works and the app says
@@ -29,9 +32,28 @@ WORKDIR /app
 # ca-certificates with it (apt treats it as a dependency it pulled in), which
 # would quietly break every outbound HTTPS call to Etsy and QuickBooks. Python
 # is already here and needs no cleanup.
+#
+# **This layer is cached, and the cache is the problem.** The command below is
+# identical on every build, so Docker reuses the layer and never re-downloads
+# — an install that rebuilds PrintFlow weekly can still be running the
+# cloudflared it fetched a year ago, and Cloudflare eventually stops supporting
+# old connectors. Two ways out, and both are deliberate:
+#
+#   * Settings -> Access & security updates cloudflared from inside the app,
+#     into the data volume, with no rebuild and no Docker knowledge needed.
+#     That is the one a shop uses, and it survives this image being replaced.
+#   * `./update.sh --refresh-tunnel` passes a new CLOUDFLARED_REFRESH, which
+#     changes this command and so re-runs it. Pin a known version instead with
+#     `--build-arg CLOUDFLARED_VERSION=2026.10.3`.
+#
+# It sits *after* pip install so that refreshing it does not throw away the
+# dependency layer, and *before* the app code so that editing the app does not
+# re-download 40MB.
 ARG TARGETARCH=amd64
 ARG CLOUDFLARED_VERSION=latest
+ARG CLOUDFLARED_REFRESH=pinned-by-cache
 RUN set -eu; \
+    echo "cloudflared ${CLOUDFLARED_VERSION} (refresh token: ${CLOUDFLARED_REFRESH})"; \
     arch="${TARGETARCH:-amd64}"; \
     case "$arch" in amd64|arm64|arm) ;; *) arch=amd64 ;; esac; \
     if [ "$CLOUDFLARED_VERSION" = "latest" ]; then \
@@ -49,9 +71,6 @@ RUN set -eu; \
 # The rm matters: a partial download or a wrong-architecture binary would still
 # look "installed" to the app, which would then report the tunnel as available
 # and fail confusingly at runtime instead of saying it is missing.
-
-COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./
 # The built SPA is served by the same container, so there is a single origin

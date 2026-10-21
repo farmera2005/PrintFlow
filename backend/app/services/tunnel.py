@@ -26,13 +26,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import re
 import shutil
+import subprocess
 from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import get_config
+from ..integrations import base
 from ..services import credentials
 
 log = logging.getLogger("printflow.tunnel")
@@ -103,7 +110,8 @@ async def _cancel(task: asyncio.Task | None) -> None:
 # --------------------------------------------------------------------------
 
 
-def binary_path() -> str | None:
+def bundled_path() -> str | None:
+    """The cloudflared that came in the image, if the build managed to fetch one."""
     for candidate in BINARY_CANDIDATES:
         found = shutil.which(candidate) if "/" not in candidate else candidate
         if found and os.path.isfile(found) and os.access(found, os.X_OK):
@@ -111,8 +119,298 @@ def binary_path() -> str | None:
     return None
 
 
+def updated_path() -> str | None:
+    """The cloudflared PrintFlow downloaded for itself, if there is one.
+
+    In the data volume rather than next to the bundled one, for two reasons
+    that both matter on a NAS: the image's filesystem is replaced wholesale by
+    the next `docker compose up --build`, and the container does not run as
+    root so there is nowhere else it may write.
+    """
+    path = _download_target()
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
+    return None
+
+
+def _download_target() -> Path:
+    return get_config().data_dir / "bin" / "cloudflared"
+
+
+def binary_path() -> str | None:
+    """Which cloudflared to run: whichever of the two is newer.
+
+    Not simply "the downloaded one wins". A shop that updates in the app and
+    then rebuilds the image would otherwise keep running the copy it
+    downloaded months ago while a newer one sat in the image unused — the
+    update button would have quietly become a way of pinning an old version.
+    """
+    bundled, updated = bundled_path(), updated_path()
+    if updated is None:
+        return bundled
+    if bundled is None:
+        return updated
+    if version_tuple(installed_version(updated)) >= version_tuple(
+        installed_version(bundled)
+    ):
+        return updated
+    return bundled
+
+
 def available() -> bool:
     return binary_path() is not None
+
+
+# What `cloudflared --version` prints:
+#   cloudflared version 2026.10.3 (built 2026-10-21-13:11 UTC)
+_VERSION = re.compile(r"\bversion\s+v?(\d[\w.\-]*)", re.IGNORECASE)
+
+# Asking a binary its version costs a fork. The answer only changes when
+# PrintFlow replaces the file, so it is remembered against the path and its
+# modification time — which is also what makes a swap visible immediately.
+_version_cache: dict[tuple[str, float], str | None] = {}
+
+
+def parse_version(output: str) -> str | None:
+    match = _VERSION.search(output or "")
+    return match.group(1) if match else None
+
+
+def version_tuple(version: str | None) -> tuple[int, ...]:
+    """A version as something comparable.
+
+    Cloudflared numbers releases by calendar — 2026.10.3 — so plain integer
+    parts sort correctly. Anything unparseable sorts lowest rather than
+    raising: an unreadable version is a reason to prefer the other binary, not
+    a reason to fail.
+    """
+    if not version:
+        return (0,)
+    parts: list[int] = []
+    for piece in version.split("."):
+        digits = re.match(r"\d+", piece)
+        if not digits:
+            break
+        parts.append(int(digits.group(0)))
+    return tuple(parts) or (0,)
+
+
+def installed_version(path: str | None = None) -> str | None:
+    """What this cloudflared says it is, or None if it will not say.
+
+    Run with a short timeout and the result cached: `--version` returns
+    immediately on a working binary, so anything slower is a binary that is
+    not going to work anyway and must not hold up a settings page.
+    """
+    target = path or binary_path()
+    if not target:
+        return None
+    try:
+        stamp = os.path.getmtime(target)
+    except OSError:
+        return None
+    key = (target, stamp)
+    if key in _version_cache:
+        return _version_cache[key]
+    try:
+        result = subprocess.run(  # noqa: S603 - a path this module chose
+            [target, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        found = parse_version(f"{result.stdout}\n{result.stderr}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("Could not ask %s for its version: %s", target, exc)
+        found = None
+    _version_cache[key] = found
+    return found
+
+
+# --------------------------------------------------------------------------
+# Keeping cloudflared current
+#
+# The binary is fetched when the image is built, and that build layer is cached
+# on the shop's own machine — so a `docker compose up --build` a year later
+# rebuilds PrintFlow and leaves cloudflared exactly as it was. Cloudflare keeps
+# shipping releases and eventually stops supporting old connectors, and the
+# first sign of that is a tunnel that will not connect on a Tuesday morning.
+#
+# So PrintFlow can fetch one for itself, into the data volume, where it
+# survives the next rebuild and needs no Docker knowledge to apply.
+# --------------------------------------------------------------------------
+
+# Where releases come from. The same place the Dockerfile uses, so an install
+# that could be built can also be updated.
+RELEASES = "https://github.com/cloudflare/cloudflared/releases"
+LATEST_ASSET = RELEASES + "/latest/download/cloudflared-linux-{arch}"
+LATEST_PAGE = RELEASES + "/latest"
+
+# What the kernel calls this machine, against what Cloudflare calls the build.
+ARCH_NAMES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "armv7l": "arm",
+    "armv6l": "arm",
+}
+
+# A download is tens of megabytes over whatever a shop has, so it gets room —
+# but a bounded amount of it, because somebody is watching a button.
+DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
+CHECK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
+# Anything larger is not cloudflared, and is not going to be written to the
+# data volume to find out.
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+
+
+def arch_name() -> str:
+    return ARCH_NAMES.get(platform.machine().lower(), "amd64")
+
+
+def download_url(arch: str | None = None) -> str:
+    return LATEST_ASSET.format(arch=arch or arch_name())
+
+
+async def latest_version() -> str | None:
+    """The newest release Cloudflare has published, without downloading it.
+
+    Read from where `/releases/latest` redirects to — `/releases/tag/2026.10.3`
+    — rather than from the GitHub API, which is rate-limited per address and
+    would start refusing a shop behind a busy office NAT. None when GitHub
+    cannot be reached, which is a thing to report rather than an error: the
+    update itself does not depend on this answer.
+    """
+    try:
+        async with base.new_client(timeout=CHECK_TIMEOUT, follow_redirects=False) as client:
+            response = await client.head(LATEST_PAGE)
+        location = response.headers.get("location", "")
+    except httpx.HTTPError as exc:
+        log.info("Could not reach GitHub for the cloudflared version: %s", exc)
+        return None
+    tag = location.rstrip("/").rsplit("/", 1)[-1] if location else ""
+    return tag.lstrip("v") or None
+
+
+async def check_for_update() -> dict[str, Any]:
+    """What is running, what is available, and whether they differ."""
+    running = installed_version()
+    latest = await latest_version()
+    return {
+        "installed": running,
+        "latest": latest,
+        "arch": arch_name(),
+        # Unknown rather than False when GitHub could not be reached: "no
+        # update" and "could not ask" must not look the same on a screen.
+        "update_available": (
+            None
+            if latest is None or running is None
+            else version_tuple(latest) > version_tuple(running)
+        ),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def install_latest() -> dict[str, Any]:
+    """Download the current cloudflared and put it where PrintFlow will run it.
+
+    Nothing replaces the running binary until the downloaded one has been
+    asked what it is and answered — a truncated download or a wrong-
+    architecture build that got written into place would turn "update the
+    tunnel" into "lose the tunnel", on the machine whose owner is least able
+    to go and fix it.
+    """
+    before = installed_version()
+    target = _download_target()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f"{target.name}.downloading")
+
+    url = download_url()
+    written = 0
+    try:
+        async with base.new_client(timeout=DOWNLOAD_TIMEOUT) as client:
+            async with client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    raise TunnelError(
+                        f"Cloudflare's download returned HTTP {response.status_code}. "
+                        "Try again later, or update the image instead."
+                    )
+                with open(staged, "wb") as out:
+                    async for chunk in response.aiter_bytes(1024 * 256):
+                        written += len(chunk)
+                        if written > MAX_DOWNLOAD_BYTES:
+                            raise TunnelError(
+                                "That download is far too large to be cloudflared."
+                            )
+                        out.write(chunk)
+    except httpx.HTTPError as exc:
+        staged.unlink(missing_ok=True)
+        raise TunnelError(
+            f"Could not download cloudflared: {exc}. This machine needs to reach "
+            "github.com to fetch it."
+        ) from exc
+    except TunnelError:
+        staged.unlink(missing_ok=True)
+        raise
+
+    staged.chmod(0o755)
+    fetched = installed_version(str(staged))
+    if not fetched:
+        staged.unlink(missing_ok=True)
+        still = f"cloudflared {before}" if before else "the bundled cloudflared"
+        raise TunnelError(
+            "What was downloaded does not run on this machine — it did not even "
+            f"report a version. Nothing was replaced; {still} is still in use."
+        )
+
+    # Replaced in one step. A half-written file at this path is a tunnel that
+    # cannot start, and os.replace is the only way to avoid one.
+    os.replace(staged, target)
+    log.warning("cloudflared updated: %s -> %s", before or "unknown", fetched)
+    return {
+        "installed": fetched,
+        "previous": before,
+        "changed": fetched != before,
+        "path": str(target),
+    }
+
+
+def binary_summary() -> dict[str, Any]:
+    """Which cloudflared is in use, and what else is on the machine.
+
+    Both are reported rather than only the winner, because "the one I
+    downloaded is not the one running" is otherwise a silent surprise — and
+    after an image rebuild it is the correct outcome.
+    """
+    chosen = binary_path()
+    downloaded = updated_path()
+    return {
+        "available": chosen is not None,
+        "path": chosen,
+        "version": installed_version(chosen) if chosen else None,
+        "bundled_version": installed_version(bundled_path()) if bundled_path() else None,
+        "downloaded_version": (
+            installed_version(downloaded) if downloaded else None
+        ),
+        "using_downloaded": chosen is not None and chosen == downloaded,
+        "arch": arch_name(),
+    }
+
+
+def remove_downloaded() -> bool:
+    """Go back to the cloudflared that came with the image.
+
+    The way out of a downloaded binary that turns out to be wrong for this
+    machine in some way `--version` could not detect. Nothing to reinstall:
+    the bundled one was never touched.
+    """
+    target = _download_target()
+    if not target.exists():
+        return False
+    target.unlink()
+    return True
 
 
 # --------------------------------------------------------------------------
