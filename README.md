@@ -2158,6 +2158,56 @@ but older versions — including some NAS packages — cannot.
 `update.sh` refuses to run if tracked files have been modified, and says which
 ones, rather than leaving a half-updated checkout behind.
 
+### Security updates to the dependencies
+
+A pinned dependency is a dependency that stays exactly as vulnerable as the day
+it was pinned, so the pins are checked rather than trusted. Both ecosystems
+answer in one command each, from this checkout:
+
+```bash
+# Python: every pinned version against the Python Packaging Advisory Database
+pip install pip-audit && pip-audit -r backend/requirements.txt
+
+# JavaScript: the lockfile against the npm advisory database
+npm --prefix frontend audit
+```
+
+`npm audit fix` applies what it can without changing a major version;
+`--force` crosses that line and needs a type check and a run of the app
+afterwards. On the Python side the pins are edited by hand and the suite is
+the check — `python -m pytest` from `backend/`.
+
+Two of those pins are worth a second's thought before bumping, because the
+test suite cannot see what they protect:
+
+* **`cryptography`** encrypts every stored credential and seals backups. A
+  bump has to leave data written by the *old* version readable — the Fernet
+  token format and the scrypt parameters are stable across versions, and the
+  way to be sure is to open an existing backup after upgrading rather than to
+  assume.
+* **`python-multipart`** parses upload bodies, and FastAPI parses the body
+  *before* it resolves dependencies — so it runs before `require_user` does.
+  Anything it is vulnerable to is reachable without a login by anyone who can
+  reach the port, which is the internet when a tunnel is up without a
+  Cloudflare Access policy in front of it. Treat its advisories as urgent even
+  when they are only rated "denial of service".
+
+**The base images are checked separately**, because `pip` and `npm` know
+nothing about the Debian and Alpine packages underneath:
+
+```bash
+docker scout cves printflow-app          # or: trivy image printflow-app
+```
+
+They update when the image is rebuilt *with a fresh base* — and `docker compose
+build` reuses the base it already has, so that means:
+
+```bash
+docker compose build --pull && docker compose up -d
+```
+
+the same caching trap as [cloudflared](#keeping-cloudflared-up-to-date).
+
 ### Before a big update
 
 Both volumes are worth a snapshot first:
