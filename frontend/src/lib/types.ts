@@ -921,3 +921,83 @@ export interface SalesReport {
   channels: SalesChannel[]
   open_orders: SalesOpenOrder[]
 }
+
+/** One thing to make, however many orders are waiting for it.
+ *
+ * The row is a product and a variation rather than an order line, because a
+ * variation can print a different file entirely and two variations of one
+ * product are two different things to make. */
+export interface ProductionItem {
+  product_id: string
+  variation_id: string | null
+  sku: string
+  name: string
+  variation_label: string | null
+  fulfillment: string | null
+  /** What one plate yields, when a file says. Null when nothing can print it. */
+  units_per_plate: number | null
+  printable: boolean
+  units_needed: number
+  /** Units a live plate already promises — pending, queued, printing or done. */
+  units_covered: number
+  /** The number to act on: needed less covered, never below zero. */
+  units_outstanding: number
+  plates_outstanding: number
+  order_count: number
+  /** When the longest-waiting order behind this row was placed. */
+  waiting_since: string | null
+  stage: 'blocked' | 'to_plan' | 'to_send' | 'on_a_machine'
+  stage_label: string
+  jobs: Record<string, number>
+  orders: {
+    order_id: string
+    order_number: string
+    source: string
+    buyer_name: string | null
+    placed_at: string | null
+    status: string
+    line_id: string
+    line_state: string
+    units: number
+    /** A component made for a bundle, not what the buyer named. */
+    for_bundle: boolean
+    note: string | null
+  }[]
+}
+
+export interface ProductionList {
+  items: ProductionItem[]
+  /** The subset that cannot be made at all, for a count that does not lie. */
+  blocked: ProductionItem[]
+  unmatched: {
+    line_id: string
+    order_id: string
+    order_number: string
+    placed_at: string | null
+    sku: string | null
+    title: string | null
+    units: number
+  }[]
+  assembly: {
+    line_id: string
+    order_id: string
+    order_number: string
+    placed_at: string | null
+    sku: string | null
+    name: string | null
+    quantity: number
+    components_ready: number
+    components_total: number
+    ready: boolean
+  }[]
+  totals: {
+    items: number
+    units_needed: number
+    units_outstanding: number
+    plates_to_send: number
+    plates_on_machines: number
+    blocked: number
+    orders: number
+  }
+  generated_at: string
+}

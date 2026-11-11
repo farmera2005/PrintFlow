@@ -388,12 +388,24 @@ class TestWhatIsStillInTheShop:
 # --------------------------------------------------------------------------
 
 
+def _recent() -> datetime:
+    """A sale early in the current month, wherever the calendar is.
+
+    These tests go through the API, which has no `today` to pass, so they
+    report on the real one — and an order pinned to a fixed date silently
+    falls out of the window as the months go by, taking the assertions with
+    it. Dated here instead, they keep testing what they were written to test.
+    """
+    now = datetime.now(timezone.utc)
+    return now.replace(day=2, hour=15, minute=0, second=0, microsecond=0)
+
+
 class TestTheApi:
     async def test_a_report_comes_back_whole(self, db, signed_in):
         await _order(
             db,
             number="1",
-            placed=datetime(2026, 9, 3, 15, tzinfo=timezone.utc),
+            placed=_recent(),
             revenue=Decimal("42.85"),
         )
         await db.commit()
@@ -422,7 +434,7 @@ class TestTheApi:
 
     async def test_the_open_list_can_be_asked_for_or_not(self, db, signed_in):
         await _order(
-            db, number="1", placed=datetime(2026, 9, 3, tzinfo=timezone.utc),
+            db, number="1", placed=_recent(),
             status="new", revenue=Decimal("10.00"),
         )
         await db.commit()
@@ -436,7 +448,7 @@ class TestTheApi:
         await _order(
             db,
             number="1",
-            placed=datetime(2026, 9, 3, 15, tzinfo=timezone.utc),
+            placed=_recent(),
             revenue=Decimal("42.85"),
             etsy_fees=Decimal("2.30"),
             processing_fees=Decimal("1.54"),

@@ -11,6 +11,7 @@ import Calculator from './pages/Calculator'
 import Maintenance from './pages/Maintenance'
 import Manufacturing from './pages/Manufacturing'
 import Sales from './pages/Sales'
+import ToMake from './pages/ToMake'
 import Settings from './pages/Settings'
 import SyncLog from './pages/SyncLog'
 import { api } from './lib/api'
@@ -69,6 +70,7 @@ export default function App() {
         <Route path="/" element={<Board />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/products" element={<Products />} />
+        <Route path="/to-make" element={<ToMake />} />
         <Route path="/printers" element={<Printers />} />
         {/* The flat queue was replaced by the farm view; anything
             bookmarked still lands somewhere useful. */}

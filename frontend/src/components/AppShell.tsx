@@ -15,6 +15,7 @@ import {
   OrdersIcon,
   ProductsIcon,
   SalesIcon,
+  ToMakeIcon,
   SettingsIcon,
 } from './NavIcons'
 import { Alert, Button, cx } from './ui'
@@ -23,6 +24,7 @@ const NAV = [
   { to: '/', label: 'Board', end: true, Icon: BoardIcon },
   { to: '/orders', label: 'Orders', Icon: OrdersIcon },
   { to: '/products', label: 'Products', Icon: ProductsIcon },
+  { to: '/to-make', label: 'To Make', Icon: ToMakeIcon },
   { to: '/printers', label: 'Printers', Icon: PrinterIcon },
   { to: '/maintenance', label: 'Maintenance', Icon: MaintenanceIcon },
   { to: '/manufacturing', label: 'Manufacturing', Icon: ManufacturingIcon },

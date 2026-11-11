@@ -98,6 +98,20 @@ export function ActivityIcon(props: IconProps) {
   )
 }
 
+/** A checklist: the tab is a list of things to work through. */
+export function ToMakeIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 6h11" />
+      <path d="M9 12h11" />
+      <path d="M9 18h11" />
+      <path d="M4 6l1.2 1.2L7.5 4.8" />
+      <path d="M4 12h2" />
+      <path d="M4 18h2" />
+    </Svg>
+  )
+}
+
 /** Bars of different heights: what the tab draws, and what it is for. */
 export function SalesIcon(props: IconProps) {
   return (

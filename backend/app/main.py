@@ -25,6 +25,7 @@ from .routers import (
     orders_router,
     print_jobs_router,
     printers_router,
+    production_router,
     products_router,
     sales_router,
     security_router,
@@ -92,6 +93,7 @@ app.include_router(orders_router.router)
 app.include_router(sales_router.router)
 app.include_router(print_jobs_router.router)
 app.include_router(printers_router.router)
+app.include_router(production_router.router)
 app.include_router(system_router.router)
 
 
