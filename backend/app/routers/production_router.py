@@ -37,9 +37,8 @@ async def download_production(
 ) -> Response:
     """The same list, for a clipboard on the shop floor.
 
-    One line per thing to make, with the orders it is for spelled out — the
-    printed page has no expandable rows, and "which orders is this for" is the
-    question somebody standing at a machine actually has.
+    One line per thing to make and how many of it — the list somebody carries
+    to a machine, not a report about orders.
     """
     found = await production.to_make(session)
     buffer = io.StringIO()
@@ -51,12 +50,11 @@ async def download_production(
             "Variation",
             "To make",
             "Covered",
-            "Outstanding",
+            "Needed",
             "Per plate",
             "Plates",
             "Waiting since",
             "Status",
-            "Orders",
         ]
     )
     for row in found["items"]:
@@ -65,16 +63,13 @@ async def download_production(
                 row["sku"],
                 row["name"],
                 row["variation_label"] or "",
-                row["units_needed"],
-                row["units_covered"],
                 row["units_outstanding"],
+                row["units_covered"],
+                row["units_needed"],
                 row["units_per_plate"] or "",
                 row["plates_outstanding"] or "",
                 _day(row["waiting_since"]),
                 row["stage_label"],
-                " ".join(
-                    sorted({str(entry["order_number"]) for entry in row["orders"]})
-                ),
             ]
         )
 
@@ -89,9 +84,8 @@ async def download_production(
                 line["units"],
                 "",
                 "",
-                _day(line["placed_at"]),
+                _day(line["waiting_since"]),
                 "No product matched",
-                line["order_number"],
             ]
         )
 
@@ -101,16 +95,15 @@ async def download_production(
                 waiting["sku"] or "",
                 waiting["name"] or "",
                 "",
+                waiting["ready"],
+                "",
                 waiting["quantity"],
                 "",
                 "",
-                "",
-                "",
-                _day(waiting["placed_at"]),
+                _day(waiting["waiting_since"]),
                 "Assemble"
-                if waiting["ready"]
-                else f"Assemble ({waiting['components_ready']}/{waiting['components_total']} parts)",
-                waiting["order_number"],
+                if not waiting["waiting_on_parts"]
+                else f"Assemble ({waiting['waiting_on_parts']} still waiting on parts)",
             ]
         )
 

@@ -1,31 +1,31 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import { SOURCE_CLASSES, SOURCE_LABELS, formatDateTime } from '../lib/format'
-import type { OrderSource, ProductionList, ProductionItem } from '../lib/types'
-import OrderDrawer from '../components/OrderDrawer'
+import type { ProductionList } from '../lib/types'
 import { Alert, Badge, Button, Card, EmptyState, Spinner, cx } from '../components/ui'
 
-/** Everything the shop still has to make, in one list.
+/** Everything the shop still has to make, as a list of parts.
  *
  * PrintFlow already knew all of this, scattered: the board knows which orders
  * are open, each order knows which of its lines are short, the Printers tab
  * knows what is on a machine. What nobody could see was the shape a print
- * shop actually works to — *one part, however many orders want it*. Six
- * orders each wanting one bracket is one plate's work, and finding that out
- * meant opening six orders.
+ * shop actually works to — *one part, and how many of it*. Six orders each
+ * wanting one bracket is six brackets and one plate's work, and finding that
+ * out meant opening six orders.
  *
- * So the rows are things to make rather than orders, and the orders live
- * underneath them. Three things follow from that and are worth not undoing:
+ * So there are no orders on this screen. A part does not become several
+ * things to make because several people bought it, and a bench does not care
+ * whose it is: the row is the part, the number is how many, and that is the
+ * whole list. Three things follow and are worth not undoing:
  *
- * **Outstanding is the number, not needed.** Units a live plate already
- * covers are somebody else's problem — the machine's. What is left is what
- * has to be started.
+ * **To make is what is left, not what was ordered.** Units a live plate
+ * already covers are the machine's business. What is left is what has to be
+ * started, and it is the number in bold.
  *
- * **Oldest first.** Not biggest, not alphabetical. The part that has kept an
- * order waiting longest is the one to put on next.
+ * **Longest wait first.** Not biggest, not alphabetical. The part that has
+ * kept an order waiting longest is the one to put on next.
  *
  * **What cannot be made is on the list too.** A product with no print file
- * and a line nothing matched are both real work that cannot start, and a
+ * and a listing nothing matched are both real work that cannot start, and a
  * screen that only counted what it understood would under-report the day.
  */
 
@@ -58,7 +58,9 @@ function Tile({
   )
 }
 
-/** How long something has been waiting, in the words somebody would use. */
+/** How long the oldest order wanting this has waited, in the words somebody
+ *  would use. The orders themselves are not on this screen; how long they
+ *  have been waiting is still the reason one part goes on before another. */
 function waitedFor(iso: string | null): string {
   if (!iso) return '—'
   const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000)
@@ -67,62 +69,11 @@ function waitedFor(iso: string | null): string {
   return `${days} days`
 }
 
-/** The orders behind one row, which is the answer to "who is this for". */
-function Behind({
-  item,
-  onOpenOrder,
-}: {
-  item: ProductionItem
-  onOpenOrder: (id: string) => void
-}) {
-  return (
-    <tr className="bg-ink-50/60">
-      <td colSpan={7} className="px-3 py-2">
-        <ul className="space-y-1">
-          {item.orders.map((entry) => (
-            <li key={entry.line_id} className="flex flex-wrap items-center gap-2 text-xs">
-              <button
-                type="button"
-                className="font-mono font-semibold text-ink-900 underline"
-                onClick={() => onOpenOrder(entry.order_id)}
-              >
-                #{entry.order_number}
-              </button>
-              <Badge className={SOURCE_CLASSES[entry.source as OrderSource]}>
-                {SOURCE_LABELS[entry.source as OrderSource]}
-              </Badge>
-              <span className="text-ink-600">{entry.buyer_name ?? 'Unknown buyer'}</span>
-              {entry.for_bundle ? (
-                <Badge className="bg-violet-100 text-violet-800 ring-violet-300">
-                  part of a bundle
-                </Badge>
-              ) : null}
-              <span className="ml-auto text-ink-500">
-                {entry.placed_at ? formatDateTime(entry.placed_at) : '—'}
-              </span>
-              <span className="w-16 text-right font-medium tabular-nums text-ink-800">
-                {entry.units} ×
-              </span>
-            </li>
-          ))}
-        </ul>
-        {item.orders.some((entry) => entry.note) ? (
-          <p className="mt-2 text-xs text-amber-800">
-            {item.orders.find((entry) => entry.note)?.note}
-          </p>
-        ) : null}
-      </td>
-    </tr>
-  )
-}
-
 export default function ToMake() {
   const [list, setList] = useState<ProductionList | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [openRow, setOpenRow] = useState<string | null>(null)
-  const [openOrderId, setOpenOrderId] = useState<string | null>(null)
   const [hideCovered, setHideCovered] = useState(true)
 
   const load = useCallback(async () => {
@@ -137,6 +88,8 @@ export default function ToMake() {
   useEffect(() => {
     load()
   }, [load])
+
+  const totals = list?.totals
 
   const send = async () => {
     setBusy(true)
@@ -175,7 +128,6 @@ export default function ToMake() {
     }
   }
 
-  const totals = list?.totals
   // Rows whose live plates already cover them are the machine's business, not
   // the bench's — shown on request rather than by default.
   const rows = (list?.items ?? []).filter(
@@ -184,7 +136,7 @@ export default function ToMake() {
 
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
-      <div className="mx-auto max-w-5xl space-y-4">
+      <div className="mx-auto max-w-4xl space-y-4">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold text-ink-900">To make</h1>
           <span className="text-sm text-ink-500">
@@ -230,7 +182,7 @@ export default function ToMake() {
               <Tile
                 label="Units to make"
                 value={totals!.units_outstanding}
-                hint={`${totals!.items} item${totals!.items === 1 ? '' : 's'} across ${
+                hint={`${totals!.items} part${totals!.items === 1 ? '' : 's'}, for ${
                   totals!.orders
                 } order${totals!.orders === 1 ? '' : 's'}`}
               />
@@ -258,10 +210,8 @@ export default function ToMake() {
 
             <Card className="overflow-hidden">
               <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                <h2 className="text-sm font-semibold text-ink-800">The list</h2>
-                <span className="text-xs text-ink-500">
-                  Longest wait first. A row opens for the orders behind it.
-                </span>
+                <h2 className="text-sm font-semibold text-ink-800">Parts to print</h2>
+                <span className="text-xs text-ink-500">Longest wait first.</span>
               </div>
 
               {rows.length === 0 ? (
@@ -277,87 +227,68 @@ export default function ToMake() {
                 />
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[42rem] text-sm">
+                  <table className="w-full min-w-[34rem] text-sm">
                     <thead>
                       <tr className="text-left text-xs uppercase tracking-wide text-ink-500">
-                        <th className="px-3 py-2 font-medium">Item</th>
+                        <th className="px-3 py-2 font-medium">Part</th>
                         <th className="px-3 py-2 text-right font-medium">To make</th>
                         <th className="px-3 py-2 text-right font-medium">Plates</th>
-                        <th className="px-3 py-2 text-right font-medium">Orders</th>
                         <th className="px-3 py-2 text-right font-medium">Waiting</th>
                         <th className="px-3 py-2 font-medium">Status</th>
-                        <th className="w-6 px-3 py-2" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-200">
-                      {rows.map((item) => {
-                        const key = `${item.product_id}:${item.variation_id ?? ''}`
-                        return (
-                          <Fragment key={key}>
-                            <tr
-                              role="button"
-                              tabIndex={0}
-                              onClick={() =>
-                                setOpenRow((was) => (was === key ? null : key))
-                              }
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                  event.preventDefault()
-                                  setOpenRow((was) => (was === key ? null : key))
-                                }
-                              }}
-                              className="cursor-pointer text-ink-700 hover:bg-ink-50"
-                            >
-                              <td className="px-3 py-2">
-                                <span className="font-mono text-xs text-ink-500">
-                                  {item.sku}
-                                </span>
-                                <span className="ml-2 font-medium text-ink-900">
-                                  {item.name}
-                                </span>
-                                {item.variation_label ? (
-                                  <span className="ml-1.5 text-xs text-ink-500">
-                                    · {item.variation_label}
-                                  </span>
-                                ) : null}
-                              </td>
-                              <td className="px-3 py-2 text-right font-semibold tabular-nums text-ink-900">
-                                {item.units_outstanding}
-                                {item.units_covered ? (
-                                  <span className="ml-1 text-xs font-normal text-ink-400">
-                                    of {item.units_needed}
-                                  </span>
-                                ) : null}
-                              </td>
-                              <td className="px-3 py-2 text-right tabular-nums">
-                                {item.plates_outstanding || '—'}
-                                {item.units_per_plate && item.units_per_plate > 1 ? (
-                                  <span className="ml-1 text-xs text-ink-400">
-                                    @{item.units_per_plate}
-                                  </span>
-                                ) : null}
-                              </td>
-                              <td className="px-3 py-2 text-right tabular-nums">
-                                {item.order_count}
-                              </td>
-                              <td className="px-3 py-2 text-right text-xs text-ink-600">
-                                {waitedFor(item.waiting_since)}
-                              </td>
-                              <td className="px-3 py-2">
-                                <Badge className={STAGE_CLASSES[item.stage]}>
-                                  {item.stage_label}
-                                </Badge>
-                              </td>
-                              <td className="px-3 py-2 text-xs text-ink-400">
-                                {openRow === key ? '▾' : '▸'}
-                              </td>
-                            </tr>
-                            {openRow === key ? (
-                              <Behind item={item} onOpenOrder={setOpenOrderId} />
+                      {rows.map((item) => (
+                        <tr
+                          key={`${item.product_id}:${item.variation_id ?? ''}`}
+                          className="text-ink-700"
+                        >
+                          <td className="px-3 py-2">
+                            <span className="font-mono text-xs text-ink-500">
+                              {item.sku}
+                            </span>
+                            <span className="ml-2 font-medium text-ink-900">
+                              {item.name}
+                            </span>
+                            {item.variation_label ? (
+                              <span className="ml-1.5 text-xs text-ink-500">
+                                · {item.variation_label}
+                              </span>
                             ) : null}
-                          </Fragment>
-                        )
-                      })}
+                            {item.for_bundle ? (
+                              <span className="ml-1.5 text-xs text-ink-400">
+                                · goes into a bundle
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <span className="text-base font-semibold tabular-nums text-ink-900">
+                              {item.units_outstanding}
+                            </span>
+                            {item.units_covered ? (
+                              <span className="ml-1 text-xs font-normal text-ink-400">
+                                of {item.units_needed}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {item.plates_outstanding || '—'}
+                            {item.units_per_plate && item.units_per_plate > 1 ? (
+                              <span className="ml-1 text-xs text-ink-400">
+                                @{item.units_per_plate}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 text-right text-xs text-ink-600">
+                            {waitedFor(item.waiting_since)}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge className={STAGE_CLASSES[item.stage]}>
+                              {item.stage_label}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -369,43 +300,30 @@ export default function ToMake() {
                 <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
                   <h2 className="text-sm font-semibold text-ink-800">To assemble</h2>
                   <span className="text-xs text-ink-500">
-                    Bundles waiting to be put together. Tick them off in the order.
+                    Bundles whose parts are made. Tick each one off in its order.
                   </span>
                 </div>
                 <div className="divide-y divide-ink-200">
                   {list.assembly.map((waiting) => (
                     <div
-                      key={waiting.line_id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setOpenOrderId(waiting.order_id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          setOpenOrderId(waiting.order_id)
-                        }
-                      }}
-                      className="flex w-full cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-left hover:bg-ink-50"
+                      key={waiting.sku ?? waiting.name ?? 'bundle'}
+                      className="flex flex-wrap items-center gap-2 px-3 py-2"
                     >
-                      <span className="font-mono text-xs font-semibold text-ink-900">
-                        #{waiting.order_number}
+                      <span className="text-base font-semibold tabular-nums text-ink-900">
+                        {waiting.ready}
                       </span>
-                      <span className="text-sm text-ink-800">
-                        {waiting.quantity} × {waiting.name}
+                      <span className="text-sm text-ink-800">× {waiting.name}</span>
+                      <span className="font-mono text-xs text-ink-500">
+                        {waiting.sku}
                       </span>
-                      <span className="text-xs text-ink-500">{waiting.sku}</span>
-                      <span className="ml-auto text-xs text-ink-500">
-                        {waitedFor(waiting.placed_at)}
-                      </span>
-                      {waiting.ready ? (
-                        <Badge className="bg-emerald-100 text-emerald-800 ring-emerald-300">
-                          parts ready
-                        </Badge>
-                      ) : (
+                      {waiting.waiting_on_parts ? (
                         <Badge className="bg-slate-100 text-slate-700 ring-slate-300">
-                          {waiting.components_ready}/{waiting.components_total} parts made
+                          {waiting.waiting_on_parts} more still waiting on parts
                         </Badge>
-                      )}
+                      ) : null}
+                      <span className="ml-auto text-xs text-ink-500">
+                        {waitedFor(waiting.waiting_since)}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -419,26 +337,18 @@ export default function ToMake() {
                     Waiting on a product
                   </h2>
                   <span className="text-xs text-ink-500">
-                    Nothing says what these are, so nothing can be made for them.
+                    Nothing says what these are, so nothing can be made for them. Link
+                    them on the Products tab.
                   </span>
                 </div>
                 <div className="divide-y divide-ink-200">
                   {list.unmatched.map((line) => (
                     <div
-                      key={line.line_id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setOpenOrderId(line.order_id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          setOpenOrderId(line.order_id)
-                        }
-                      }}
-                      className="flex w-full cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-left hover:bg-ink-50"
+                      key={`${line.sku ?? ''}:${line.title ?? ''}`}
+                      className="flex flex-wrap items-center gap-2 px-3 py-2"
                     >
-                      <span className="font-mono text-xs font-semibold text-ink-900">
-                        #{line.order_number}
+                      <span className="text-base font-semibold tabular-nums text-ink-900">
+                        {line.units}
                       </span>
                       <span className="font-mono text-xs text-ink-500">
                         {line.sku ?? 'no code'}
@@ -447,10 +357,7 @@ export default function ToMake() {
                         {line.title ?? 'Unknown item'}
                       </span>
                       <span className="text-xs text-ink-500">
-                        {waitedFor(line.placed_at)}
-                      </span>
-                      <span className="w-10 text-right text-sm tabular-nums text-ink-800">
-                        {line.units} ×
+                        {waitedFor(line.waiting_since)}
                       </span>
                     </div>
                   ))}
@@ -460,14 +367,6 @@ export default function ToMake() {
           </>
         )}
       </div>
-
-      {openOrderId ? (
-        <OrderDrawer
-          orderId={openOrderId}
-          onClose={() => setOpenOrderId(null)}
-          onChanged={load}
-        />
-      ) : null}
     </div>
   )
 }

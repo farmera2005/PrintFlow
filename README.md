@@ -660,19 +660,19 @@ files would sit on disk belonging to nobody.
 
 The board answers "where is this order", and the Printers tab answers "what is
 on this machine". Neither answers the question somebody standing at a printer
-actually has: **what should I put on next?** **To Make** does, by grouping the
-work the other way round — by the thing being made rather than by who ordered
-it.
+actually has: **what should I put on next, and how many?** **To Make** does,
+by listing the work as *parts* rather than as orders.
 
-Five orders each wanting one bracket is one row reading *7 to make, 2 plates,
-5 orders*, and it used to take opening five orders to find that out. Clicking
-the row opens the orders behind it, oldest first, each one a click from its
-drawer.
+Five orders each wanting one bracket is one line reading *Cable bracket · 7 to
+make · 2 plates @4*. There are no order numbers on the screen at all: a part
+does not become several things to make because several people bought it, and a
+bench does not care whose it is. The row is the part, the number is how many,
+and that is the list.
 
 **The number it leads with is what is not in hand yet.** A line's shortfall is
-covered by plates, and a plate can be planned, sent, printing or done — all of
-which are promises somebody has already made. *To make* is the shortfall less
-those promises, so a part with every plate queued drops to zero and out of the
+covered by plates, and a plate can be planned, sent, printing or done — all
+promises somebody has already made. *To make* is the shortfall less those
+promises, so a part with every plate queued drops to zero and out of the
 default view. A **failed** plate covers nothing, so its units come straight
 back onto the list rather than sitting in a queue looking finished.
 
@@ -691,21 +691,28 @@ screen that only counted what it understood would under-report the day:
 
 * **Cannot be made yet** — a product with no print file. Real work that cannot
   start, named with what is wrong with it.
-* **Waiting on a product** — a line nothing matched. It contributes to no
-  total, which is exactly why it needs its own line rather than silence.
-* **To assemble** — bundles whose components exist and which now need putting
-  together. Assembly is production too, and it is invisible everywhere else
-  unless somebody opens the order. A bundle still missing a part says so
-  rather than claiming a bench.
+* **Waiting on a product** — a listing nothing matched, with how many of it
+  were sold. It contributes to no total, which is exactly why it needs its own
+  line rather than silence; the same unlinked listing sold six times is one
+  thing to go and fix, not six.
+* **To assemble** — bundles whose components exist and now need putting
+  together, counted the same way: *3 × Gift set* is the job. Ones still
+  missing a part are counted separately rather than added in, because a
+  half-made bundle is a bench occupied by something that cannot be finished.
 
 Units coming off the shelf are not here: those are picked, not produced.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
-order anywhere else on the board still wants its parts.
+order anywhere else on the board still wants its parts. A part that goes into
+a bundle says so, since somebody picking the shelf will not find it on an
+order by name.
 
 **Send *n* plates** is the same dispatch the Printers tab has, put where the
 unsent plates are actually visible. **Download CSV** is the same list for a
-clipboard — one line per thing to make with its order numbers spelled out,
-since a printed page has no rows to expand.
+clipboard — part, quantity, plates and status, with nothing to expand.
+
+Which orders are waiting is deliberately a question for the Orders tab and the
+board. The count of them is on the first tile, so the list says how much of the
+shop is waiting without becoming a list of orders.
 
 Not to be confused with **Manufacturing**, which is the made-items sheets that
 go to QuickBooks *after* things are made. To Make is the work in front of you;

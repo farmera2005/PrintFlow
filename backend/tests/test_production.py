@@ -1,11 +1,12 @@
 """What still has to be made, gathered across every open order.
 
-The claim this list makes is that it groups by *what is made* rather than by
-who ordered it: six orders wanting one bracket each are one row of six, and
-one plate's work. Everything here is about that regrouping being right — the
-same part from different orders adding up, two variations of one product
-staying apart because they print different files, and units a live plate
-already covers dropping out of the number somebody is about to act on.
+The claim this list makes is that it is a list of *parts*, not of orders: six
+orders wanting one bracket each are one row of six, and one plate's work. No
+order appears anywhere in it — a part does not become several things to make
+because several people bought it. Everything here is about that regrouping
+being right: the same part from different orders adding up, two variations of
+one product staying apart because they print different files, and units a
+live plate already covers dropping out of the number somebody acts on.
 
 The other half is what a naive version would miss and quietly under-report: a
 line nothing matched, a product with no print file, a plate that failed, and
@@ -125,7 +126,9 @@ class TestOnePartManyOrders:
         # Six units at four to a plate is two plates, not six.
         assert row["plates_outstanding"] == 2
 
-    async def test_the_orders_behind_a_row_are_oldest_first(self, db):
+    async def test_a_part_carries_no_orders_only_their_count(self, db):
+        """The regrouping is the feature: the row is the part, and which
+        orders wanted it is a question for the order screens."""
         part = await _product(db)
         await _file(db, part)
         for number, days in (("9001", 1), ("9002", 9), ("9003", 4)):
@@ -134,8 +137,10 @@ class TestOnePartManyOrders:
         await db.commit()
 
         row = (await production.to_make(db))["items"][0]
-        assert [entry["order_number"] for entry in row["orders"]] == ["9002", "9003", "9001"]
-        # And the row is dated by the one that has waited longest.
+        assert "orders" not in row
+        assert (row["units_needed"], row["order_count"]) == (6, 3)
+        # Dated by the order that has waited longest, which is what sorts the
+        # list even though the order itself is not on it.
         assert row["waiting_since"] == NOW - timedelta(days=9)
 
     async def test_the_list_itself_leads_with_what_has_waited_longest(self, db):
@@ -349,7 +354,21 @@ class TestLinesNobodyCanMake:
         assert found["items"] == []
         assert len(found["unmatched"]) == 1
         assert found["unmatched"][0]["sku"] == "MYSTERY-9"
-        assert found["unmatched"][0]["order_number"] == "9001"
+        assert found["unmatched"][0]["units"] == 2
+
+    async def test_the_same_unlinked_listing_is_one_thing_to_fix(self, db):
+        """Sold six times, it is still one listing to go and link."""
+        for index in range(3):
+            order = await _order(db, number=f"920{index}", days_ago=index)
+            await _line(
+                db, order, None, to_print=0, state="unmatched", sku_raw="MYSTERY-9",
+                title="Something nobody linked", quantity=2,
+            )
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert len(found["unmatched"]) == 1
+        assert (found["unmatched"][0]["units"], found["unmatched"][0]["order_count"]) == (6, 3)
 
     async def test_a_matched_line_is_not_in_the_unmatched_list(self, db):
         part = await _product(db)
@@ -374,8 +393,8 @@ class TestAssembly:
         found = await production.to_make(db)
         assert len(found["assembly"]) == 1
         waiting = found["assembly"][0]
-        assert (waiting["sku"], waiting["ready"]) == ("GIFT-SET", True)
-        assert (waiting["components_ready"], waiting["components_total"]) == (1, 1)
+        assert (waiting["sku"], waiting["ready"]) == ("GIFT-SET", 1)
+        assert waiting["waiting_on_parts"] == 0
 
     async def test_a_bundle_still_missing_a_part_is_not_ready(self, db):
         """A half-made bundle on an assembly list is a bench occupied by
@@ -392,8 +411,9 @@ class TestAssembly:
 
         found = await production.to_make(db)
         waiting = found["assembly"][0]
-        assert waiting["ready"] is False
-        assert (waiting["components_ready"], waiting["components_total"]) == (1, 2)
+        # Counted apart: a half-made bundle is a bench occupied by something
+        # that cannot be finished, not a job somebody can pick up.
+        assert (waiting["ready"], waiting["waiting_on_parts"]) == (0, 1)
         # And the part it is still missing is on the make list.
         assert [row["sku"] for row in found["items"]] == ["PART-Y"]
 
@@ -410,7 +430,7 @@ class TestAssembly:
 
         assert (await production.to_make(db))["assembly"] == []
 
-    async def test_a_component_says_it_is_for_a_bundle(self, db):
+    async def test_a_part_says_when_it_goes_into_a_bundle(self, db):
         """Somebody picking the shelf will not find it on the order by name."""
         bundle = await _product(db, sku="GIFT-SET", fulfillment="bundle")
         part = await _product(db)
@@ -421,7 +441,26 @@ class TestAssembly:
         await db.commit()
 
         row = (await production.to_make(db))["items"][0]
-        assert row["orders"][0]["for_bundle"] is True
+        assert row["for_bundle"] is True
+
+    async def test_a_bundle_sold_to_three_people_is_three_to_assemble(self, db):
+        """Counted by bundle rather than by order: "three gift sets to put
+        together" is the job."""
+        bundle = await _product(db, sku="GIFT-SET", fulfillment="bundle")
+        part = await _product(db)
+        for index in range(3):
+            order = await _order(db, number=f"930{index}", days_ago=index)
+            parent = await _line(
+                db, order, bundle, to_print=0, state="exploded", quantity=1
+            )
+            await _line(
+                db, order, part, to_print=1, state="printed", parent_line_id=parent.id
+            )
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert len(found["assembly"]) == 1
+        assert (found["assembly"][0]["ready"], found["assembly"][0]["order_count"]) == (3, 3)
 
 
 class TestTotals:
@@ -469,7 +508,9 @@ class TestOverTheWire:
         body = response.json()
         assert body["totals"]["units_outstanding"] == 6
         assert body["items"][0]["sku"] == "PART-X"
-        assert body["items"][0]["orders"][0]["order_number"] == "9001"
+        assert body["items"][0]["units_outstanding"] == 6
+        # No order travels with a part, on the wire either.
+        assert "orders" not in body["items"][0]
 
     async def test_the_csv_is_the_same_list(self, db, signed_in):
         import csv
@@ -487,7 +528,9 @@ class TestOverTheWire:
         assert rows[0]["Code"] == "PART-X"
         assert rows[0]["To make"] == "6"
         assert rows[0]["Plates"] == "2"
-        assert rows[0]["Orders"] == "9001"
+        # The sheet somebody carries to a machine: parts and counts, no
+        # column of order numbers to read past.
+        assert "Orders" not in rows[0]
 
     async def test_it_takes_a_signed_in_user(self, db, client):
         assert (await client.get("/api/production")).status_code == 401

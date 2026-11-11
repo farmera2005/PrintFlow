@@ -227,7 +227,14 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
                 "printable": bool(plan),
                 "units_needed": 0,
                 "units_covered": 0,
-                "orders": [],
+                # Facts about the part, gathered from the lines that want it.
+                # The lines themselves are not kept: this is a list of things
+                # to make, and a part does not become several things to make
+                # because several people bought it.
+                "order_ids": set(),
+                "waiting_since": None,
+                "for_bundle": False,
+                "note": None,
                 "jobs": {
                     status: 0
                     for status in (
@@ -242,30 +249,20 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
             row["jobs"][status] += count
 
         order = line.order
-        row["orders"].append(
-            {
-                "order_id": order.id,
-                "order_number": order.order_number,
-                "source": order.source,
-                "buyer_name": order.buyer_name,
-                "placed_at": _when(order),
-                "status": order.status,
-                "line_id": line.id,
-                "line_state": line.state,
-                "units": line.qty_to_print,
-                # A component made for a bundle is worth saying out loud: it is
-                # not what the buyer ordered, and somebody picking the shelf
-                # will not find it on the order by name.
-                "for_bundle": line.parent_line_id is not None,
-                "note": line.stock_note,
-            }
-        )
+        row["order_ids"].add(order.id)
+        placed = _when(order)
+        if placed is not None and (
+            row["waiting_since"] is None or placed < row["waiting_since"]
+        ):
+            row["waiting_since"] = placed
+        # Worth saying when any of it is for a bundle: somebody picking the
+        # shelf will not find the part on an order by name.
+        row["for_bundle"] = row["for_bundle"] or line.parent_line_id is not None
+        row["note"] = row["note"] or line.stock_note
 
     made: list[dict[str, Any]] = []
     for row in rows.values():
-        row["orders"].sort(key=lambda entry: (entry["placed_at"] is None, entry["placed_at"]))
-        row["order_count"] = len({entry["order_id"] for entry in row["orders"]})
-        row["waiting_since"] = row["orders"][0]["placed_at"] if row["orders"] else None
+        row["order_count"] = len(row.pop("order_ids"))
         # The number the list leads with: units nobody has a live plate for.
         row["units_outstanding"] = max(row["units_needed"] - row["units_covered"], 0)
         row["plates_outstanding"] = (
@@ -292,7 +289,7 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         "blocked": [row for row in made if row["stage"] == BLOCKED],
         "unmatched": _unmatched(lines),
         "assembly": _assembly(lines),
-        "totals": _totals(made),
+        "totals": _totals(made, len({line.order_id for line in wanted})),
         "generated_at": datetime.now().astimezone(),
     }
 
@@ -308,7 +305,7 @@ def _stage(row: dict[str, Any]) -> str:
     return TO_PLAN
 
 
-def _totals(rows: list[dict[str, Any]]) -> dict[str, int]:
+def _totals(rows: list[dict[str, Any]], orders: int) -> dict[str, int]:
     return {
         "items": len(rows),
         "units_needed": sum(row["units_needed"] for row in rows),
@@ -318,38 +315,52 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, int]:
             row["jobs"][JOB_QUEUED] + row["jobs"][JOB_PRINTING] for row in rows
         ),
         "blocked": sum(1 for row in rows if row["stage"] == BLOCKED),
-        "orders": len(
-            {entry["order_id"] for row in rows for entry in row["orders"]}
-        ),
+        # How many orders are waiting on all of this. A count, not a
+        # breakdown: the list is about parts, and this is the one place the
+        # orders are worth a number at all.
+        "orders": orders,
     }
 
 
 def _unmatched(lines: list[OrderLine]) -> list[dict[str, Any]]:
-    """Lines nobody can make because nothing says what they are.
+    """Things nobody can make because nothing says what they are.
 
     They belong on this list precisely because they are *not* on the rest of
     it: a line with no product contributes nothing to any total, and a screen
     that only counted what it understood would quietly under-report the work.
+
+    Gathered by what the channel called them, the same way everything else
+    here is gathered: the same unlinked listing sold six times is one thing to
+    go and fix, not six.
     """
-    out = []
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
     for line in lines:
-        if line.product_id is not None or line.state in (LINE_CANCELLED, LINE_SHIPPED):
+        if line.product_id is not None or line.state != LINE_UNMATCHED:
             continue
-        if line.state != LINE_UNMATCHED:
-            continue
-        order = line.order
-        out.append(
-            {
-                "line_id": line.id,
-                "order_id": order.id,
-                "order_number": order.order_number,
-                "placed_at": _when(order),
+        key = (line.sku_raw or "", line.title or "")
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = {
                 "sku": line.sku_raw,
                 "title": line.title,
-                "units": line.quantity,
+                "units": 0,
+                "order_count": 0,
+                "waiting_since": None,
+                "order_ids": set(),
             }
-        )
-    out.sort(key=lambda entry: (entry["placed_at"] is None, entry["placed_at"]))
+        row["units"] += line.quantity
+        placed = _when(line.order)
+        if placed is not None and (
+            row["waiting_since"] is None or placed < row["waiting_since"]
+        ):
+            row["waiting_since"] = placed
+        row["order_ids"].add(line.order_id)
+
+    out = []
+    for row in rows.values():
+        row["order_count"] = len(row.pop("order_ids"))
+        out.append(row)
+    out.sort(key=lambda entry: (entry["waiting_since"] is None, entry["waiting_since"]))
     return out
 
 
@@ -359,43 +370,60 @@ def _assembly(lines: list[OrderLine]) -> list[dict[str, Any]]:
     Assembly is production too — it is the step between a pile of components
     and something that can be posted — and it is invisible everywhere else
     unless somebody opens the order.
+
+    Counted by bundle rather than by order, like the rest of the list: "four
+    gift sets to put together" is the job, and which four orders they are for
+    is a question for when one is finished and ticked off.
     """
     by_parent: dict[Any, list[OrderLine]] = {}
     for line in lines:
         if line.parent_line_id is not None:
             by_parent.setdefault(line.parent_line_id, []).append(line)
 
-    out = []
+    rows: dict[Any, dict[str, Any]] = {}
     for line in lines:
         children = by_parent.get(line.id)
         if not children or line.assembled_at is not None:
             continue
         if line.state in (LINE_CANCELLED, LINE_SHIPPED):
             continue
-        done = [child for child in children if child.state in MADE_STATES]
-        order = line.order
-        out.append(
-            {
-                "line_id": line.id,
-                "order_id": order.id,
-                "order_number": order.order_number,
-                "placed_at": _when(order),
+        key = line.product_id or (line.sku_raw or line.title)
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = {
+                "product_id": line.product_id,
                 "sku": line.product.sku if line.product else line.sku_raw,
                 "name": line.product.name if line.product else line.title,
-                "quantity": line.quantity,
-                "components_ready": len(done),
-                "components_total": len(children),
-                # Only when every part exists. A half-made bundle on an
-                # assembly list is a bench occupied by something that cannot
-                # be finished.
-                "ready": len(done) == len(children),
+                "quantity": 0,
+                # How many of them have every component made. The rest are a
+                # bench occupied by something that cannot be finished, so the
+                # two are counted apart rather than added together.
+                "ready": 0,
+                "waiting_on_parts": 0,
+                "order_count": 0,
+                "waiting_since": None,
+                "order_ids": set(),
             }
-        )
+        made = all(child.state in MADE_STATES for child in children)
+        row["quantity"] += line.quantity
+        row["ready" if made else "waiting_on_parts"] += line.quantity
+        placed = _when(line.order)
+        if placed is not None and (
+            row["waiting_since"] is None or placed < row["waiting_since"]
+        ):
+            row["waiting_since"] = placed
+        row["order_ids"].add(line.order_id)
+
+    out = []
+    for row in rows.values():
+        row["order_count"] = len(row.pop("order_ids"))
+        out.append(row)
+    # What can be finished now, first.
     out.sort(
         key=lambda entry: (
             not entry["ready"],
-            entry["placed_at"] is None,
-            entry["placed_at"],
+            entry["waiting_since"] is None,
+            entry["waiting_since"],
         )
     )
     return out

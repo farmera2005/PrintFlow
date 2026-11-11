@@ -922,11 +922,13 @@ export interface SalesReport {
   open_orders: SalesOpenOrder[]
 }
 
-/** One thing to make, however many orders are waiting for it.
+/** One part, and how many of it the shop still has to make.
  *
- * The row is a product and a variation rather than an order line, because a
- * variation can print a different file entirely and two variations of one
- * product are two different things to make. */
+ * A part and a variation rather than an order line, because a variation can
+ * print a different file entirely and two variations of one product are two
+ * different things to make. The orders behind it are deliberately not here:
+ * a part does not become several things to make because several people
+ * bought it. */
 export interface ProductionItem {
   product_id: string
   variation_id: string | null
@@ -943,26 +945,17 @@ export interface ProductionItem {
   /** The number to act on: needed less covered, never below zero. */
   units_outstanding: number
   plates_outstanding: number
+  /** How many orders are waiting on it — a count, not a breakdown. */
   order_count: number
-  /** When the longest-waiting order behind this row was placed. */
+  /** When the longest-waiting order behind this part was placed. */
   waiting_since: string | null
+  /** True when any of these go into a bundle: somebody picking the shelf
+   *  will not find the part on an order by name. */
+  for_bundle: boolean
+  note: string | null
   stage: 'blocked' | 'to_plan' | 'to_send' | 'on_a_machine'
   stage_label: string
   jobs: Record<string, number>
-  orders: {
-    order_id: string
-    order_number: string
-    source: string
-    buyer_name: string | null
-    placed_at: string | null
-    status: string
-    line_id: string
-    line_state: string
-    units: number
-    /** A component made for a bundle, not what the buyer named. */
-    for_bundle: boolean
-    note: string | null
-  }[]
 }
 
 export interface ProductionList {
@@ -970,25 +963,22 @@ export interface ProductionList {
   /** The subset that cannot be made at all, for a count that does not lie. */
   blocked: ProductionItem[]
   unmatched: {
-    line_id: string
-    order_id: string
-    order_number: string
-    placed_at: string | null
     sku: string | null
     title: string | null
     units: number
+    order_count: number
+    waiting_since: string | null
   }[]
   assembly: {
-    line_id: string
-    order_id: string
-    order_number: string
-    placed_at: string | null
+    product_id: string | null
     sku: string | null
     name: string | null
     quantity: number
-    components_ready: number
-    components_total: number
-    ready: boolean
+    /** How many have every component made and can be built now. */
+    ready: number
+    waiting_on_parts: number
+    order_count: number
+    waiting_since: string | null
   }[]
   totals: {
     items: number
