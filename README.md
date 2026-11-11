@@ -695,12 +695,19 @@ screen that only counted what it understood would under-report the day:
   were sold. It contributes to no total, which is exactly why it needs its own
   line rather than silence; the same unlinked listing sold six times is one
   thing to go and fix, not six.
-* **To assemble** — bundles whose components exist and now need putting
-  together, counted the same way: *3 × Gift set* is the job. Ones still
-  missing a part are counted separately rather than added in, because a
-  half-made bundle is a bench occupied by something that cannot be finished.
+* **To gather for assembly** — the components that go into bundles waiting to
+  be built, counted the same way the parts are: *6 × Cable bracket → Gift
+  set*, not *3 × Gift set*. Somebody assembling walks to the shelves, and
+  what they need there is the parts. **Anything coming off the shelf is on
+  this list too** — a stocked component was never printed, so it appears
+  nowhere else here, and it still has to be fetched. Components of bundles
+  that are still missing a part of their own are counted separately rather
+  than added in, because a half-made bundle is a bench occupied by something
+  that cannot be finished.
 
-Units coming off the shelf are not here: those are picked, not produced.
+Units coming off the shelf are not on the print list: those are picked, not
+produced — though the ones going into a bundle are on the gather list, because
+somebody still has to walk and find them.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
 order anywhere else on the board still wants its parts. A part that goes into
 a bundle says so, since somebody picking the shelf will not find it on an

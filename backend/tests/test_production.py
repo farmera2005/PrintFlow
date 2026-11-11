@@ -379,9 +379,9 @@ class TestLinesNobodyCanMake:
 
 
 class TestAssembly:
-    async def test_a_bundle_whose_parts_are_made_is_waiting_to_be_assembled(self, db):
-        """Assembly is production too, and it is invisible everywhere else
-        unless somebody opens the order."""
+    async def test_it_lists_the_components_rather_than_the_bundle(self, db):
+        """Somebody assembling walks to the shelves, and what they need there
+        is "two brackets", not "one gift set"."""
         bundle = await _product(db, sku="GIFT-SET", name="Gift set", fulfillment="bundle")
         part = await _product(db)
         db.add(BomLine(bundle_id=bundle.id, component_id=part.id, quantity=2))
@@ -392,9 +392,56 @@ class TestAssembly:
 
         found = await production.to_make(db)
         assert len(found["assembly"]) == 1
-        waiting = found["assembly"][0]
-        assert (waiting["sku"], waiting["ready"]) == ("GIFT-SET", 1)
-        assert waiting["waiting_on_parts"] == 0
+        gather = found["assembly"][0]
+        # The component, with how many to fetch — and never the bundle line.
+        assert (gather["sku"], gather["units"]) == ("PART-X", 2)
+        assert gather["units_waiting"] == 0
+        # The bundle rides along as what it is for, not as a row of its own.
+        assert gather["bundles"] == ["Gift set"]
+        assert {row["sku"] for row in found["assembly"]} == {"PART-X"}
+
+    async def test_components_add_up_across_bundles_and_orders(self, db):
+        """Three gift sets of two brackets each is one line reading six."""
+        bundle = await _product(db, sku="GIFT-SET", name="Gift set", fulfillment="bundle")
+        part = await _product(db)
+        knob = await _product(db, sku="KNOB-S", name="Small knob")
+        for index in range(3):
+            order = await _order(db, number=f"940{index}", days_ago=index)
+            parent = await _line(
+                db, order, bundle, to_print=0, state="exploded", quantity=1
+            )
+            await _line(
+                db, order, part, to_print=2, state="printed", parent_line_id=parent.id,
+                quantity=2,
+            )
+            await _line(
+                db, order, knob, to_print=1, state="printed", parent_line_id=parent.id,
+                quantity=1,
+            )
+        await db.commit()
+
+        gather = {row["sku"]: row for row in (await production.to_make(db))["assembly"]}
+        assert gather["PART-X"]["units"] == 6
+        assert gather["KNOB-S"]["units"] == 3
+        assert gather["PART-X"]["order_count"] == 3
+
+    async def test_a_component_off_the_shelf_is_on_the_gather_list(self, db):
+        """It was never printed, so it is on no other list here — and the
+        person assembling still has to go and find it."""
+        bundle = await _product(db, sku="GIFT-SET", name="Gift set", fulfillment="bundle")
+        printed = await _product(db)
+        stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
+        order = await _order(db, status="assembly")
+        parent = await _line(db, order, bundle, to_print=0, state="exploded", quantity=1)
+        await _line(db, order, printed, to_print=1, state="printed", parent_line_id=parent.id)
+        await _line(
+            db, order, stocked, to_print=0, state="allocated", quantity=4,
+            parent_line_id=parent.id,
+        )
+        await db.commit()
+
+        gather = {row["sku"]: row["units"] for row in (await production.to_make(db))["assembly"]}
+        assert gather == {"PART-X": 1, "TRINKET": 4}
 
     async def test_a_bundle_still_missing_a_part_is_not_ready(self, db):
         """A half-made bundle on an assembly list is a bench occupied by
@@ -410,10 +457,11 @@ class TestAssembly:
         await db.commit()
 
         found = await production.to_make(db)
-        waiting = found["assembly"][0]
+        gather = {row["sku"]: row for row in found["assembly"]}
         # Counted apart: a half-made bundle is a bench occupied by something
-        # that cannot be finished, not a job somebody can pick up.
-        assert (waiting["ready"], waiting["waiting_on_parts"]) == (0, 1)
+        # that cannot be finished, so its parts are not "to gather" yet.
+        assert gather["PART-X"]["units"] == 0
+        assert gather["PART-X"]["units_waiting"] == 1
         # And the part it is still missing is on the make list.
         assert [row["sku"] for row in found["items"]] == ["PART-Y"]
 
@@ -443,24 +491,22 @@ class TestAssembly:
         row = (await production.to_make(db))["items"][0]
         assert row["for_bundle"] is True
 
-    async def test_a_bundle_sold_to_three_people_is_three_to_assemble(self, db):
-        """Counted by bundle rather than by order: "three gift sets to put
-        together" is the job."""
+    async def test_a_cancelled_component_is_not_gathered(self, db):
         bundle = await _product(db, sku="GIFT-SET", fulfillment="bundle")
         part = await _product(db)
-        for index in range(3):
-            order = await _order(db, number=f"930{index}", days_ago=index)
-            parent = await _line(
-                db, order, bundle, to_print=0, state="exploded", quantity=1
-            )
-            await _line(
-                db, order, part, to_print=1, state="printed", parent_line_id=parent.id
-            )
+        dropped = await _product(db, sku="PART-Y")
+        order = await _order(db, status="assembly")
+        parent = await _line(db, order, bundle, to_print=0, state="exploded", quantity=1)
+        await _line(db, order, part, to_print=1, state="printed", parent_line_id=parent.id)
+        await _line(
+            db, order, dropped, to_print=0, state="cancelled", quantity=1,
+            parent_line_id=parent.id,
+        )
         await db.commit()
 
-        found = await production.to_make(db)
-        assert len(found["assembly"]) == 1
-        assert (found["assembly"][0]["ready"], found["assembly"][0]["order_count"]) == (3, 3)
+        assert [row["sku"] for row in (await production.to_make(db))["assembly"]] == [
+            "PART-X"
+        ]
 
 
 class TestTotals:

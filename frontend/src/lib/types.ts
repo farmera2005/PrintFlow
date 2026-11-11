@@ -969,14 +969,22 @@ export interface ProductionList {
     order_count: number
     waiting_since: string | null
   }[]
+  /** The components to gather for bundles waiting to be built — the parts,
+   *  not the bundles: somebody assembling walks to the shelves, and what they
+   *  need there is "six brackets", not "three gift sets". */
   assembly: {
     product_id: string | null
+    variation_id: string | null
     sku: string | null
     name: string | null
-    quantity: number
-    /** How many have every component made and can be built now. */
-    ready: number
-    waiting_on_parts: number
+    variation_label: string | null
+    fulfillment: string | null
+    /** Units to gather for the bundles that can be built now. */
+    units: number
+    /** Units belonging to bundles still waiting on a part of their own. */
+    units_waiting: number
+    /** What these go into, so a pile of parts has a job attached. */
+    bundles: string[]
     order_count: number
     waiting_since: string | null
   }[]

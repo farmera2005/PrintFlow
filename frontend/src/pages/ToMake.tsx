@@ -298,31 +298,42 @@ export default function ToMake() {
             {list.assembly.length ? (
               <Card className="overflow-hidden">
                 <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                  <h2 className="text-sm font-semibold text-ink-800">To assemble</h2>
+                  <h2 className="text-sm font-semibold text-ink-800">
+                    To gather for assembly
+                  </h2>
                   <span className="text-xs text-ink-500">
-                    Bundles whose parts are made. Tick each one off in its order.
+                    The parts that go into bundles waiting to be built — including
+                    anything coming off the shelf.
                   </span>
                 </div>
                 <div className="divide-y divide-ink-200">
-                  {list.assembly.map((waiting) => (
+                  {list.assembly.map((part) => (
                     <div
-                      key={waiting.sku ?? waiting.name ?? 'bundle'}
+                      key={`${part.product_id ?? part.sku}:${part.variation_id ?? ''}`}
                       className="flex flex-wrap items-center gap-2 px-3 py-2"
                     >
-                      <span className="text-base font-semibold tabular-nums text-ink-900">
-                        {waiting.ready}
+                      <span className="w-8 text-right text-base font-semibold tabular-nums text-ink-900">
+                        {part.units}
                       </span>
-                      <span className="text-sm text-ink-800">× {waiting.name}</span>
-                      <span className="font-mono text-xs text-ink-500">
-                        {waiting.sku}
+                      <span className="font-mono text-xs text-ink-500">{part.sku}</span>
+                      <span className="text-sm text-ink-800">{part.name}</span>
+                      {part.variation_label ? (
+                        <span className="text-xs text-ink-500">
+                          · {part.variation_label}
+                        </span>
+                      ) : null}
+                      {/* What it is being built into. A pile of parts with
+                          nothing to build is not a job either. */}
+                      <span className="text-xs text-ink-400">
+                        → {part.bundles.join(', ')}
                       </span>
-                      {waiting.waiting_on_parts ? (
+                      {part.units_waiting ? (
                         <Badge className="bg-slate-100 text-slate-700 ring-slate-300">
-                          {waiting.waiting_on_parts} more still waiting on parts
+                          {part.units_waiting} more once those bundles are printed
                         </Badge>
                       ) : null}
                       <span className="ml-auto text-xs text-ink-500">
-                        {waitedFor(waiting.waiting_since)}
+                        {waitedFor(part.waiting_since)}
                       </span>
                     </div>
                   ))}

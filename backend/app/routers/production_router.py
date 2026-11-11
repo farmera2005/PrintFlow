@@ -89,21 +89,19 @@ async def download_production(
             ]
         )
 
-    for waiting in found["assembly"]:
+    for part in found["assembly"]:
         writer.writerow(
             [
-                waiting["sku"] or "",
-                waiting["name"] or "",
+                part["sku"] or "",
+                part["name"] or "",
+                part["variation_label"] or "",
+                part["units"],
                 "",
-                waiting["ready"],
-                "",
-                waiting["quantity"],
+                part["units"] + part["units_waiting"],
                 "",
                 "",
-                _day(waiting["waiting_since"]),
-                "Assemble"
-                if not waiting["waiting_on_parts"]
-                else f"Assemble ({waiting['waiting_on_parts']} still waiting on parts)",
+                _day(part["waiting_since"]),
+                "Gather to assemble " + ", ".join(part["bundles"]),
             ]
         )
 
