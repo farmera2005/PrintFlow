@@ -295,19 +295,18 @@ export default function ToMake() {
               )}
             </Card>
 
-            {list.assembly.length ? (
+            {list.gather.length ? (
               <Card className="overflow-hidden">
                 <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                  <h2 className="text-sm font-semibold text-ink-800">
-                    To gather for assembly
-                  </h2>
+                  <h2 className="text-sm font-semibold text-ink-800">To gather</h2>
                   <span className="text-xs text-ink-500">
-                    The parts that go into bundles waiting to be built — including
-                    anything coming off the shelf.
+                    Off the shelf rather than off a printer: the parts that go into
+                    bundles waiting to be built, and whatever an order takes from
+                    stock on its own.
                   </span>
                 </div>
                 <div className="divide-y divide-ink-200">
-                  {list.assembly.map((part) => (
+                  {list.gather.map((part) => (
                     <div
                       key={`${part.product_id ?? part.sku}:${part.variation_id ?? ''}`}
                       className="flex flex-wrap items-center gap-2 px-3 py-2"
@@ -323,10 +322,14 @@ export default function ToMake() {
                         </span>
                       ) : null}
                       {/* What it is being built into. A pile of parts with
-                          nothing to build is not a job either. */}
-                      <span className="text-xs text-ink-400">
-                        → {part.bundles.join(', ')}
-                      </span>
+                          nothing to build is not a job either — and an item
+                          that is not part of a bundle simply is the thing,
+                          so it says nothing. */}
+                      {part.bundles.length ? (
+                        <span className="text-xs text-ink-400">
+                          → {part.bundles.join(', ')}
+                        </span>
+                      ) : null}
                       {part.units_waiting ? (
                         <Badge className="bg-slate-100 text-slate-700 ring-slate-300">
                           {part.units_waiting} more once those bundles are printed

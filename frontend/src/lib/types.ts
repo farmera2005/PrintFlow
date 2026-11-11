@@ -969,10 +969,11 @@ export interface ProductionList {
     order_count: number
     waiting_since: string | null
   }[]
-  /** The components to gather for bundles waiting to be built — the parts,
-   *  not the bundles: somebody assembling walks to the shelves, and what they
-   *  need there is "six brackets", not "three gift sets". */
-  assembly: {
+  /** Everything to fetch off a shelf rather than off a printer, under one
+   *  rule: a bundle becomes its components, and anything else is itself.
+   *  That is how the things an order takes from stock reach this screen —
+   *  nothing is printed for them, so they are on no other list here. */
+  gather: {
     product_id: string | null
     variation_id: string | null
     sku: string | null
@@ -983,7 +984,8 @@ export interface ProductionList {
     units: number
     /** Units belonging to bundles still waiting on a part of their own. */
     units_waiting: number
-    /** What these go into, so a pile of parts has a job attached. */
+    /** What these go into, so a pile of parts has a job attached. Empty for
+     *  an item that is not part of a bundle: it is the thing itself. */
     bundles: string[]
     order_count: number
     waiting_since: string | null

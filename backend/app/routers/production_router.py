@@ -89,7 +89,7 @@ async def download_production(
             ]
         )
 
-    for part in found["assembly"]:
+    for part in found["gather"]:
         writer.writerow(
             [
                 part["sku"] or "",
@@ -101,7 +101,9 @@ async def download_production(
                 "",
                 "",
                 _day(part["waiting_since"]),
-                "Gather to assemble " + ", ".join(part["bundles"]),
+                "Gather for " + ", ".join(part["bundles"])
+                if part["bundles"]
+                else "Gather from stock",
             ]
         )
 

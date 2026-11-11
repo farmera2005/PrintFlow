@@ -695,19 +695,24 @@ screen that only counted what it understood would under-report the day:
   were sold. It contributes to no total, which is exactly why it needs its own
   line rather than silence; the same unlinked listing sold six times is one
   thing to go and fix, not six.
-* **To gather for assembly** — the components that go into bundles waiting to
-  be built, counted the same way the parts are: *6 × Cable bracket → Gift
-  set*, not *3 × Gift set*. Somebody assembling walks to the shelves, and
-  what they need there is the parts. **Anything coming off the shelf is on
-  this list too** — a stocked component was never printed, so it appears
-  nowhere else here, and it still has to be fetched. Components of bundles
-  that are still missing a part of their own are counted separately rather
-  than added in, because a half-made bundle is a bench occupied by something
-  that cannot be finished.
+* **To gather** — everything an order needs off a shelf rather than off a
+  printer, under one rule: **a bundle becomes its components, and anything
+  else is itself.** A bundle waiting to be built is not a job somebody can
+  pick up, so it is never a row; its parts are — *6 × Cable bracket → Gift
+  set* — added up across every bundle and order waiting, with the bundle's
+  name beside them so a pile of parts has a job attached. An item that is not
+  a bundle has nothing to break into, so it is the row, with no bundle beside
+  it. That is how **the things an order takes from stock** reach this screen
+  at all: nothing is printed for them, so they are on no other list here, and
+  somebody still has to walk and find them. Components of bundles still
+  missing a part of their own are counted separately rather than added in,
+  because a half-made bundle is a bench occupied by something that cannot be
+  finished.
 
 Units coming off the shelf are not on the print list: those are picked, not
-produced — though the ones going into a bundle are on the gather list, because
-somebody still has to walk and find them.
+produced, and they are on the gather list instead. A line that is half stock
+and half print is honestly on both — three to fetch and two to make, not five
+of either.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
 order anywhere else on the board still wants its parts. A part that goes into
 a bundle says so, since somebody picking the shelf will not find it on an

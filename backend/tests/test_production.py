@@ -232,16 +232,21 @@ class TestWhatIsActuallyOutstanding:
 
 
 class TestWhatIsLeftOut:
-    async def test_units_coming_off_the_shelf_are_not_produced(self, db):
-        """Picked, not made."""
+    async def test_units_coming_off_the_shelf_are_not_printed(self, db):
+        """Picked, not made — so they are not on the print list. They are on
+        the gather list instead; see TestGathering."""
         stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
         order = await _order(db)
-        await _line(db, order, stocked, to_print=0, state="allocated", quantity=3)
+        await _line(
+            db, order, stocked, to_print=0, state="ready", quantity=3,
+            qty_from_stock=3,
+        )
         await db.commit()
 
         found = await production.to_make(db)
         assert found["items"] == []
         assert found["totals"]["units_needed"] == 0
+        assert [row["sku"] for row in found["gather"]] == ["TRINKET"]
 
     async def test_a_line_already_printed_is_not_on_the_list(self, db):
         part = await _product(db)
@@ -378,7 +383,7 @@ class TestLinesNobodyCanMake:
         assert (await production.to_make(db))["unmatched"] == []
 
 
-class TestAssembly:
+class TestGathering:
     async def test_it_lists_the_components_rather_than_the_bundle(self, db):
         """Somebody assembling walks to the shelves, and what they need there
         is "two brackets", not "one gift set"."""
@@ -391,14 +396,14 @@ class TestAssembly:
         await db.commit()
 
         found = await production.to_make(db)
-        assert len(found["assembly"]) == 1
-        gather = found["assembly"][0]
+        assert len(found["gather"]) == 1
+        gather = found["gather"][0]
         # The component, with how many to fetch — and never the bundle line.
         assert (gather["sku"], gather["units"]) == ("PART-X", 2)
         assert gather["units_waiting"] == 0
         # The bundle rides along as what it is for, not as a row of its own.
         assert gather["bundles"] == ["Gift set"]
-        assert {row["sku"] for row in found["assembly"]} == {"PART-X"}
+        assert {row["sku"] for row in found["gather"]} == {"PART-X"}
 
     async def test_components_add_up_across_bundles_and_orders(self, db):
         """Three gift sets of two brackets each is one line reading six."""
@@ -420,7 +425,7 @@ class TestAssembly:
             )
         await db.commit()
 
-        gather = {row["sku"]: row for row in (await production.to_make(db))["assembly"]}
+        gather = {row["sku"]: row for row in (await production.to_make(db))["gather"]}
         assert gather["PART-X"]["units"] == 6
         assert gather["KNOB-S"]["units"] == 3
         assert gather["PART-X"]["order_count"] == 3
@@ -440,7 +445,7 @@ class TestAssembly:
         )
         await db.commit()
 
-        gather = {row["sku"]: row["units"] for row in (await production.to_make(db))["assembly"]}
+        gather = {row["sku"]: row["units"] for row in (await production.to_make(db))["gather"]}
         assert gather == {"PART-X": 1, "TRINKET": 4}
 
     async def test_a_bundle_still_missing_a_part_is_not_ready(self, db):
@@ -457,7 +462,7 @@ class TestAssembly:
         await db.commit()
 
         found = await production.to_make(db)
-        gather = {row["sku"]: row for row in found["assembly"]}
+        gather = {row["sku"]: row for row in found["gather"]}
         # Counted apart: a half-made bundle is a bench occupied by something
         # that cannot be finished, so its parts are not "to gather" yet.
         assert gather["PART-X"]["units"] == 0
@@ -476,7 +481,7 @@ class TestAssembly:
         await _line(db, order, part, to_print=1, state="printed", parent_line_id=parent.id)
         await db.commit()
 
-        assert (await production.to_make(db))["assembly"] == []
+        assert (await production.to_make(db))["gather"] == []
 
     async def test_a_part_says_when_it_goes_into_a_bundle(self, db):
         """Somebody picking the shelf will not find it on the order by name."""
@@ -491,6 +496,74 @@ class TestAssembly:
         row = (await production.to_make(db))["items"][0]
         assert row["for_bundle"] is True
 
+    async def test_an_item_that_is_not_a_bundle_is_itself_the_row(self, db):
+        """The other half of the rule: a bundle becomes its components, and
+        anything else has nothing to break into, so it is the line."""
+        stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
+        for index in range(3):
+            order = await _order(db, number=f"950{index}", days_ago=index)
+            await _line(
+                db, order, stocked, to_print=0, state="ready", quantity=2,
+                qty_from_stock=2,
+            )
+        await db.commit()
+
+        gather = (await production.to_make(db))["gather"]
+        assert len(gather) == 1
+        assert (gather[0]["sku"], gather[0]["units"]) == ("TRINKET", 6)
+        # Nothing to build it into: it is the thing.
+        assert gather[0]["bundles"] == []
+        assert gather[0]["order_count"] == 3
+
+    async def test_a_line_half_from_stock_is_honestly_on_both_lists(self, db):
+        """Three off the shelf and two to print is three to fetch and two to
+        make, not five of either."""
+        part = await _product(db)
+        await _file(db, part)
+        order = await _order(db)
+        await _line(
+            db, order, part, to_print=2, state="new", quantity=5, qty_from_stock=3
+        )
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert [(row["sku"], row["units_needed"]) for row in found["items"]] == [
+            ("PART-X", 2)
+        ]
+        assert [(row["sku"], row["units"]) for row in found["gather"]] == [
+            ("PART-X", 3)
+        ]
+
+    async def test_an_item_already_labelled_is_packed_and_gone(self, db):
+        """Its parcel exists; nobody is fetching it again."""
+        stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
+        order = await _order(db, status="ready_to_ship")
+        await _line(
+            db, order, stocked, to_print=0, state="labeled", quantity=2,
+            qty_from_stock=2,
+        )
+        await db.commit()
+
+        assert (await production.to_make(db))["gather"] == []
+
+    async def test_a_bundles_component_is_not_counted_twice(self, db):
+        """It is gathered with its bundle, and the bundle rule has already
+        had it — the item rule must not take it again."""
+        bundle = await _product(db, sku="GIFT-SET", name="Gift set", fulfillment="bundle")
+        stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
+        order = await _order(db, status="assembly")
+        parent = await _line(db, order, bundle, to_print=0, state="exploded", quantity=1)
+        await _line(
+            db, order, stocked, to_print=0, state="allocated", quantity=2,
+            qty_from_stock=2, parent_line_id=parent.id,
+        )
+        await db.commit()
+
+        gather = (await production.to_make(db))["gather"]
+        assert len(gather) == 1
+        assert (gather[0]["sku"], gather[0]["units"]) == ("TRINKET", 2)
+        assert gather[0]["bundles"] == ["Gift set"]
+
     async def test_a_cancelled_component_is_not_gathered(self, db):
         bundle = await _product(db, sku="GIFT-SET", fulfillment="bundle")
         part = await _product(db)
@@ -504,7 +577,7 @@ class TestAssembly:
         )
         await db.commit()
 
-        assert [row["sku"] for row in (await production.to_make(db))["assembly"]] == [
+        assert [row["sku"] for row in (await production.to_make(db))["gather"]] == [
             "PART-X"
         ]
 
