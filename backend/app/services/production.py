@@ -1,28 +1,27 @@
-"""Everything the shop still has to make, gathered into one list.
+"""Everything the shop still has to make, and what is being made right now.
 
 PrintFlow already knows this, scattered: the board knows which orders are
 open, each order knows which of its lines are short, and the Printers tab
 knows what is on a machine. What nobody could see was the shape a print shop
-actually works to — *one part, however many orders want it*. Six orders each
-needing one bracket is one plate's work, and finding that out meant opening
-six orders.
+actually works to — *one thing, and how many of it*. Six orders each wanting
+one bracket is six brackets, and finding that out meant opening six orders.
 
 So this groups by **what is made rather than by who ordered it**: a row per
-product and variation, because a variation can print a different file
-entirely and two variations of one product are two different things to make.
-Underneath each row sit the orders it came from, oldest first, which is the
-order a shop works in.
+product and variation, because two variations of one product are made
+differently and are two different things to make.
 
-**What counts as needing production.** A line that is still short — some
-units have to be printed — and whose work is not finished. Units coming off
-the shelf are picked, not produced, so they are not here; a line already
-printed is not here either, however far from shipping its order is.
+**Three buckets, and every unit is in exactly one of them.**
 
-**Plates are coverage, not progress.** A line's shortfall is covered by
-plates, and a plate can be planned, sent, printing, done or failed. The
-difference between the units a row needs and the units its live plates
-promise is the only number that says what is genuinely not in hand yet, and
-it is the number this list leads with.
+* *To make* — nothing has started on these. This is the list somebody works
+  from, and the number they act on.
+* *Being made* — work is under way. PrintFlow started it without being asked,
+  so it is not a job for a person; it is something to watch finish.
+* *Gathered* — taken off a shelf rather than off a machine, which is the
+  other half of getting an order out and appears on no other screen.
+
+How the making actually happens — which file, which machine, what was sent
+where — is the Printers tab's business and deliberately not this one's. This
+screen is a list of things and quantities.
 """
 
 from __future__ import annotations
@@ -36,9 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..models import (
-    JOB_CANCELLED,
     JOB_DONE,
-    JOB_FAILED,
     JOB_PENDING,
     JOB_PRINTING,
     JOB_QUEUED,
@@ -75,59 +72,54 @@ MADE_STATES = (LINE_PRINTED, LINE_READY, LINE_LABELED, LINE_SHIPPED, LINE_CANCEL
 # build.
 IN_HAND = (LINE_ALLOCATED, LINE_PRINTED, LINE_READY, LINE_LABELED, LINE_SHIPPED)
 
-# Plates that still stand for units nobody has to print again. A failed or
-# cancelled plate covers nothing — which is exactly why those units have to
-# come back onto this list rather than look finished.
-LIVE_JOBS = (JOB_PENDING, JOB_QUEUED, JOB_PRINTING, JOB_DONE)
-
-# What a row is waiting on, in the order a person would act on it.
-BLOCKED = "blocked"
-TO_PLAN = "to_plan"
-TO_SEND = "to_send"
-ON_A_MACHINE = "on_a_machine"
-STAGE_LABELS = {
-    BLOCKED: "Cannot be made yet",
-    TO_PLAN: "No plates worked out",
-    TO_SEND: "Ready to send",
-    ON_A_MACHINE: "On a machine",
-}
+# Work that is under way: the machinery of it belongs to the Printers tab, so
+# all this module takes from it is how many units are at each stage of being
+# made. Anything that failed or was cancelled is not under way — which is
+# exactly why those units come back onto the to-make list rather than sit
+# somewhere looking finished.
+UNDER_WAY = (JOB_PENDING, JOB_QUEUED, JOB_PRINTING, JOB_DONE)
+# Started and finished, waiting for the rest of its line.
+FINISHED = (JOB_DONE,)
+# Happening on something, right now.
+HAPPENING = (JOB_PRINTING,)
 
 
 def _key(line: OrderLine) -> tuple[Any, Any]:
     """What makes two lines the same thing to make.
 
-    The variation is part of it: "with fan" and "without fan" are different
-    parts off different plates, and adding them together would produce a
-    number no single plate can satisfy.
+    The variation is part of it: "with fan" and "without fan" are made
+    differently, and adding them together would produce a number that matches
+    no single way of making them.
     """
     return (line.product_id, line.variation_id)
 
 
-def _job_counts(line: OrderLine) -> dict[str, int]:
-    counts = {status: 0 for status in (JOB_PENDING, JOB_QUEUED, JOB_PRINTING, JOB_DONE, JOB_FAILED, JOB_CANCELLED)}
-    for job in line.print_jobs:
-        if job.status in counts:
-            counts[job.status] += 1
-    return counts
+def _units(line: OrderLine, statuses: tuple[str, ...]) -> int:
+    """Units of this line's work sitting at one stage of being made."""
+    return sum(
+        job.units_expected for job in line.print_jobs if job.status in statuses
+    )
 
 
-def _covered(line: OrderLine) -> int:
-    """Units this line's live plates promise.
+def _started_at(line: OrderLine) -> datetime | None:
+    """When work on this line first began moving."""
+    stamps = [
+        job.queued_at or job.created_at
+        for job in line.print_jobs
+        if job.status in UNDER_WAY
+    ]
+    return min(stamps) if stamps else None
 
-    `units_expected` rather than the plate count: a plate yields what its file
-    yields, and four-up plates are the ordinary case for small parts.
-    """
-    return sum(job.units_expected for job in line.print_jobs if job.status in LIVE_JOBS)
 
-
-async def _plans_for(
+async def _makeable(
     session: AsyncSession, lines: list[OrderLine]
-) -> dict[tuple[Any, Any], list[Any]]:
-    """How each product-and-variation could be printed, if it can be at all.
+) -> dict[tuple[Any, Any], bool]:
+    """Whether PrintFlow has any way to make each thing.
 
-    The same question `printing.plan_jobs` asks, asked once for the whole list
-    rather than per line, because the answer is what separates "nothing has
-    been planned yet" from "nothing can be planned, and here is why".
+    The same question the planner asks before it works anything out, asked
+    once for the whole list — because "nobody has started this" and "nothing
+    here can start it" look identical on a screen and need completely
+    different answers from a person.
     """
     product_ids = {line.product_id for line in lines if line.product_id}
     variation_ids = {line.variation_id for line in lines if line.variation_id}
@@ -162,15 +154,17 @@ async def _plans_for(
         if variation_ids
     }
 
-    plans: dict[tuple[Any, Any], list[Any]] = {}
+    out: dict[tuple[Any, Any], bool] = {}
     for line in lines:
         key = _key(line)
-        if key in plans or not line.product_id:
+        if key in out or not line.product_id:
             continue
-        plans[key] = variation_rules.print_plans(
-            files.get(line.product_id, []), found_variations.get(line.variation_id)
+        out[key] = bool(
+            variation_rules.print_plans(
+                files.get(line.product_id, []), found_variations.get(line.variation_id)
+            )
         )
-    return plans
+    return out
 
 
 def _when(order: Order) -> datetime | None:
@@ -178,11 +172,11 @@ def _when(order: Order) -> datetime | None:
 
 
 async def to_make(session: AsyncSession) -> dict[str, Any]:
-    """The whole list: what to make, what is blocked, and what to assemble.
+    """What to make, what is being made, what to gather, and what is stuck.
 
-    One query for the lines and one for their orders' products — the shop
-    floor refreshes this screen, and a query per row would make a list of
-    forty parts forty round trips.
+    One query for the lines and their products — the shop floor refreshes
+    this screen, and a query per row would make a list of forty things forty
+    round trips.
     """
     lines = list(
         (
@@ -209,7 +203,7 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         and line.state not in MADE_STATES
         and line.product_id is not None
     ]
-    plans = await _plans_for(session, wanted)
+    makeable = await _makeable(session, wanted)
 
     rows: dict[tuple[Any, Any], dict[str, Any]] = {}
     for line in wanted:
@@ -217,7 +211,6 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         product: Product | None = line.product
         row = rows.get(key)
         if row is None:
-            plan = plans.get(key) or []
             row = rows[key] = {
                 "product_id": line.product_id,
                 "variation_id": line.variation_id,
@@ -225,35 +218,33 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
                 "name": product.name if product else (line.title or "Unknown"),
                 "variation_label": line.variation.label if line.variation else None,
                 "fulfillment": product.fulfillment if product else None,
-                # What one plate yields, taken the way the planner takes it:
-                # the least any candidate file promises, because the plate has
-                # to cover the line whichever machine ends up printing it.
-                "units_per_plate": (
-                    min(candidate.units_per_plate for candidate in plan) if plan else None
-                ),
-                "printable": bool(plan),
+                # Whether anything here knows how to make it. False is a
+                # person's job, not a machine's.
+                "can_start": makeable.get(key, False),
                 "units_needed": 0,
-                "units_covered": 0,
-                # Facts about the part, gathered from the lines that want it.
+                # Under way, and how far along it is.
+                "units_started": 0,
+                "units_made": 0,
+                "units_happening": 0,
+                "started_at": None,
+                # Facts about the thing, gathered from the lines that want it.
                 # The lines themselves are not kept: this is a list of things
-                # to make, and a part does not become several things to make
+                # to make, and a thing does not become several things to make
                 # because several people bought it.
                 "order_ids": set(),
                 "waiting_since": None,
                 "for_bundle": False,
-                "note": None,
-                "jobs": {
-                    status: 0
-                    for status in (
-                        JOB_PENDING, JOB_QUEUED, JOB_PRINTING, JOB_DONE, JOB_FAILED, JOB_CANCELLED
-                    )
-                },
             }
 
         row["units_needed"] += line.qty_to_print
-        row["units_covered"] += _covered(line)
-        for status, count in _job_counts(line).items():
-            row["jobs"][status] += count
+        row["units_started"] += _units(line, UNDER_WAY)
+        row["units_made"] += _units(line, FINISHED)
+        row["units_happening"] += _units(line, HAPPENING)
+        began = _started_at(line)
+        if began is not None and (
+            row["started_at"] is None or began < row["started_at"]
+        ):
+            row["started_at"] = began
 
         order = line.order
         row["order_ids"].add(order.id)
@@ -263,67 +254,81 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         ):
             row["waiting_since"] = placed
         # Worth saying when any of it is for a bundle: somebody picking the
-        # shelf will not find the part on an order by name.
+        # shelf will not find the thing on an order by name.
         row["for_bundle"] = row["for_bundle"] or line.parent_line_id is not None
-        row["note"] = row["note"] or line.stock_note
 
-    made: list[dict[str, Any]] = []
+    to_do: list[dict[str, Any]] = []
+    under_way: list[dict[str, Any]] = []
     for row in rows.values():
         row["order_count"] = len(row.pop("order_ids"))
-        # The number the list leads with: units nobody has a live plate for.
-        row["units_outstanding"] = max(row["units_needed"] - row["units_covered"], 0)
-        row["plates_outstanding"] = (
-            -(-row["units_outstanding"] // row["units_per_plate"])
-            if row["units_per_plate"] and row["units_outstanding"] > 0
-            else 0
-        )
-        row["stage"] = _stage(row)
-        row["stage_label"] = STAGE_LABELS[row["stage"]]
-        made.append(row)
+        # The number the list leads with: units nothing has started on.
+        row["units_to_make"] = max(row["units_needed"] - row["units_started"], 0)
+        if row["units_to_make"] > 0:
+            to_do.append(row)
+        if row["units_started"] > 0:
+            under_way.append(_being_made(row))
 
     # Oldest first, because that is the order a shop works in; a tie goes to
-    # the bigger job, which is the one worth setting a machine up for.
-    made.sort(
+    # the bigger job, which is the one worth setting up for.
+    to_do.sort(
         key=lambda row: (
             row["waiting_since"] is None,
             row["waiting_since"],
-            -row["units_outstanding"],
+            -row["units_to_make"],
         )
     )
+    # What is closest to finished, first: it is the next thing off a machine.
+    under_way.sort(key=lambda row: (-row["progress"], row["started_at"] is None))
 
     return {
-        "items": made,
-        "blocked": [row for row in made if row["stage"] == BLOCKED],
+        "items": to_do,
+        "in_production": under_way,
+        "blocked": [row for row in to_do if not row["can_start"]],
         "unmatched": _unmatched(lines),
         "gather": _gather(lines),
-        "totals": _totals(made, len({line.order_id for line in wanted})),
+        "totals": _totals(to_do, under_way, len({line.order_id for line in wanted})),
         "generated_at": datetime.now().astimezone(),
     }
 
 
-def _stage(row: dict[str, Any]) -> str:
-    """What this row is waiting on."""
-    if not row["printable"]:
-        return BLOCKED
-    if row["jobs"][JOB_QUEUED] or row["jobs"][JOB_PRINTING]:
-        return ON_A_MACHINE
-    if row["jobs"][JOB_PENDING]:
-        return TO_SEND
-    return TO_PLAN
+def _being_made(row: dict[str, Any]) -> dict[str, Any]:
+    """One thing under way, as a thing rather than as a pile of jobs.
 
-
-def _totals(rows: list[dict[str, Any]], orders: int) -> dict[str, int]:
+    `waiting` is the remainder on purpose: units that are under way but
+    neither finished nor moving are waiting their turn, and working it out by
+    subtraction means the three numbers always add up to what is on the bar.
+    """
+    started = row["units_started"]
+    made = min(row["units_made"], started)
+    happening = min(row["units_happening"], started - made)
     return {
-        "items": len(rows),
-        "units_needed": sum(row["units_needed"] for row in rows),
-        "units_outstanding": sum(row["units_outstanding"] for row in rows),
-        "plates_to_send": sum(row["jobs"][JOB_PENDING] for row in rows),
-        "plates_on_machines": sum(
-            row["jobs"][JOB_QUEUED] + row["jobs"][JOB_PRINTING] for row in rows
-        ),
-        "blocked": sum(1 for row in rows if row["stage"] == BLOCKED),
+        "product_id": row["product_id"],
+        "variation_id": row["variation_id"],
+        "sku": row["sku"],
+        "name": row["name"],
+        "variation_label": row["variation_label"],
+        "units": started,
+        "units_made": made,
+        "units_happening": happening,
+        "units_waiting": started - made - happening,
+        "progress": round(made / started, 3) if started else 0.0,
+        "started_at": row["started_at"],
+        "order_count": row["order_count"],
+    }
+
+
+def _totals(
+    to_do: list[dict[str, Any]], under_way: list[dict[str, Any]], orders: int
+) -> dict[str, int]:
+    return {
+        "items": len(to_do),
+        "units_to_make": sum(row["units_to_make"] for row in to_do),
+        "in_production_items": len(under_way),
+        "units_in_production": sum(row["units"] for row in under_way),
+        "units_happening": sum(row["units_happening"] for row in under_way),
+        "blocked": sum(1 for row in to_do if not row["can_start"]),
         # How many orders are waiting on all of this. A count, not a
-        # breakdown: the list is about parts, and this is the one place the
+        # breakdown: the list is about things, and this is the one place the
         # orders are worth a number at all.
         "orders": orders,
     }

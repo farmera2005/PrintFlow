@@ -924,9 +924,9 @@ export interface SalesReport {
 
 /** One part, and how many of it the shop still has to make.
  *
- * A part and a variation rather than an order line, because a variation can
- * print a different file entirely and two variations of one product are two
- * different things to make. The orders behind it are deliberately not here:
+ * A part and a variation rather than an order line, because two variations
+ * of one product are made differently and are two different things to make.
+ * The orders behind it are deliberately not here:
  * a part does not become several things to make because several people
  * bought it. */
 export interface ProductionItem {
@@ -936,15 +936,17 @@ export interface ProductionItem {
   name: string
   variation_label: string | null
   fulfillment: string | null
-  /** What one plate yields, when a file says. Null when nothing can print it. */
-  units_per_plate: number | null
-  printable: boolean
+  /** Whether anything here knows how to make it at all. False is a person's
+   *  job — nothing will start on its own. */
+  can_start: boolean
   units_needed: number
-  /** Units a live plate already promises — pending, queued, printing or done. */
-  units_covered: number
-  /** The number to act on: needed less covered, never below zero. */
-  units_outstanding: number
-  plates_outstanding: number
+  /** Units already under way, and how far along those are. */
+  units_started: number
+  units_made: number
+  units_happening: number
+  started_at: string | null
+  /** The number the list leads with: needed less started, never below zero. */
+  units_to_make: number
   /** How many orders are waiting on it — a count, not a breakdown. */
   order_count: number
   /** When the longest-waiting order behind this part was placed. */
@@ -952,14 +954,34 @@ export interface ProductionItem {
   /** True when any of these go into a bundle: somebody picking the shelf
    *  will not find the part on an order by name. */
   for_bundle: boolean
-  note: string | null
-  stage: 'blocked' | 'to_plan' | 'to_send' | 'on_a_machine'
-  stage_label: string
-  jobs: Record<string, number>
+}
+
+/** One thing being made right now.
+ *
+ * Three quantities that always add up to `units`: finished, moving, and
+ * waiting its turn. Nothing about files or machines — that is the Printers
+ * tab's business; this is how far along a thing is. */
+export interface ProductionRunning {
+  product_id: string
+  variation_id: string | null
+  sku: string
+  name: string
+  variation_label: string | null
+  /** Units under way in total. */
+  units: number
+  units_made: number
+  units_happening: number
+  units_waiting: number
+  /** made ÷ units, 0–1. */
+  progress: number
+  started_at: string | null
+  order_count: number
 }
 
 export interface ProductionList {
   items: ProductionItem[]
+  /** What is under way without anybody asking — to watch, not to pick up. */
+  in_production: ProductionRunning[]
   /** The subset that cannot be made at all, for a count that does not lie. */
   blocked: ProductionItem[]
   unmatched: {
@@ -992,10 +1014,10 @@ export interface ProductionList {
   }[]
   totals: {
     items: number
-    units_needed: number
-    units_outstanding: number
-    plates_to_send: number
-    plates_on_machines: number
+    units_to_make: number
+    in_production_items: number
+    units_in_production: number
+    units_happening: number
     blocked: number
     orders: number
   }

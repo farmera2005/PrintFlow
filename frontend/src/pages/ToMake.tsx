@@ -1,40 +1,38 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import type { ProductionList } from '../lib/types'
-import { Alert, Badge, Button, Card, EmptyState, Spinner, cx } from '../components/ui'
+import type { ProductionList, ProductionRunning } from '../lib/types'
+import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
 
-/** Everything the shop still has to make, as a list of parts.
+/** What the shop still has to make, and what is being made right now.
  *
- * PrintFlow already knew all of this, scattered: the board knows which orders
- * are open, each order knows which of its lines are short, the Printers tab
- * knows what is on a machine. What nobody could see was the shape a print
- * shop actually works to — *one part, and how many of it*. Six orders each
- * wanting one bracket is six brackets and one plate's work, and finding that
- * out meant opening six orders.
+ * A list of *things and quantities*, and nothing else. How the making
+ * happens — which file, which machine, what was sent where — is the Printers
+ * tab's business: somebody standing at a bench with this screen open wants to
+ * know what to pick up next, not how the queue is plumbed.
  *
- * So there are no orders on this screen. A part does not become several
- * things to make because several people bought it, and a bench does not care
- * whose it is: the row is the part, the number is how many, and that is the
- * whole list. Three things follow and are worth not undoing:
+ * Every unit an open order is short of is in exactly one of three places:
  *
- * **To make is what is left, not what was ordered.** Units a live plate
- * already covers are the machine's business. What is left is what has to be
- * started, and it is the number in bold.
+ * **Being made** sits at the top, because it is the only part of the screen
+ * that changes on its own. It is drawn as a bar per thing rather than as a
+ * row in the table, since "how far along is it" is a quantity a shape
+ * answers faster than a number does.
  *
- * **Longest wait first.** Not biggest, not alphabetical. The part that has
- * kept an order waiting longest is the one to put on next.
+ * **To make** is the list proper: nothing has started on these, so they are
+ * the work. Longest wait first — the thing that has kept an order waiting
+ * longest is the one to put on next.
  *
- * **What cannot be made is on the list too.** A product with no print file
- * and a listing nothing matched are both real work that cannot start, and a
- * screen that only counted what it understood would under-report the day.
+ * **To gather** is what comes off a shelf instead of a machine, which is the
+ * other half of getting an order out and appears on no other screen.
  */
 
-const STAGE_CLASSES: Record<string, string> = {
-  blocked: 'bg-red-100 text-red-800 ring-red-300',
-  to_plan: 'bg-slate-100 text-slate-700 ring-slate-300',
-  to_send: 'bg-amber-100 text-amber-900 ring-amber-300',
-  on_a_machine: 'bg-sky-100 text-sky-800 ring-sky-300',
-}
+/* The two colours the screen uses for quantities, and the only two. Emerald
+   already means finished everywhere else in PrintFlow and amber already
+   means in progress, so this borrows the language rather than inventing a
+   third. The pair clears colour-blind separation and 3:1 against the
+   surface, which matters on the bar, where a segment's meaning is carried by
+   its colour as well as by the number beside it. */
+const MADE_FILL = 'bg-emerald-700'
+const HAPPENING_FILL = 'bg-amber-600'
 
 function Tile({
   label,
@@ -58,23 +56,79 @@ function Tile({
   )
 }
 
-/** How long the oldest order wanting this has waited, in the words somebody
- *  would use. The orders themselves are not on this screen; how long they
- *  have been waiting is still the reason one part goes on before another. */
-function waitedFor(iso: string | null): string {
+/** How long something has been waiting or running, in the words somebody
+ *  would use rather than a timestamp nobody reads. */
+function since(iso: string | null): string {
   if (!iso) return '—'
-  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000)
-  if (days < 1) return 'today'
-  if (days === 1) return '1 day'
-  return `${days} days`
+  const minutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000)
+  if (minutes < 60) return `${Math.max(minutes, 1)} min`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return days === 1 ? '1 day' : `${days} days`
+}
+
+/** One thing being made, as a bar.
+ *
+ * Three segments that always add up to what is under way: finished, moving,
+ * and waiting its turn. The moving segment breathes, because this is the one
+ * card on the screen that is true only for as long as you are looking at it
+ * — and a shape that changes says "this is live" faster than a word does.
+ * It is a shallow breath on purpose: deep enough to notice, not deep enough
+ * to take the colour below the contrast it was picked at, and off entirely
+ * for a viewer who has asked for less motion. Every segment's number is
+ * written out beside the bar as well, so the colours are never the only
+ * thing carrying the meaning.
+ */
+function Running({ item }: { item: ProductionRunning }) {
+  const width = (units: number) =>
+    item.units > 0 ? `${(units / item.units) * 100}%` : '0%'
+
+  return (
+    <div className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono text-xs text-ink-500">{item.sku}</span>
+        <span className="text-sm font-medium text-ink-900">{item.name}</span>
+        {item.variation_label ? (
+          <span className="text-xs text-ink-500">· {item.variation_label}</span>
+        ) : null}
+        <span className="ml-auto text-xs text-ink-500">
+          {item.started_at ? `started ${since(item.started_at)} ago` : ''}
+        </span>
+      </div>
+
+      <div className="mt-2 flex h-2.5 w-full items-stretch gap-[2px] overflow-hidden rounded-full bg-ink-100">
+        <div
+          className={cx('rounded-full', MADE_FILL)}
+          style={{ width: width(item.units_made) }}
+          title={`${item.units_made} made`}
+        />
+        <div
+          className={cx('rounded-full', HAPPENING_FILL, 'breathe')}
+          style={{ width: width(item.units_happening) }}
+          title={`${item.units_happening} being made now`}
+        />
+      </div>
+
+      <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+        <span className="text-base font-semibold tabular-nums text-ink-900">
+          {item.units_made}
+          <span className="text-xs font-normal text-ink-500"> of {item.units} made</span>
+        </span>
+        {item.units_happening ? (
+          <span className="text-amber-700">{item.units_happening} under way</span>
+        ) : null}
+        {item.units_waiting ? (
+          <span className="text-ink-500">{item.units_waiting} queued behind</span>
+        ) : null}
+      </div>
+    </div>
+  )
 }
 
 export default function ToMake() {
   const [list, setList] = useState<ProductionList | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [note, setNote] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [hideCovered, setHideCovered] = useState(true)
 
   const load = useCallback(async () => {
     try {
@@ -89,50 +143,14 @@ export default function ToMake() {
     load()
   }, [load])
 
+  // Work moves on its own, so the screen does too — slowly, because a shop
+  // floor display left open all day should not be a poll every second.
+  useEffect(() => {
+    const timer = window.setInterval(load, 60_000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
   const totals = list?.totals
-
-  const send = async () => {
-    setBusy(true)
-    setNote(null)
-    try {
-      // The same dispatch the Printers tab uses: this screen is where the
-      // unsent plates are visible, so it is where somebody wants the button.
-      const waiting = totals?.plates_to_send ?? 0
-      const result = await api.post<{ dispatched?: number; failed?: number }>(
-        '/api/print-jobs/dispatch',
-      )
-      const sent = result?.dispatched ?? 0
-      const failed = result?.failed ?? 0
-      if (sent) {
-        setNote(
-          `Sent ${sent} plate${sent === 1 ? '' : 's'} to Bambuddy.` +
-            (failed ? ` ${failed} would not go — see the Printers tab.` : ''),
-        )
-      } else if (waiting) {
-        // Dispatch reports nothing sent when Bambuddy is not connected, which
-        // is not the same as nothing to send — and saying so would send
-        // somebody looking for plates that are still sitting right here.
-        setNote(
-          `Nothing reached Bambuddy, so ${waiting} plate${
-            waiting === 1 ? ' is' : 's are'
-          } still waiting. Check the Bambuddy connection in Settings.`,
-        )
-      } else {
-        setNote('Nothing was waiting to be sent.')
-      }
-      await load()
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Rows whose live plates already cover them are the machine's business, not
-  // the bench's — shown on request rather than by default.
-  const rows = (list?.items ?? []).filter(
-    (item) => !hideCovered || item.units_outstanding > 0,
-  )
 
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
@@ -140,37 +158,17 @@ export default function ToMake() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold text-ink-900">To make</h1>
           <span className="text-sm text-ink-500">
-            Every open order's unmade parts, added up by part.
+            Everything open orders are short of, added up by item.
           </span>
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-ink-600">
-              <input
-                type="checkbox"
-                checked={hideCovered}
-                onChange={(event) => setHideCovered(event.target.checked)}
-              />
-              Hide what is already on a machine
-            </label>
-            <a
-              className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-600 underline"
-              href="/api/production.csv"
-            >
-              Download CSV
-            </a>
-            {totals && totals.plates_to_send > 0 ? (
-              <Button variant="primary" onClick={send} disabled={busy}>
-                {busy
-                  ? 'Sending…'
-                  : `Send ${totals.plates_to_send} plate${
-                      totals.plates_to_send === 1 ? '' : 's'
-                    }`}
-              </Button>
-            ) : null}
-          </div>
+          <a
+            className="ml-auto rounded-md px-2.5 py-1 text-xs font-medium text-ink-600 underline"
+            href="/api/production.csv"
+          >
+            Download CSV
+          </a>
         </div>
 
         {error ? <Alert tone="error">{error}</Alert> : null}
-        {note ? <Alert tone="info">{note}</Alert> : null}
 
         {!list ? (
           <div className="flex justify-center py-10">
@@ -180,65 +178,98 @@ export default function ToMake() {
           <>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Tile
-                label="Units to make"
-                value={totals!.units_outstanding}
-                hint={`${totals!.items} part${totals!.items === 1 ? '' : 's'}, for ${
+                label="To make"
+                value={totals!.units_to_make}
+                hint={`${totals!.items} item${totals!.items === 1 ? '' : 's'}, for ${
                   totals!.orders
                 } order${totals!.orders === 1 ? '' : 's'}`}
               />
               <Tile
-                label="Plates to send"
-                value={totals!.plates_to_send}
-                hint="Worked out, not yet on Bambuddy"
-                tone={totals!.plates_to_send ? 'text-amber-700' : undefined}
+                label="Being made"
+                value={totals!.units_in_production}
+                hint={
+                  totals!.units_happening
+                    ? `${totals!.units_happening} under way right now`
+                    : 'Waiting their turn'
+                }
+                tone={totals!.units_in_production ? 'text-amber-700' : undefined}
               />
               <Tile
-                label="On machines"
-                value={totals!.plates_on_machines}
-                hint="Queued or printing now"
-                tone={totals!.plates_on_machines ? 'text-sky-700' : undefined}
+                label="To gather"
+                value={list.gather.reduce((sum, part) => sum + part.units, 0)}
+                hint="Off a shelf rather than made"
               />
               <Tile
                 label="Cannot start"
                 value={totals!.blocked + list.unmatched.length}
-                hint="No print file, or no product matched"
+                hint="Not set up, or nothing matched"
                 tone={
                   totals!.blocked + list.unmatched.length ? 'text-red-700' : undefined
                 }
               />
             </div>
 
+            {list.in_production.length ? (
+              <Card className="overflow-hidden">
+                <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
+                  <h2 className="text-sm font-semibold text-ink-800">Being made now</h2>
+                  <span className="text-xs text-ink-500">
+                    Under way without anybody asking. Closest to finished first.
+                  </span>
+                  <span className="ml-auto flex items-center gap-1.5 text-xs text-ink-500">
+                    <span className={cx('h-2 w-2 rounded-full', MADE_FILL)} />
+                    made
+                    <span
+                      className={cx('ml-2 h-2 w-2 rounded-full', HAPPENING_FILL)}
+                    />
+                    under way
+                  </span>
+                </div>
+                <div className="grid gap-2 p-2 sm:grid-cols-2">
+                  {list.in_production.map((item) => (
+                    <Running
+                      key={`${item.product_id}:${item.variation_id ?? ''}`}
+                      item={item}
+                    />
+                  ))}
+                </div>
+              </Card>
+            ) : null}
+
             <Card className="overflow-hidden">
               <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                <h2 className="text-sm font-semibold text-ink-800">Parts to print</h2>
-                <span className="text-xs text-ink-500">Longest wait first.</span>
+                <h2 className="text-sm font-semibold text-ink-800">To make</h2>
+                <span className="text-xs text-ink-500">
+                  Nothing has started on these. Longest wait first.
+                </span>
               </div>
 
-              {rows.length === 0 ? (
+              {list.items.length === 0 ? (
                 <EmptyState
                   title={
-                    list.items.length ? 'Everything is on a machine' : 'Nothing to make'
+                    list.in_production.length
+                      ? 'Nothing waiting to be started'
+                      : 'Nothing to make'
                   }
                   description={
-                    list.items.length
-                      ? 'Every outstanding part has a plate queued or printing. Untick the box above to see them.'
+                    list.in_production.length
+                      ? 'Everything open orders are short of is already being made.'
                       : 'Every open order has what it needs. New orders appear here within minutes of arriving.'
                   }
                 />
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[34rem] text-sm">
+                  <table className="w-full min-w-[30rem] text-sm">
                     <thead>
                       <tr className="text-left text-xs uppercase tracking-wide text-ink-500">
-                        <th className="px-3 py-2 font-medium">Part</th>
-                        <th className="px-3 py-2 text-right font-medium">To make</th>
-                        <th className="px-3 py-2 text-right font-medium">Plates</th>
+                        <th className="px-3 py-2 font-medium">Item</th>
+                        <th className="px-3 py-2 text-right font-medium">Quantity</th>
                         <th className="px-3 py-2 text-right font-medium">Waiting</th>
-                        <th className="px-3 py-2 font-medium">Status</th>
+                        <th className="px-3 py-2 font-medium" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-200">
-                      {rows.map((item) => (
+                      {list.items.map((item) => (
                         <tr
                           key={`${item.product_id}:${item.variation_id ?? ''}`}
                           className="text-ink-700"
@@ -263,29 +294,23 @@ export default function ToMake() {
                           </td>
                           <td className="px-3 py-2 text-right">
                             <span className="text-base font-semibold tabular-nums text-ink-900">
-                              {item.units_outstanding}
+                              {item.units_to_make}
                             </span>
-                            {item.units_covered ? (
+                            {item.units_to_make !== item.units_needed ? (
                               <span className="ml-1 text-xs font-normal text-ink-400">
                                 of {item.units_needed}
                               </span>
                             ) : null}
                           </td>
-                          <td className="px-3 py-2 text-right tabular-nums">
-                            {item.plates_outstanding || '—'}
-                            {item.units_per_plate && item.units_per_plate > 1 ? (
-                              <span className="ml-1 text-xs text-ink-400">
-                                @{item.units_per_plate}
-                              </span>
-                            ) : null}
-                          </td>
                           <td className="px-3 py-2 text-right text-xs text-ink-600">
-                            {waitedFor(item.waiting_since)}
+                            {since(item.waiting_since)}
                           </td>
                           <td className="px-3 py-2">
-                            <Badge className={STAGE_CLASSES[item.stage]}>
-                              {item.stage_label}
-                            </Badge>
+                            {!item.can_start ? (
+                              <Badge className="bg-red-100 text-red-800 ring-red-300">
+                                Cannot be made yet
+                              </Badge>
+                            ) : null}
                           </td>
                         </tr>
                       ))}
@@ -293,6 +318,12 @@ export default function ToMake() {
                   </table>
                 </div>
               )}
+              {totals!.blocked ? (
+                <p className="border-t border-ink-200 px-3 py-2 text-xs text-ink-500">
+                  “Cannot be made yet” means nothing here knows how to make it. Set it
+                  up on the Products tab and it joins the list.
+                </p>
+              ) : null}
             </Card>
 
             {list.gather.length ? (
@@ -300,9 +331,9 @@ export default function ToMake() {
                 <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
                   <h2 className="text-sm font-semibold text-ink-800">To gather</h2>
                   <span className="text-xs text-ink-500">
-                    Off the shelf rather than off a printer: the parts that go into
-                    bundles waiting to be built, and whatever an order takes from
-                    stock on its own.
+                    Off a shelf rather than made: the parts that go into bundles
+                    waiting to be built, and whatever an order takes from stock on
+                    its own.
                   </span>
                 </div>
                 <div className="divide-y divide-ink-200">
@@ -332,11 +363,11 @@ export default function ToMake() {
                       ) : null}
                       {part.units_waiting ? (
                         <Badge className="bg-slate-100 text-slate-700 ring-slate-300">
-                          {part.units_waiting} more once those bundles are printed
+                          {part.units_waiting} more once those bundles are made
                         </Badge>
                       ) : null}
                       <span className="ml-auto text-xs text-ink-500">
-                        {waitedFor(part.waiting_since)}
+                        {since(part.waiting_since)}
                       </span>
                     </div>
                   ))}
@@ -361,7 +392,7 @@ export default function ToMake() {
                       key={`${line.sku ?? ''}:${line.title ?? ''}`}
                       className="flex flex-wrap items-center gap-2 px-3 py-2"
                     >
-                      <span className="text-base font-semibold tabular-nums text-ink-900">
+                      <span className="w-8 text-right text-base font-semibold tabular-nums text-ink-900">
                         {line.units}
                       </span>
                       <span className="font-mono text-xs text-ink-500">
@@ -371,7 +402,7 @@ export default function ToMake() {
                         {line.title ?? 'Unknown item'}
                       </span>
                       <span className="text-xs text-ink-500">
-                        {waitedFor(line.waiting_since)}
+                        {since(line.waiting_since)}
                       </span>
                     </div>
                   ))}

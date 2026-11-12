@@ -659,68 +659,88 @@ files would sit on disk belonging to nobody.
 ## To Make — everything the shop still has to produce
 
 The board answers "where is this order", and the Printers tab answers "what is
-on this machine". Neither answers the question somebody standing at a printer
-actually has: **what should I put on next, and how many?** **To Make** does,
-by listing the work as *parts* rather than as orders.
+on this machine". Neither answers the question somebody standing at a bench
+actually has: **what should I make next, and how many?** **To Make** does, by
+listing the work as *things* rather than as orders.
 
-Five orders each wanting one bracket is one line reading *Cable bracket · 7 to
-make · 2 plates @4*. There are no order numbers on the screen at all: a part
-does not become several things to make because several people bought it, and a
-bench does not care whose it is. The row is the part, the number is how many,
-and that is the list.
+Five orders each wanting one bracket is one line reading *Cable bracket · 7*.
+There are no order numbers on the screen at all: a thing does not become
+several things to make because several people bought it, and a bench does not
+care whose it is. The row is the thing, the number is how many, and that is the
+list. Nothing on this screen is about files, machines or queues — **how** the
+making happens is the Printers tab's business, deliberately kept off a screen
+whose job is to say *what* and *how many*.
 
-**The number it leads with is what is not in hand yet.** A line's shortfall is
-covered by plates, and a plate can be planned, sent, printing or done — all
-promises somebody has already made. *To make* is the shortfall less those
-promises, so a part with every plate queued drops to zero and out of the
-default view. A **failed** plate covers nothing, so its units come straight
-back onto the list rather than sitting in a queue looking finished.
+**Every unit an open order is short of is in exactly one of three places**,
+and the screen is those three places:
 
-**Longest wait first.** Not biggest, not alphabetical: the part that has kept
-an order waiting longest is the one to set up next, and a tie goes to the
-bigger job, which is the one worth setting a machine up *for*. The `@4` beside
-a plate count is what one plate yields, so four-up parts are not mistaken for
-four plates' work.
+* **Being made** — work is under way. PrintFlow started it without being
+  asked, so it is not a job for a person; it is something to watch finish.
+* **To make** — nothing has started on these. This is the list somebody works
+  from, and the number they act on.
+* **To gather** — off a shelf rather than off a machine, which is the other
+  half of getting an order out and appears on no other screen.
 
-**Two variations of one product stay apart**, because a variation can name its
-own print file — "with fan" and "without fan" are different plates, and adding
-them together would produce a number no single plate can satisfy.
+**Being made now** sits at the top, because it is the only part of the screen
+that changes on its own. One card per thing, and a bar: the units already
+made in emerald, the units moving right now in amber with a gentle pulse, and
+the rest of what is under way as the empty track behind them. The three
+numbers always add up to what is under way, written out beside the bar as
+well — *4 of 9 made · 3 under way · 2 queued behind* — so the colours are
+never the only thing carrying the meaning. Closest to finished comes first:
+it is the next thing to come off a machine. A **failed** piece of work is not
+under way, so its units come straight back onto the to-make list rather than
+sitting somewhere looking finished.
 
-Three things that are not units to print are on the list anyway, because a
+**The to-make number is what nothing has started on.** Four of ten under way
+means six to make, and the same thing appears honestly on both lists rather
+than being counted once and hidden somewhere.
+
+**Longest wait first.** Not biggest, not alphabetical: the thing that has kept
+an order waiting longest is the one to make next, and a tie goes to the bigger
+job, which is the one worth setting up *for*.
+
+**Two variations of one product stay apart**, because two variations are made
+differently — "with fan" and "without fan" are two different things to make,
+and adding them together would produce a number that matches neither.
+
+Three things that are not units to make are on the list anyway, because a
 screen that only counted what it understood would under-report the day:
 
-* **Cannot be made yet** — a product with no print file. Real work that cannot
-  start, named with what is wrong with it.
+* **Cannot be made yet** — nothing here knows how to make it. Real work that
+  cannot start, named with what is wrong with it; set it up on the Products
+  tab and it joins the list.
 * **Waiting on a product** — a listing nothing matched, with how many of it
   were sold. It contributes to no total, which is exactly why it needs its own
   line rather than silence; the same unlinked listing sold six times is one
   thing to go and fix, not six.
-* **To gather** — everything an order needs off a shelf rather than off a
-  printer, under one rule: **a bundle becomes its components, and anything
+* **To gather**, in full — everything an order needs off a shelf rather than
+  off a machine, under one rule: **a bundle becomes its components, and anything
   else is itself.** A bundle waiting to be built is not a job somebody can
   pick up, so it is never a row; its parts are — *6 × Cable bracket → Gift
   set* — added up across every bundle and order waiting, with the bundle's
   name beside them so a pile of parts has a job attached. An item that is not
   a bundle has nothing to break into, so it is the row, with no bundle beside
   it. That is how **the things an order takes from stock** reach this screen
-  at all: nothing is printed for them, so they are on no other list here, and
+  at all: nothing is made for them, so they are on no other list here, and
   somebody still has to walk and find them. Components of bundles still
   missing a part of their own are counted separately rather than added in,
   because a half-made bundle is a bench occupied by something that cannot be
   finished.
 
-Units coming off the shelf are not on the print list: those are picked, not
-produced, and they are on the gather list instead. A line that is half stock
-and half print is honestly on both — three to fetch and two to make, not five
-of either.
+Units coming off the shelf are not on the make list: those are picked, not
+made, and they are on the gather list instead. A line that is half stock and
+half made is honestly on both — three to fetch and two to make, not five of
+either.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
 order anywhere else on the board still wants its parts. A part that goes into
 a bundle says so, since somebody picking the shelf will not find it on an
 order by name.
 
-**Send *n* plates** is the same dispatch the Printers tab has, put where the
-unsent plates are actually visible. **Download CSV** is the same list for a
-clipboard — part, quantity, plates and status, with nothing to expand.
+**Download CSV** is the same list for a clipboard — code, item, variation,
+quantity, how long it has waited and what is happening to it, with nothing to
+expand. The screen refreshes itself every minute, so it can be left open on a
+shop floor.
 
 Which orders are waiting is deliberately a question for the Orders tab and the
 board. The count of them is on the first tile, so the list says how much of the

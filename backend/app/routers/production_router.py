@@ -1,8 +1,9 @@
 """What still has to be made. One read, and the same list as a spreadsheet.
 
-Nothing here writes anything: the list is a question about orders and plates
-that already exist. Sending the planned plates to Bambuddy is a different
-thing, and it already has a button of its own on the print-jobs router.
+Nothing here writes anything, and nothing here starts anything: the list is a
+question about orders and work that already exist. Acting on it — which file,
+which machine, what gets sent where — belongs to the print-jobs router, and is
+deliberately not reachable from this one.
 """
 
 from __future__ import annotations
@@ -37,8 +38,8 @@ async def download_production(
 ) -> Response:
     """The same list, for a clipboard on the shop floor.
 
-    One line per thing to make and how many of it — the list somebody carries
-    to a machine, not a report about orders.
+    One line per thing and how many of it — what to make, what is already
+    being made, and what to fetch.
     """
     found = await production.to_make(session)
     buffer = io.StringIO()
@@ -48,11 +49,8 @@ async def download_production(
             "Code",
             "Item",
             "Variation",
-            "To make",
-            "Covered",
+            "Quantity",
             "Needed",
-            "Per plate",
-            "Plates",
             "Waiting since",
             "Status",
         ]
@@ -63,13 +61,23 @@ async def download_production(
                 row["sku"],
                 row["name"],
                 row["variation_label"] or "",
-                row["units_outstanding"],
-                row["units_covered"],
+                row["units_to_make"],
                 row["units_needed"],
-                row["units_per_plate"] or "",
-                row["plates_outstanding"] or "",
                 _day(row["waiting_since"]),
-                row["stage_label"],
+                "To make" if row["can_start"] else "Cannot be made yet",
+            ]
+        )
+
+    for row in found["in_production"]:
+        writer.writerow(
+            [
+                row["sku"],
+                row["name"],
+                row["variation_label"] or "",
+                row["units"],
+                row["units"],
+                _day(row["started_at"]),
+                f"Being made ({row['units_made']} of {row['units']} done)",
             ]
         )
 
@@ -80,10 +88,7 @@ async def download_production(
                 line["title"] or "",
                 "",
                 line["units"],
-                "",
                 line["units"],
-                "",
-                "",
                 _day(line["waiting_since"]),
                 "No product matched",
             ]
@@ -96,10 +101,7 @@ async def download_production(
                 part["name"] or "",
                 part["variation_label"] or "",
                 part["units"],
-                "",
                 part["units"] + part["units_waiting"],
-                "",
-                "",
                 _day(part["waiting_since"]),
                 "Gather for " + ", ".join(part["bundles"])
                 if part["bundles"]

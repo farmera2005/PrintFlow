@@ -1,16 +1,16 @@
-"""What still has to be made, gathered across every open order.
+"""Everything the shop still has to make, gathered across every open order.
 
-The claim this list makes is that it is a list of *parts*, not of orders: six
-orders wanting one bracket each are one row of six, and one plate's work. No
-order appears anywhere in it — a part does not become several things to make
-because several people bought it. Everything here is about that regrouping
-being right: the same part from different orders adding up, two variations of
-one product staying apart because they print different files, and units a
-live plate already covers dropping out of the number somebody acts on.
+The claim this list makes is that it is a list of *things*, not of orders: six
+orders wanting one bracket each are one row of six. No order appears anywhere
+in it — a thing does not become several things to make because several people
+bought it. Everything here is about that regrouping being right: the same
+thing from different orders adding up, two variations of one product staying
+apart because they are made differently, and units already under way moving
+off the list somebody works from and onto the list they watch.
 
 The other half is what a naive version would miss and quietly under-report: a
-line nothing matched, a product with no print file, a plate that failed, and
-a bundle whose parts exist but which nobody has put together yet.
+line nothing matched, a product nothing knows how to make, work that failed,
+and a bundle whose parts exist but which nobody has put together yet.
 """
 
 from __future__ import annotations
@@ -123,11 +123,11 @@ class TestOnePartManyOrders:
         assert len(found["items"]) == 1
         row = found["items"][0]
         assert (row["sku"], row["units_needed"], row["order_count"]) == ("PART-X", 6, 6)
-        # Six units at four to a plate is two plates, not six.
-        assert row["plates_outstanding"] == 2
+        # Six wanted and nothing started on any of them: six to make.
+        assert row["units_to_make"] == 6
 
     async def test_a_part_carries_no_orders_only_their_count(self, db):
-        """The regrouping is the feature: the row is the part, and which
+        """The regrouping is the feature: the row is the thing, and which
         orders wanted it is a question for the order screens."""
         part = await _product(db)
         await _file(db, part)
@@ -145,7 +145,7 @@ class TestOnePartManyOrders:
 
     async def test_the_list_itself_leads_with_what_has_waited_longest(self, db):
         """The order a shop works in; a tie goes to the bigger job, which is
-        the one worth setting a machine up for."""
+        the one worth setting up for."""
         old = await _product(db, sku="OLD")
         fresh = await _product(db, sku="FRESH")
         await _file(db, old)
@@ -160,8 +160,8 @@ class TestOnePartManyOrders:
         ]
 
     async def test_two_variations_of_one_product_stay_apart(self, db):
-        """"With fan" and "without fan" are different plates, and adding them
-        together would produce a number no single plate can satisfy."""
+        """"With fan" and "without fan" are made differently, and adding them
+        together would produce a number that matches neither."""
         part = await _product(db)
         await _file(db, part)
         with_fan = ProductVariation(
@@ -183,57 +183,163 @@ class TestOnePartManyOrders:
         assert sorted(row["units_needed"] for row in found["items"]) == [2, 3]
 
 
-class TestWhatIsActuallyOutstanding:
-    async def test_units_a_live_plate_covers_are_not_outstanding(self, db):
+# --------------------------------------------------------------------------
+# What is still to make, and what is already being made
+# --------------------------------------------------------------------------
+
+
+class TestWhatIsStillToMake:
+    async def test_units_already_under_way_are_not_still_to_make(self, db):
         part = await _product(db)
         await _file(db, part, units_per_plate=4)
         line = await _line(db, await _order(db), part, to_print=6)
         await _job(db, line, status="queued", units=4)
         await db.commit()
 
-        row = (await production.to_make(db))["items"][0]
-        assert (row["units_needed"], row["units_covered"]) == (6, 4)
-        assert row["units_outstanding"] == 2
-        assert row["plates_outstanding"] == 1
+        found = await production.to_make(db)
+        row = found["items"][0]
+        assert (row["units_needed"], row["units_started"]) == (6, 4)
+        assert row["units_to_make"] == 2
+        # And the four that started are on the other list, not lost.
+        assert found["in_production"][0]["units"] == 4
 
-    async def test_a_failed_plate_covers_nothing(self, db):
-        """Which is exactly why those units have to come back onto the list
-        rather than look finished."""
+    async def test_work_that_failed_is_back_on_the_list(self, db):
+        """Which is exactly why those units have to come back rather than sit
+        somewhere looking finished."""
         part = await _product(db)
         await _file(db, part, units_per_plate=4)
         line = await _line(db, await _order(db), part, to_print=4)
         await _job(db, line, status="failed", units=4)
         await db.commit()
 
-        row = (await production.to_make(db))["items"][0]
-        assert row["units_outstanding"] == 4
-        assert row["jobs"]["failed"] == 1
+        found = await production.to_make(db)
+        assert found["items"][0]["units_to_make"] == 4
+        assert found["in_production"] == []
 
-    async def test_a_done_plate_does_cover_its_units(self, db):
+    async def test_something_finished_but_not_yet_fitted_is_being_made(self, db):
+        """Made, and waiting for the rest of its line — so it is neither work
+        to pick up nor gone."""
         part = await _product(db)
         await _file(db, part, units_per_plate=4)
         line = await _line(db, await _order(db), part, to_print=4, state="printing")
         await _job(db, line, status="done", units=4)
         await db.commit()
 
-        row = (await production.to_make(db))["items"][0]
-        assert row["units_outstanding"] == 0
+        found = await production.to_make(db)
+        assert found["items"] == []
+        made = found["in_production"][0]
+        assert (made["units"], made["units_made"], made["progress"]) == (4, 4, 1.0)
 
-    async def test_covered_never_goes_negative(self, db):
-        """A four-up plate for a line needing one unit over-covers it, and a
-        negative outstanding count would subtract from the rest of the list."""
+    async def test_the_number_to_make_never_goes_negative(self, db):
+        """Work started for four units against a line needing one would
+        otherwise subtract from the rest of the list."""
         part = await _product(db)
         await _file(db, part, units_per_plate=4)
         line = await _line(db, await _order(db), part, to_print=1)
         await _job(db, line, status="queued", units=4)
         await db.commit()
 
-        assert (await production.to_make(db))["items"][0]["units_outstanding"] == 0
+        found = await production.to_make(db)
+        assert found["items"] == []
+        assert found["in_production"][0]["units_waiting"] == 4
+
+
+class TestWhatIsBeingMade:
+    async def test_nothing_started_is_not_being_made(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db), part, to_print=2)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert found["in_production"] == []
+        assert found["items"][0]["can_start"] is True
+
+    async def test_a_thing_being_made_says_how_far_along_it_is(self, db):
+        """The three numbers always add up to what is under way: finished,
+        moving, and waiting its turn."""
+        part = await _product(db)
+        await _file(db, part)
+        line = await _line(db, await _order(db), part, to_print=9, state="printing")
+        await _job(db, line, status="done", units=4)
+        await _job(db, line, status="printing", units=3)
+        await _job(db, line, status="pending", units=2)
+        await db.commit()
+
+        found = await production.to_make(db)
+        made = found["in_production"][0]
+        assert (made["units"], made["units_made"]) == (9, 4)
+        assert (made["units_happening"], made["units_waiting"]) == (3, 2)
+        assert made["units_made"] + made["units_happening"] + made["units_waiting"] == 9
+        assert made["progress"] == pytest.approx(4 / 9, abs=0.001)
+        assert made["started_at"] is not None
+
+    async def test_the_closest_to_finished_comes_first(self, db):
+        """It is the next thing to come off a machine."""
+        nearly = await _product(db, sku="NEARLY")
+        barely = await _product(db, sku="BARELY")
+        await _file(db, nearly)
+        await _file(db, barely)
+        order = await _order(db)
+        one = await _line(db, order, nearly, to_print=4, state="printing")
+        await _job(db, one, status="done", units=3)
+        await _job(db, one, status="printing", units=1)
+        two = await _line(db, order, barely, to_print=4, state="printing")
+        await _job(db, two, status="printing", units=4)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert [row["sku"] for row in found["in_production"]] == ["NEARLY", "BARELY"]
+
+    async def test_a_thing_can_be_on_both_lists_at_once(self, db):
+        """Four of ten started is four being made and six still to make —
+        the same thing, honestly counted twice."""
+        part = await _product(db)
+        await _file(db, part)
+        line = await _line(db, await _order(db), part, to_print=10)
+        await _job(db, line, status="printing", units=4)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert found["items"][0]["units_to_make"] == 6
+        assert found["in_production"][0]["units"] == 4
+
+    async def test_a_product_nothing_knows_how_to_make_cannot_start(self, db):
+        """It is on the list rather than missing from it: the work is real,
+        and what is wrong with it is the thing to show."""
+        part = await _product(db, sku="NOFILE")
+        await _line(db, await _order(db), part, to_print=3)
+        await db.commit()
+
+        found = await production.to_make(db)
+        row = found["items"][0]
+        assert row["can_start"] is False
+        assert row["units_to_make"] == 3
+        assert [entry["sku"] for entry in found["blocked"]] == ["NOFILE"]
+
+    async def test_a_variation_that_knows_its_own_way_can_start(self, db):
+        """The product has no way to be made; the variation has one."""
+        part = await _product(db, sku="VARONLY")
+        variation = ProductVariation(
+            product_id=part.id,
+            label="Blue",
+            options=[{"name": "Colour", "value": "Blue"}],
+            bambuddy_archive_id=777,
+            units_per_plate=2,
+        )
+        db.add(variation)
+        await db.flush()
+        await _line(db, await _order(db), part, to_print=4, variation_id=variation.id)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert found["items"][0]["can_start"] is True
+        assert found["blocked"] == []
 
 
 class TestWhatIsLeftOut:
-    async def test_units_coming_off_the_shelf_are_not_printed(self, db):
-        """Picked, not made — so they are not on the print list. They are on
+    async def test_units_coming_off_the_shelf_are_not_made(self, db):
+        """Picked, not made — so they are not on the make list. They are on
         the gather list instead; see TestGathering."""
         stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
         order = await _order(db)
@@ -245,10 +351,10 @@ class TestWhatIsLeftOut:
 
         found = await production.to_make(db)
         assert found["items"] == []
-        assert found["totals"]["units_needed"] == 0
+        assert found["totals"]["units_to_make"] == 0
         assert [row["sku"] for row in found["gather"]] == ["TRINKET"]
 
-    async def test_a_line_already_printed_is_not_on_the_list(self, db):
+    async def test_a_line_already_made_is_not_on_the_list(self, db):
         part = await _product(db)
         await _file(db, part)
         await _line(db, await _order(db), part, to_print=2, state="printed")
@@ -276,72 +382,6 @@ class TestWhatIsLeftOut:
         await db.commit()
 
         assert (await production.to_make(db))["items"][0]["units_needed"] == 4
-
-
-class TestWhatIsWaitingOnWhat:
-    async def test_nothing_planned_yet(self, db):
-        part = await _product(db)
-        await _file(db, part)
-        await _line(db, await _order(db), part, to_print=2)
-        await db.commit()
-
-        row = (await production.to_make(db))["items"][0]
-        assert row["stage"] == production.TO_PLAN
-        assert row["stage_label"] == "No plates worked out"
-
-    async def test_planned_but_not_sent(self, db):
-        part = await _product(db)
-        await _file(db, part)
-        line = await _line(db, await _order(db), part, to_print=2)
-        await _job(db, line, status="pending", units=2)
-        await db.commit()
-
-        assert (await production.to_make(db))["items"][0]["stage"] == production.TO_SEND
-
-    async def test_on_a_machine(self, db):
-        part = await _product(db)
-        await _file(db, part)
-        line = await _line(db, await _order(db), part, to_print=2, state="printing")
-        await _job(db, line, status="printing", units=2)
-        await db.commit()
-
-        assert (await production.to_make(db))["items"][0]["stage"] == production.ON_A_MACHINE
-
-    async def test_a_product_with_no_print_file_cannot_be_made(self, db):
-        """It is on the list rather than missing from it: the work is real,
-        and what is wrong with it is the thing to show."""
-        part = await _product(db, sku="NOFILE")
-        await _line(db, await _order(db), part, to_print=3)
-        await db.commit()
-
-        found = await production.to_make(db)
-        row = found["items"][0]
-        assert row["printable"] is False
-        assert row["stage"] == production.BLOCKED
-        assert row["units_per_plate"] is None
-        # No file means no plate count — and no pretending there is one.
-        assert row["plates_outstanding"] == 0
-        assert [entry["sku"] for entry in found["blocked"]] == ["NOFILE"]
-
-    async def test_a_variation_with_its_own_file_is_printable_on_its_own(self, db):
-        """The product has no file; the variation names one, which is what
-        gets printed."""
-        part = await _product(db, sku="VARONLY")
-        variation = ProductVariation(
-            product_id=part.id,
-            label="Blue",
-            options=[{"name": "Colour", "value": "Blue"}],
-            bambuddy_archive_id=777,
-            units_per_plate=2,
-        )
-        db.add(variation)
-        await db.flush()
-        await _line(db, await _order(db), part, to_print=4, variation_id=variation.id)
-        await db.commit()
-
-        row = (await production.to_make(db))["items"][0]
-        assert row["printable"] is True
-        assert (row["units_per_plate"], row["plates_outstanding"]) == (2, 2)
 
 
 class TestLinesNobodyCanMake:
@@ -431,8 +471,8 @@ class TestGathering:
         assert gather["PART-X"]["order_count"] == 3
 
     async def test_a_component_off_the_shelf_is_on_the_gather_list(self, db):
-        """It was never printed, so it is on no other list here — and the
-        person assembling still has to go and find it."""
+        """It was never made, so it is on no other list here — and the person
+        assembling still has to go and find it."""
         bundle = await _product(db, sku="GIFT-SET", name="Gift set", fulfillment="bundle")
         printed = await _product(db)
         stocked = await _product(db, sku="TRINKET", fulfillment="stocked")
@@ -516,7 +556,7 @@ class TestGathering:
         assert gather[0]["order_count"] == 3
 
     async def test_a_line_half_from_stock_is_honestly_on_both_lists(self, db):
-        """Three off the shelf and two to print is three to fetch and two to
+        """Three off the shelf and two to make is three to fetch and two to
         make, not five of either."""
         part = await _product(db)
         await _file(db, part)
@@ -599,19 +639,20 @@ class TestTotals:
         await db.commit()
 
         totals = (await production.to_make(db))["totals"]
-        assert totals["items"] == 3
-        assert totals["units_needed"] == 12
-        # PART-X is fully covered by its two live plates; the rest is not.
-        assert totals["units_outstanding"] == 4
-        assert totals["plates_to_send"] == 1
-        assert totals["plates_on_machines"] == 1
+        # PART-X is entirely under way, so it is not a thing to make at all.
+        assert totals["items"] == 2
+        assert totals["units_to_make"] == 4
+        assert totals["in_production_items"] == 1
+        assert totals["units_in_production"] == 8
+        assert totals["units_happening"] == 4
         assert totals["blocked"] == 1
         assert totals["orders"] == 2
 
     async def test_an_empty_shop_is_an_empty_list_not_an_error(self, db):
         found = await production.to_make(db)
         assert found["items"] == []
-        assert found["totals"]["units_needed"] == 0
+        assert found["in_production"] == []
+        assert found["totals"]["units_to_make"] == 0
         assert found["generated_at"] is not None
 
 
@@ -625,11 +666,26 @@ class TestOverTheWire:
         response = await signed_in.get("/api/production")
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["totals"]["units_outstanding"] == 6
+        assert body["totals"]["units_to_make"] == 6
         assert body["items"][0]["sku"] == "PART-X"
-        assert body["items"][0]["units_outstanding"] == 6
-        # No order travels with a part, on the wire either.
+        assert body["items"][0]["units_to_make"] == 6
+        assert body["in_production"] == []
+        # No order travels with a thing, on the wire either.
         assert "orders" not in body["items"][0]
+
+    async def test_the_wire_carries_what_is_being_made(self, db, signed_in):
+        part = await _product(db)
+        await _file(db, part)
+        line = await _line(db, await _order(db, "9001"), part, to_print=4, state="printing")
+        await _job(db, line, status="done", units=2)
+        await _job(db, line, status="printing", units=2)
+        await db.commit()
+
+        body = (await signed_in.get("/api/production")).json()
+        assert body["items"] == []
+        made = body["in_production"][0]
+        assert (made["units"], made["units_made"], made["units_happening"]) == (4, 2, 2)
+        assert made["progress"] == 0.5
 
     async def test_the_csv_is_the_same_list(self, db, signed_in):
         import csv
@@ -645,11 +701,28 @@ class TestOverTheWire:
         assert response.headers["content-type"].startswith("text/csv")
         rows = list(csv.DictReader(io.StringIO(response.text)))
         assert rows[0]["Code"] == "PART-X"
-        assert rows[0]["To make"] == "6"
-        assert rows[0]["Plates"] == "2"
-        # The sheet somebody carries to a machine: parts and counts, no
-        # column of order numbers to read past.
+        assert rows[0]["Quantity"] == "6"
+        assert rows[0]["Status"] == "To make"
+        # The sheet somebody carries to a bench: things and counts, with no
+        # column of order numbers to read past and nothing about machines.
         assert "Orders" not in rows[0]
+        assert "Plates" not in rows[0]
+
+    async def test_the_csv_says_what_is_being_made(self, db, signed_in):
+        import csv
+        import io
+
+        part = await _product(db)
+        await _file(db, part)
+        line = await _line(db, await _order(db, "9001"), part, to_print=3, state="printing")
+        await _job(db, line, status="done", units=1)
+        await _job(db, line, status="printing", units=2)
+        await db.commit()
+
+        response = await signed_in.get("/api/production.csv")
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        assert len(rows) == 1
+        assert rows[0]["Status"] == "Being made (1 of 3 done)"
 
     async def test_it_takes_a_signed_in_user(self, db, client):
         assert (await client.get("/api/production")).status_code == 401

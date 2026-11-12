@@ -29,3 +29,29 @@ body {
 .board-scroll {
   scrollbar-width: thin;
 }
+
+/* The "being made now" bar's moving segment. Tailwind's own `animate-pulse`
+   fades to half opacity, which takes the colour below the contrast it was
+   chosen at — so this breathes between full and 0.85, enough to read as
+   alive and not enough to wash the segment out. Respects a viewer who has
+   asked for less motion: the colour and the number beside it say the same
+   thing without it. */
+@keyframes printflow-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+.breathe {
+  animation: printflow-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .breathe {
+    animation: none;
+  }
+}
