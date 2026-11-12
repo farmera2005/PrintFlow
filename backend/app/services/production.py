@@ -10,14 +10,22 @@ So this groups by **what is made rather than by who ordered it**: a row per
 product and variation, because two variations of one product are made
 differently and are two different things to make.
 
-**Three buckets, and every unit is in exactly one of them.**
+**One list, and one number per thing: how many of it are not in hand yet.**
 
-* *To make* — nothing has started on these. This is the list somebody works
-  from, and the number they act on.
-* *Being made* — work is under way. PrintFlow started it without being asked,
-  so it is not a job for a person; it is something to watch finish.
-* *Gathered* — taken off a shelf rather than off a machine, which is the
-  other half of getting an order out and appears on no other screen.
+Where a unit comes from is not a second list. Some are printed and some come
+off a shelf, and a person holding this list still has to end the day with the
+same count either way — so a thing an order needs is one row whatever is
+going to satisfy it. The split is kept on the row, because walking to a shelf
+and setting up a machine are different afternoons, but it is a note, not a
+division.
+
+The only thing that is set apart is work **already under way**: PrintFlow
+started it without being asked, so it is not a job for a person; it is
+something to watch finish. Everything else is the list.
+
+A unit that is already in hand — printed, picked, packed — is on neither.
+That is what makes the number worth acting on: it is what is missing, not
+what an order adds up to.
 
 How the making actually happens — which file, which machine, what was sent
 where — is the Printers tab's business and deliberately not this one's. This
@@ -39,7 +47,6 @@ from ..models import (
     JOB_PENDING,
     JOB_PRINTING,
     JOB_QUEUED,
-    LINE_ALLOCATED,
     LINE_CANCELLED,
     LINE_LABELED,
     LINE_PRINTED,
@@ -66,11 +73,10 @@ CLOSED_ORDERS = (ORDER_SHIPPED, ORDER_COMPLETE, ORDER_CANCELLED)
 # Lines whose making is behind them, whatever the order is doing.
 MADE_STATES = (LINE_PRINTED, LINE_READY, LINE_LABELED, LINE_SHIPPED, LINE_CANCELLED)
 
-# A component that physically exists and can be picked up. Not the same list:
-# a part taken from stock is `allocated` and was never printed at all, and a
-# bundle made entirely of shelf items would otherwise never look ready to
-# build.
-IN_HAND = (LINE_ALLOCATED, LINE_PRINTED, LINE_READY, LINE_LABELED, LINE_SHIPPED)
+# A line that is out of the door, or was never going out of it. Its shelf
+# units are picked by now: a stocked item stays on its shelf until somebody
+# makes the parcel, which is the moment the line gets labelled.
+GONE = (LINE_LABELED, LINE_SHIPPED, LINE_CANCELLED)
 
 # Work that is under way: the machinery of it belongs to the Printers tab, so
 # all this module takes from it is how many units are at each stage of being
@@ -172,7 +178,7 @@ def _when(order: Order) -> datetime | None:
 
 
 async def to_make(session: AsyncSession) -> dict[str, Any]:
-    """What to make, what is being made, what to gather, and what is stuck.
+    """One list of things to make, what is already being made, and what is stuck.
 
     One query for the lines and their products — the shop floor refreshes
     this screen, and a query per row would make a list of forty things forty
@@ -196,12 +202,31 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         .all()
     )
 
+    # A bundle is never a row: it is not a thing anybody makes, it is a thing
+    # somebody puts together out of other rows. Its components are ordinary
+    # lines with their own quantities, so they are already on the list — all
+    # the bundle contributes is its name, as what its parts are for.
+    children_of: dict[Any, list[OrderLine]] = {}
+    for line in lines:
+        if line.parent_line_id is not None:
+            children_of.setdefault(line.parent_line_id, []).append(line)
+
+    has_children = set(children_of)
+    bundle_of: dict[Any, str] = {}
+    for line in lines:
+        kids = children_of.get(line.id)
+        if not kids:
+            continue
+        name = line.product.name if line.product else (line.title or line.sku_raw)
+        for child in kids:
+            bundle_of[child.id] = name or "a bundle"
+
     wanted = [
         line
         for line in lines
-        if line.qty_to_print > 0
-        and line.state not in MADE_STATES
-        and line.product_id is not None
+        if line.product_id is not None
+        and line.id not in has_children
+        and (_to_print(line) > 0 or _from_stock(line) > 0)
     ]
     makeable = await _makeable(session, wanted)
 
@@ -227,6 +252,9 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
                 "units_made": 0,
                 "units_happening": 0,
                 "started_at": None,
+                # The half of the row that comes off a shelf. Still a thing to
+                # go and get, so still on the list — just a different walk.
+                "units_from_stock": 0,
                 # Facts about the thing, gathered from the lines that want it.
                 # The lines themselves are not kept: this is a list of things
                 # to make, and a thing does not become several things to make
@@ -234,9 +262,11 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
                 "order_ids": set(),
                 "waiting_since": None,
                 "for_bundle": False,
+                "bundles": set(),
             }
 
-        row["units_needed"] += line.qty_to_print
+        row["units_needed"] += _to_print(line)
+        row["units_from_stock"] += _from_stock(line)
         row["units_started"] += _units(line, UNDER_WAY)
         row["units_made"] += _units(line, FINISHED)
         row["units_happening"] += _units(line, HAPPENING)
@@ -255,15 +285,26 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
             row["waiting_since"] = placed
         # Worth saying when any of it is for a bundle: somebody picking the
         # shelf will not find the thing on an order by name.
-        row["for_bundle"] = row["for_bundle"] or line.parent_line_id is not None
+        bundle = bundle_of.get(line.id)
+        if bundle:
+            row["for_bundle"] = True
+            row["bundles"].add(bundle)
 
     to_do: list[dict[str, Any]] = []
     under_way: list[dict[str, Any]] = []
     for row in rows.values():
         row["order_count"] = len(row.pop("order_ids"))
-        # The number the list leads with: units nothing has started on.
+        row["bundles"] = sorted(row.pop("bundles"))
+        # Units nothing has started on, plus units nobody has fetched. The
+        # second number is not a smaller kind of work: the shop is short of
+        # them either way, so they are one quantity on one row.
         row["units_to_make"] = max(row["units_needed"] - row["units_started"], 0)
-        if row["units_to_make"] > 0:
+        row["units"] = row["units_to_make"] + row["units_from_stock"]
+        # Nothing to print means nothing to be unable to print: a row that is
+        # entirely off a shelf is never blocked, it is a walk.
+        if row["units_to_make"] == 0:
+            row["can_start"] = True
+        if row["units"] > 0:
             to_do.append(row)
         if row["units_started"] > 0:
             under_way.append(_being_made(row))
@@ -274,7 +315,7 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         key=lambda row: (
             row["waiting_since"] is None,
             row["waiting_since"],
-            -row["units_to_make"],
+            -row["units"],
         )
     )
     # What is closest to finished, first: it is the next thing off a machine.
@@ -285,10 +326,24 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         "in_production": under_way,
         "blocked": [row for row in to_do if not row["can_start"]],
         "unmatched": _unmatched(lines),
-        "gather": _gather(lines),
         "totals": _totals(to_do, under_way, len({line.order_id for line in wanted})),
         "generated_at": datetime.now().astimezone(),
     }
+
+
+def _to_print(line: OrderLine) -> int:
+    """Units of this line that have to come off a machine."""
+    return line.qty_to_print if line.state not in MADE_STATES else 0
+
+
+def _from_stock(line: OrderLine) -> int:
+    """Units of this line that have to come off a shelf.
+
+    A shelf does not empty itself when QuickBooks says the stock is there:
+    somebody picks it when they pack it. So a stocked unit stays on the list
+    right up to the label, which is the moment that happened.
+    """
+    return line.qty_from_stock if line.state not in GONE else 0
 
 
 def _being_made(row: dict[str, Any]) -> dict[str, Any]:
@@ -322,7 +377,11 @@ def _totals(
 ) -> dict[str, int]:
     return {
         "items": len(to_do),
+        # The headline, and the two halves of it. The halves are on the tile
+        # as a hint rather than as tiles of their own: one list, one number.
+        "units": sum(row["units"] for row in to_do),
         "units_to_make": sum(row["units_to_make"] for row in to_do),
+        "units_from_stock": sum(row["units_from_stock"] for row in to_do),
         "in_production_items": len(under_way),
         "units_in_production": sum(row["units"] for row in under_way),
         "units_happening": sum(row["units_happening"] for row in under_way),
@@ -373,119 +432,4 @@ def _unmatched(lines: list[OrderLine]) -> list[dict[str, Any]]:
         row["order_count"] = len(row.pop("order_ids"))
         out.append(row)
     out.sort(key=lambda entry: (entry["waiting_since"] is None, entry["waiting_since"]))
-    return out
-
-
-def _gather(lines: list[OrderLine]) -> list[dict[str, Any]]:
-    """Everything an open order needs off a shelf rather than off a printer.
-
-    Two kinds of thing, and one rule covers both: **if it is a bundle, use its
-    components; otherwise use the item itself.**
-
-    * A bundle waiting to be built is not a job somebody can pick up — six
-      brackets and three knobs is. So a bundle is never a row here; its parts
-      are, added up across every bundle and order waiting, with the bundle's
-      name riding along as what they are for.
-    * An item that is not a bundle has nothing to break into, so it is the row.
-      That is how the things an order takes from stock get onto this screen at
-      all: nothing is printed for them, so they appear on no other list here,
-      and somebody still has to walk and find them.
-
-    Components are taken from the order's own lines rather than from the bill
-    of materials, because the two can differ: an option the buyer picked can
-    swap a component out, and the line is what that decision was recorded on.
-    """
-    by_parent: dict[Any, list[OrderLine]] = {}
-    for line in lines:
-        if line.parent_line_id is not None:
-            by_parent.setdefault(line.parent_line_id, []).append(line)
-
-    rows: dict[tuple[Any, Any], dict[str, Any]] = {}
-
-    def row_for(line: OrderLine) -> dict[str, Any]:
-        product: Product | None = line.product
-        key = (line.product_id or (line.sku_raw or line.title), line.variation_id)
-        row = rows.get(key)
-        if row is None:
-            row = rows[key] = {
-                "product_id": line.product_id,
-                "variation_id": line.variation_id,
-                "sku": product.sku if product else (line.sku_raw or "?"),
-                "name": product.name if product else (line.title or "Unknown"),
-                "variation_label": line.variation.label if line.variation else None,
-                "fulfillment": product.fulfillment if product else None,
-                # Units that can be fetched now, and units belonging to
-                # bundles that are still missing a part of their own.
-                "units": 0,
-                "units_waiting": 0,
-                "bundles": set(),
-                "order_ids": set(),
-                "waiting_since": None,
-            }
-        return row
-
-    def note(row: dict[str, Any], line: OrderLine) -> None:
-        row["order_ids"].add(line.order_id)
-        placed = _when(line.order)
-        if placed is not None and (
-            row["waiting_since"] is None or placed < row["waiting_since"]
-        ):
-            row["waiting_since"] = placed
-
-    for line in lines:
-        # Already out of the door, or never going out of it.
-        if line.state in (LINE_CANCELLED, LINE_SHIPPED, LINE_LABELED):
-            continue
-
-        children = by_parent.get(line.id)
-        if children:
-            # A bundle: its parts, never itself. Nothing to gather once it has
-            # been put together.
-            if line.assembled_at is not None:
-                continue
-            # Whether this particular bundle can be built now. A half-made one
-            # is a bench occupied by something that cannot be finished, so its
-            # components are counted apart rather than added in. A cancelled
-            # component is not something to wait for.
-            buildable = all(
-                child.state in IN_HAND
-                for child in children
-                if child.state != LINE_CANCELLED
-            )
-            bundle = (
-                line.product.name if line.product else (line.title or line.sku_raw)
-            ) or "bundle"
-            for child in children:
-                if child.state == LINE_CANCELLED:
-                    continue
-                row = row_for(child)
-                row["units" if buildable else "units_waiting"] += child.quantity
-                row["bundles"].add(bundle)
-                note(row, line)
-            continue
-
-        # Not a bundle, and not a bundle's component — those were counted with
-        # their bundle. What is left is an item in its own right, and the part
-        # of it that comes off a shelf is what there is to go and fetch. The
-        # part being printed is on the print list instead; a line that is half
-        # stock and half print is honestly on both.
-        if line.parent_line_id is not None or line.qty_from_stock <= 0:
-            continue
-        row = row_for(line)
-        row["units"] += line.qty_from_stock
-        note(row, line)
-
-    out = []
-    for row in rows.values():
-        row["bundles"] = sorted(row.pop("bundles"))
-        row["order_count"] = len(row.pop("order_ids"))
-        out.append(row)
-    # What can be fetched now, first.
-    out.sort(
-        key=lambda entry: (
-            not entry["units"],
-            entry["waiting_since"] is None,
-            entry["waiting_since"],
-        )
-    )
     return out

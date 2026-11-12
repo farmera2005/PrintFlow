@@ -10,19 +10,18 @@ import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
  * tab's business: somebody standing at a bench with this screen open wants to
  * know what to pick up next, not how the queue is plumbed.
  *
- * Every unit an open order is short of is in exactly one of three places:
+ * One list, one number per thing. A unit that comes off a shelf is still a
+ * thing somebody has to go and get, so it is a row here like any other; that
+ * it is a walk rather than a machine is a note on the row, written where it
+ * changes what the person does, and not a second list to read.
  *
- * **Being made** sits at the top, because it is the only part of the screen
- * that changes on its own. It is drawn as a bar per thing rather than as a
- * row in the table, since "how far along is it" is a quantity a shape
+ * **Being made** sits above the list, because it is the only part of the
+ * screen that changes on its own. It is drawn as a bar per thing rather than
+ * as a row in the table, since "how far along is it" is a quantity a shape
  * answers faster than a number does.
  *
- * **To make** is the list proper: nothing has started on these, so they are
- * the work. Longest wait first — the thing that has kept an order waiting
- * longest is the one to put on next.
- *
- * **To gather** is what comes off a shelf instead of a machine, which is the
- * other half of getting an order out and appears on no other screen.
+ * **To make** is everything else: longest wait first, because the thing that
+ * has kept an order waiting longest is the one to put on next.
  */
 
 /* The two colours the screen uses for quantities, and the only two. Emerald
@@ -179,10 +178,15 @@ export default function ToMake() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Tile
                 label="To make"
-                value={totals!.units_to_make}
+                value={totals!.units}
                 hint={`${totals!.items} item${totals!.items === 1 ? '' : 's'}, for ${
                   totals!.orders
                 } order${totals!.orders === 1 ? '' : 's'}`}
+              />
+              <Tile
+                label="Off a shelf"
+                value={totals!.units_from_stock}
+                hint={`of the ${totals!.units}, a walk not a machine`}
               />
               <Tile
                 label="Being made"
@@ -193,11 +197,6 @@ export default function ToMake() {
                     : 'Waiting their turn'
                 }
                 tone={totals!.units_in_production ? 'text-amber-700' : undefined}
-              />
-              <Tile
-                label="To gather"
-                value={list.gather.reduce((sum, part) => sum + part.units, 0)}
-                hint="Off a shelf rather than made"
               />
               <Tile
                 label="Cannot start"
@@ -240,7 +239,8 @@ export default function ToMake() {
               <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
                 <h2 className="text-sm font-semibold text-ink-800">To make</h2>
                 <span className="text-xs text-ink-500">
-                  Nothing has started on these. Longest wait first.
+                  Everything not in hand yet, however it is going to get here.
+                  Longest wait first.
                 </span>
               </div>
 
@@ -286,19 +286,24 @@ export default function ToMake() {
                                 · {item.variation_label}
                               </span>
                             ) : null}
-                            {item.for_bundle ? (
+                            {item.bundles.length ? (
                               <span className="ml-1.5 text-xs text-ink-400">
-                                · goes into a bundle
+                                → {item.bundles.join(', ')}
                               </span>
                             ) : null}
                           </td>
                           <td className="px-3 py-2 text-right">
                             <span className="text-base font-semibold tabular-nums text-ink-900">
-                              {item.units_to_make}
+                              {item.units}
                             </span>
-                            {item.units_to_make !== item.units_needed ? (
-                              <span className="ml-1 text-xs font-normal text-ink-400">
-                                of {item.units_needed}
+                            {/* Where it comes from, said only when it changes
+                                the walk. A row that is entirely off a shelf
+                                does not need the number said twice. */}
+                            {item.units_from_stock > 0 ? (
+                              <span className="ml-1 text-xs font-normal text-ink-500">
+                                {item.units_from_stock === item.units
+                                  ? 'off a shelf'
+                                  : `${item.units_from_stock} off a shelf`}
                               </span>
                             ) : null}
                           </td>
@@ -325,55 +330,6 @@ export default function ToMake() {
                 </p>
               ) : null}
             </Card>
-
-            {list.gather.length ? (
-              <Card className="overflow-hidden">
-                <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                  <h2 className="text-sm font-semibold text-ink-800">To gather</h2>
-                  <span className="text-xs text-ink-500">
-                    Off a shelf rather than made: the parts that go into bundles
-                    waiting to be built, and whatever an order takes from stock on
-                    its own.
-                  </span>
-                </div>
-                <div className="divide-y divide-ink-200">
-                  {list.gather.map((part) => (
-                    <div
-                      key={`${part.product_id ?? part.sku}:${part.variation_id ?? ''}`}
-                      className="flex flex-wrap items-center gap-2 px-3 py-2"
-                    >
-                      <span className="w-8 text-right text-base font-semibold tabular-nums text-ink-900">
-                        {part.units}
-                      </span>
-                      <span className="font-mono text-xs text-ink-500">{part.sku}</span>
-                      <span className="text-sm text-ink-800">{part.name}</span>
-                      {part.variation_label ? (
-                        <span className="text-xs text-ink-500">
-                          · {part.variation_label}
-                        </span>
-                      ) : null}
-                      {/* What it is being built into. A pile of parts with
-                          nothing to build is not a job either — and an item
-                          that is not part of a bundle simply is the thing,
-                          so it says nothing. */}
-                      {part.bundles.length ? (
-                        <span className="text-xs text-ink-400">
-                          → {part.bundles.join(', ')}
-                        </span>
-                      ) : null}
-                      {part.units_waiting ? (
-                        <Badge className="bg-slate-100 text-slate-700 ring-slate-300">
-                          {part.units_waiting} more once those bundles are made
-                        </Badge>
-                      ) : null}
-                      <span className="ml-auto text-xs text-ink-500">
-                        {since(part.waiting_since)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            ) : null}
 
             {list.unmatched.length ? (
               <Card className="overflow-hidden">

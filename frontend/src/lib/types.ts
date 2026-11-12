@@ -945,8 +945,14 @@ export interface ProductionItem {
   units_made: number
   units_happening: number
   started_at: string | null
-  /** The number the list leads with: needed less started, never below zero. */
+  /** The number the list leads with: everything not in hand yet, whichever
+   *  way it is going to arrive. */
+  units: number
+  /** The machine half: needed less started, never below zero. */
   units_to_make: number
+  /** The shelf half: units somebody still has to walk and fetch. A note on
+   *  the row rather than a list of its own. */
+  units_from_stock: number
   /** How many orders are waiting on it — a count, not a breakdown. */
   order_count: number
   /** When the longest-waiting order behind this part was placed. */
@@ -954,6 +960,9 @@ export interface ProductionItem {
   /** True when any of these go into a bundle: somebody picking the shelf
    *  will not find the part on an order by name. */
   for_bundle: boolean
+  /** Which bundles, so a part has a job attached. Empty when the thing is
+   *  ordered in its own right. */
+  bundles: string[]
 }
 
 /** One thing being made right now.
@@ -991,30 +1000,12 @@ export interface ProductionList {
     order_count: number
     waiting_since: string | null
   }[]
-  /** Everything to fetch off a shelf rather than off a printer, under one
-   *  rule: a bundle becomes its components, and anything else is itself.
-   *  That is how the things an order takes from stock reach this screen —
-   *  nothing is printed for them, so they are on no other list here. */
-  gather: {
-    product_id: string | null
-    variation_id: string | null
-    sku: string | null
-    name: string | null
-    variation_label: string | null
-    fulfillment: string | null
-    /** Units to gather for the bundles that can be built now. */
-    units: number
-    /** Units belonging to bundles still waiting on a part of their own. */
-    units_waiting: number
-    /** What these go into, so a pile of parts has a job attached. Empty for
-     *  an item that is not part of a bundle: it is the thing itself. */
-    bundles: string[]
-    order_count: number
-    waiting_since: string | null
-  }[]
   totals: {
     items: number
+    /** Everything on the list, and the two halves of it. */
+    units: number
     units_to_make: number
+    units_from_stock: number
     in_production_items: number
     units_in_production: number
     units_happening: number

@@ -38,8 +38,9 @@ async def download_production(
 ) -> Response:
     """The same list, for a clipboard on the shop floor.
 
-    One line per thing and how many of it — what to make, what is already
-    being made, and what to fetch.
+    One line per thing and how many of it. `From stock` says how much of that
+    quantity is a walk to a shelf rather than a machine — a note on the row,
+    the same as on the screen, and not a second list.
     """
     found = await production.to_make(session)
     buffer = io.StringIO()
@@ -50,7 +51,8 @@ async def download_production(
             "Item",
             "Variation",
             "Quantity",
-            "Needed",
+            "From stock",
+            "For",
             "Waiting since",
             "Status",
         ]
@@ -61,8 +63,9 @@ async def download_production(
                 row["sku"],
                 row["name"],
                 row["variation_label"] or "",
-                row["units_to_make"],
-                row["units_needed"],
+                row["units"],
+                row["units_from_stock"],
+                ", ".join(row["bundles"]),
                 _day(row["waiting_since"]),
                 "To make" if row["can_start"] else "Cannot be made yet",
             ]
@@ -75,7 +78,8 @@ async def download_production(
                 row["name"],
                 row["variation_label"] or "",
                 row["units"],
-                row["units"],
+                0,
+                "",
                 _day(row["started_at"]),
                 f"Being made ({row['units_made']} of {row['units']} done)",
             ]
@@ -88,24 +92,10 @@ async def download_production(
                 line["title"] or "",
                 "",
                 line["units"],
-                line["units"],
+                0,
+                "",
                 _day(line["waiting_since"]),
                 "No product matched",
-            ]
-        )
-
-    for part in found["gather"]:
-        writer.writerow(
-            [
-                part["sku"] or "",
-                part["name"] or "",
-                part["variation_label"] or "",
-                part["units"],
-                part["units"] + part["units_waiting"],
-                _day(part["waiting_since"]),
-                "Gather for " + ", ".join(part["bundles"])
-                if part["bundles"]
-                else "Gather from stock",
             ]
         )
 

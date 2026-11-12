@@ -671,18 +671,23 @@ list. Nothing on this screen is about files, machines or queues — **how** the
 making happens is the Printers tab's business, deliberately kept off a screen
 whose job is to say *what* and *how many*.
 
-**Every unit an open order is short of is in exactly one of three places**,
-and the screen is those three places:
+**One list.** Some units get made on a machine and some come off a shelf, and
+that is not two lists: the shop is short of the thing either way, and the
+person holding this has to end the day with the same count. So a thing an
+order needs is one row, and *how much of it is a walk* is a note on the row —
+*Fabric pouch · 6 off a shelf*, *Cable bracket · 5 · 3 off a shelf* — written
+where it changes what somebody does and nowhere else.
 
-* **Being made** — work is under way. PrintFlow started it without being
-  asked, so it is not a job for a person; it is something to watch finish.
-* **To make** — nothing has started on these. This is the list somebody works
-  from, and the number they act on.
-* **To gather** — off a shelf rather than off a machine, which is the other
-  half of getting an order out and appears on no other screen.
+**A unit already in hand is on neither list.** Printed, picked or packed, it
+is not work. That is what makes the number worth acting on: it is what is
+missing, not what an order adds up to. A bundle whose parts all exist asks for
+nothing here — what is left is putting it together, and that is the board's
+Assembly column, not this screen.
 
-**Being made now** sits at the top, because it is the only part of the screen
-that changes on its own. One card per thing, and a bar: the units already
+Only one thing is set apart, and it is set apart because nobody has to do it:
+
+**Being made now** sits above the list, because it is the only part of the
+screen that changes on its own. One card per thing, and a bar: the units already
 made in emerald, the units moving right now in amber with a gentle pulse, and
 the rest of what is under way as the empty track behind them. The three
 numbers always add up to what is under way, written out beside the bar as
@@ -704,43 +709,38 @@ job, which is the one worth setting up *for*.
 differently — "with fan" and "without fan" are two different things to make,
 and adding them together would produce a number that matches neither.
 
-Three things that are not units to make are on the list anyway, because a
-screen that only counted what it understood would under-report the day:
+**A bundle is never a row.** It is not a thing anybody makes; it is a thing
+somebody puts together out of other rows. Its components are ordinary lines
+with quantities of their own, so they are already on the list — *6 × Cable
+bracket → Gift set* — with the bundle's name beside them so a part has a job
+attached and whoever is picking can find it, since they will not find it on
+an order by name. The components come from the order's own lines rather than
+from the bill of materials, because the two can differ: an option the buyer
+picked can swap a component out, and the line is what that decision was
+recorded on.
+
+Two things that are not units to make are on the screen anyway, because a
+list that only counted what it understood would under-report the day:
 
 * **Cannot be made yet** — nothing here knows how to make it. Real work that
   cannot start, named with what is wrong with it; set it up on the Products
-  tab and it joins the list.
+  tab and it joins the list. A row that is entirely off a shelf is never
+  blocked — there is nothing to be unable to make, it is a walk.
 * **Waiting on a product** — a listing nothing matched, with how many of it
   were sold. It contributes to no total, which is exactly why it needs its own
   line rather than silence; the same unlinked listing sold six times is one
   thing to go and fix, not six.
-* **To gather**, in full — everything an order needs off a shelf rather than
-  off a machine, under one rule: **a bundle becomes its components, and anything
-  else is itself.** A bundle waiting to be built is not a job somebody can
-  pick up, so it is never a row; its parts are — *6 × Cable bracket → Gift
-  set* — added up across every bundle and order waiting, with the bundle's
-  name beside them so a pile of parts has a job attached. An item that is not
-  a bundle has nothing to break into, so it is the row, with no bundle beside
-  it. That is how **the things an order takes from stock** reach this screen
-  at all: nothing is made for them, so they are on no other list here, and
-  somebody still has to walk and find them. Components of bundles still
-  missing a part of their own are counted separately rather than added in,
-  because a half-made bundle is a bench occupied by something that cannot be
-  finished.
 
-Units coming off the shelf are not on the make list: those are picked, not
-made, and they are on the gather list instead. A line that is half stock and
-half made is honestly on both — three to fetch and two to make, not five of
-either.
+A stocked item stays on the list until its parcel exists, because a shelf does
+not empty itself when QuickBooks says the stock is there: somebody picks it
+when they pack it, and the label is the moment that happened.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
-order anywhere else on the board still wants its parts. A part that goes into
-a bundle says so, since somebody picking the shelf will not find it on an
-order by name.
+order anywhere else on the board still wants its parts.
 
 **Download CSV** is the same list for a clipboard — code, item, variation,
-quantity, how long it has waited and what is happening to it, with nothing to
-expand. The screen refreshes itself every minute, so it can be left open on a
-shop floor.
+quantity, how much of it is off a shelf, what it is for, how long it has
+waited and what is happening to it, with nothing to expand. The screen
+refreshes itself every minute, so it can be left open on a shop floor.
 
 Which orders are waiting is deliberately a question for the Orders tab and the
 board. The count of them is on the first tile, so the list says how much of the
