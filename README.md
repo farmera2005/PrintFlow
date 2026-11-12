@@ -684,7 +684,35 @@ missing, not what an order adds up to. A bundle whose parts all exist asks for
 nothing here — what is left is putting it together, and that is the board's
 Assembly column, not this screen.
 
-Only one thing is set apart, and it is set apart because nobody has to do it:
+### First — when the dates are the wrong answer
+
+Longest wait first is right until the afternoon somebody is on the phone, a
+machine is free and only takes this one part, or a trade customer is standing
+in the shop. **First** is the section above the list for exactly that: drag a
+row into it and it jumps the queue; drag it back and it rejoins where its wait
+puts it. Within the section, drag rows against each other to say which of the
+urgent things is the most urgent.
+
+**It is not decoration.** A thing in First goes first on this screen, first on
+the printed sheet, and **first onto a machine** — the dispatcher sorts pending
+plates by the priority list before it sorts them by age. A control that
+reordered a screen and changed nothing a printer does would be worse than no
+control at all, because somebody would believe it once.
+
+Every drag has a button beside it — ⌃ to move up, ⌄ to move down, ✕ to send it
+back to the queue, and ⌃ on a queued row to bring it to the front. Dragging is
+a mouse, and a mouse is not the only way anybody works; a tablet propped on a
+bench gets the same list.
+
+A pin is on the **thing**, not on an order, and it stays until somebody takes
+it off. So a pinned item whose orders have all been made is still shown, as a
+row reading *nothing outstanding* — visible precisely so it can be removed,
+because a priority nobody can see is one nobody can undo. It is not counted in
+the tiles: a figure that said four when three things needed doing would be the
+one number on the page nobody trusts.
+
+Only one thing is set apart from the list itself, and it is set apart because
+nobody has to do it:
 
 **Being made now** sits above the list, because it is the only part of the
 screen that changes on its own. One card per thing, and a bar: the units already
@@ -737,10 +765,14 @@ when they pack it, and the label is the moment that happened.
 Shipped, complete and cancelled orders ask for nothing, so they are gone; an
 order anywhere else on the board still wants its parts.
 
-**Download CSV** is the same list for a clipboard — code, item, variation,
-quantity, how much of it is off a shelf, what it is for, how long it has
-waited and what is happening to it, with nothing to expand. The screen
-refreshes itself every minute, so it can be left open on a shop floor.
+**Download CSV** is the same list for a clipboard — a `First` column holding
+the priority number, then code, item, variation, quantity, how much of it is
+off a shelf, what it is for, how long it has waited and what is happening to
+it, with nothing to expand. The priority number is a column of its own rather
+than only the row order, so it survives the first thing anybody does to a CSV,
+which is sort it. The screen refreshes itself every minute, so it can be left
+open on a shop floor — except while somebody is mid-drag, which is a
+half-finished thought the refresh has no business throwing away.
 
 Which orders are waiting is deliberately a question for the Orders tab and the
 board. The count of them is on the first tile, so the list says how much of the

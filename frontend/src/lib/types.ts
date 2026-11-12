@@ -988,6 +988,10 @@ export interface ProductionRunning {
 }
 
 export interface ProductionList {
+  /** What the shop has said goes first, in the order it said. A pinned thing
+   *  with nothing outstanding is here too, reading zero — otherwise there is
+   *  no way to see it, and no way to take it off. */
+  priority: ProductionItem[]
   items: ProductionItem[]
   /** What is under way without anybody asking — to watch, not to pick up. */
   in_production: ProductionRunning[]

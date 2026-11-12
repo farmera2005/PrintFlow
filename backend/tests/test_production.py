@@ -99,6 +99,11 @@ async def _job(db, line, *, status="pending", units=1, **fields):
     return job
 
 
+def _plate(archive: int) -> list[dict]:
+    """One way of making this plate: any machine, this file."""
+    return [{"archive_id": archive, "plate_number": 1, "printer_models": []}]
+
+
 def _by_sku(found):
     return {row["sku"]: row for row in found["items"]}
 
@@ -756,3 +761,364 @@ class TestOverTheWire:
     async def test_it_takes_a_signed_in_user(self, db, client):
         assert (await client.get("/api/production")).status_code == 401
         assert (await client.get("/api/production.csv")).status_code == 401
+
+
+class TestWhatGoesFirst:
+    """The shop's own ordering, on top of the one the dates give it.
+
+    Longest wait first is right until the afternoon somebody is on the phone.
+    What matters about this list is that saying so is cheap, visible and
+    reversible — and that it is not decoration: a thing pinned here is a
+    thing a machine actually takes first.
+    """
+
+    async def test_nothing_is_first_until_somebody_says_so(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db), part, to_print=2)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert found["priority"] == []
+        assert [row["sku"] for row in found["items"]] == ["PART-X"]
+
+    async def test_a_pinned_thing_leaves_the_queue_for_the_front(self, db):
+        old = await _product(db, sku="OLD")
+        rush = await _product(db, sku="RUSH")
+        await _file(db, old)
+        await _file(db, rush)
+        await _line(db, await _order(db, "9001", days_ago=20), old, to_print=1)
+        await _line(db, await _order(db, "9002", days_ago=1), rush, to_print=1)
+        await db.commit()
+
+        await production.set_priority(db, [(rush.id, None)], by="adam")
+        await db.commit()
+
+        found = await production.to_make(db)
+        # In front of the thing that has waited three weeks, which is the
+        # whole point: the dates are a default, not a verdict.
+        assert [row["sku"] for row in found["priority"]] == ["RUSH"]
+        assert [row["sku"] for row in found["items"]] == ["OLD"]
+
+    async def test_the_order_it_was_dragged_into_is_the_order_it_keeps(self, db):
+        first = await _product(db, sku="ONE")
+        second = await _product(db, sku="TWO")
+        third = await _product(db, sku="THREE")
+        order = await _order(db)
+        for product in (first, second, third):
+            await _file(db, product)
+            await _line(db, order, product, to_print=1)
+        await db.commit()
+
+        await production.set_priority(
+            db, [(third.id, None), (first.id, None), (second.id, None)]
+        )
+        await db.commit()
+        assert [row["sku"] for row in (await production.to_make(db))["priority"]] == [
+            "THREE",
+            "ONE",
+            "TWO",
+        ]
+
+        # Dragged again, and the new order is the order — not merged with
+        # the old one, which is how two people dragging at once ends up with
+        # a list neither of them chose.
+        await production.set_priority(
+            db, [(second.id, None), (third.id, None), (first.id, None)]
+        )
+        await db.commit()
+        assert [row["sku"] for row in (await production.to_make(db))["priority"]] == [
+            "TWO",
+            "THREE",
+            "ONE",
+        ]
+
+    async def test_dragging_it_back_puts_it_where_its_wait_belongs(self, db):
+        old = await _product(db, sku="OLD")
+        rush = await _product(db, sku="RUSH")
+        await _file(db, old)
+        await _file(db, rush)
+        await _line(db, await _order(db, "9001", days_ago=20), old, to_print=1)
+        await _line(db, await _order(db, "9002", days_ago=1), rush, to_print=1)
+        await db.commit()
+
+        await production.set_priority(db, [(rush.id, None)])
+        await db.commit()
+        await production.set_priority(db, [])
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert found["priority"] == []
+        assert [row["sku"] for row in found["items"]] == ["OLD", "RUSH"]
+
+    async def test_two_variations_are_pinned_separately(self, db):
+        """They are two different things to make, so "first" is a thing that
+        can be true of one and not the other."""
+        part = await _product(db)
+        await _file(db, part)
+        blue = ProductVariation(
+            product_id=part.id, label="Blue", options=[{"name": "Colour", "value": "Blue"}]
+        )
+        red = ProductVariation(
+            product_id=part.id, label="Red", options=[{"name": "Colour", "value": "Red"}]
+        )
+        db.add_all([blue, red])
+        await db.flush()
+        order = await _order(db)
+        await _line(db, order, part, to_print=1, variation_id=blue.id)
+        await _line(db, order, part, to_print=1, variation_id=red.id)
+        await db.commit()
+
+        await production.set_priority(db, [(part.id, red.id)])
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert [row["variation_label"] for row in found["priority"]] == ["Red"]
+        assert [row["variation_label"] for row in found["items"]] == ["Blue"]
+
+    async def test_a_pinned_thing_with_nothing_to_do_still_shows(self, db):
+        """Otherwise it is invisible, and an invisible pin is one nobody can
+        take off — which is how a list like this silently rots."""
+        part = await _product(db)
+        await _file(db, part)
+        await db.commit()
+
+        await production.set_priority(db, [(part.id, None)])
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert len(found["priority"]) == 1
+        row = found["priority"][0]
+        assert (row["sku"], row["units"]) == ("PART-X", 0)
+        # And it is not work, so it is not in the count.
+        assert found["totals"]["items"] == 0
+        assert found["totals"]["units"] == 0
+
+    async def test_a_pin_survives_the_thing_being_made_and_wanted_again(self, db):
+        """It stays until somebody takes it off. A pin that cleared itself
+        the moment a backlog emptied would come back next week with nobody
+        able to say why."""
+        part = await _product(db)
+        await _file(db, part)
+        await production.set_priority(db, [(part.id, None)])
+        await db.commit()
+
+        await _line(db, await _order(db, "9100"), part, to_print=4)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert [(row["sku"], row["units"]) for row in found["priority"]] == [
+            ("PART-X", 4)
+        ]
+        assert found["items"] == []
+
+    async def test_the_same_thing_twice_is_pinned_once(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db), part, to_print=1)
+        await db.commit()
+
+        kept = await production.set_priority(
+            db, [(part.id, None), (part.id, None)]
+        )
+        await db.commit()
+        assert kept == [(part.id, None)]
+        assert len((await production.to_make(db))["priority"]) == 1
+
+    async def test_a_thing_that_does_not_exist_cannot_be_pinned(self, db):
+        import uuid as _uuid
+
+        with pytest.raises(ValueError):
+            await production.set_priority(db, [(_uuid.uuid4(), None)])
+
+    async def test_a_variation_of_another_product_cannot_be_pinned(self, db):
+        """Nothing could ever match it, so the row would sit there for ever
+        meaning nothing."""
+        part = await _product(db)
+        other = await _product(db, sku="PART-Y")
+        variation = ProductVariation(
+            product_id=other.id,
+            label="Blue",
+            options=[{"name": "Colour", "value": "Blue"}],
+        )
+        db.add(variation)
+        await db.flush()
+        await db.commit()
+
+        with pytest.raises(ValueError):
+            await production.set_priority(db, [(part.id, variation.id)])
+
+    async def test_pinning_follows_the_product_out_of_the_catalogue(self, db):
+        """Delete the product and the pin goes with it, rather than becoming
+        a row pointing at nothing."""
+        from sqlalchemy import delete, select as _select
+
+        from app.models import ProductionPriority
+
+        part = await _product(db)
+        await db.commit()
+        await production.set_priority(db, [(part.id, None)])
+        await db.commit()
+
+        await db.execute(delete(Product).where(Product.id == part.id))
+        await db.commit()
+
+        left = (await db.execute(_select(ProductionPriority))).scalars().all()
+        assert left == []
+
+
+class TestFirstOverTheWire:
+    async def test_dragging_a_row_up_comes_back_as_the_whole_screen(self, db, signed_in):
+        old = await _product(db, sku="OLD")
+        rush = await _product(db, sku="RUSH")
+        await _file(db, old)
+        await _file(db, rush)
+        await _line(db, await _order(db, "9001", days_ago=20), old, to_print=1)
+        await _line(db, await _order(db, "9002", days_ago=1), rush, to_print=1)
+        await db.commit()
+
+        response = await signed_in.put(
+            "/api/production/priority",
+            json={"items": [{"product_id": str(rush.id)}]},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # The answer is the list as it now reads, so the screen never has to
+        # guess what the server did with it.
+        assert [row["sku"] for row in body["priority"]] == ["RUSH"]
+        assert [row["sku"] for row in body["items"]] == ["OLD"]
+
+        again = (await signed_in.get("/api/production")).json()
+        assert [row["sku"] for row in again["priority"]] == ["RUSH"]
+
+    async def test_an_empty_list_clears_everything(self, db, signed_in):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db), part, to_print=1)
+        await db.commit()
+        await signed_in.put(
+            "/api/production/priority",
+            json={"items": [{"product_id": str(part.id)}]},
+        )
+
+        body = (
+            await signed_in.put("/api/production/priority", json={"items": []})
+        ).json()
+        assert body["priority"] == []
+        assert [row["sku"] for row in body["items"]] == ["PART-X"]
+
+    async def test_a_thing_that_does_not_exist_is_a_bad_request(self, db, signed_in):
+        import uuid as _uuid
+
+        response = await signed_in.put(
+            "/api/production/priority",
+            json={"items": [{"product_id": str(_uuid.uuid4())}]},
+        )
+        assert response.status_code == 400
+
+    async def test_the_list_is_capped(self, db, signed_in):
+        """It arrives from a browser, and a priority list is a handful of
+        things somebody reordered by hand."""
+        import uuid as _uuid
+
+        response = await signed_in.put(
+            "/api/production/priority",
+            json={"items": [{"product_id": str(_uuid.uuid4())} for _ in range(201)]},
+        )
+        assert response.status_code == 422
+
+    async def test_the_csv_carries_the_order_in_a_column(self, db, signed_in):
+        import csv
+        import io
+
+        old = await _product(db, sku="OLD")
+        rush = await _product(db, sku="RUSH")
+        await _file(db, old)
+        await _file(db, rush)
+        await _line(db, await _order(db, "9001", days_ago=20), old, to_print=1)
+        await _line(db, await _order(db, "9002", days_ago=1), rush, to_print=1)
+        await db.commit()
+        await signed_in.put(
+            "/api/production/priority",
+            json={"items": [{"product_id": str(rush.id)}]},
+        )
+
+        rows = list(
+            csv.DictReader(
+                io.StringIO((await signed_in.get("/api/production.csv")).text)
+            )
+        )
+        assert [row["Code"] for row in rows] == ["RUSH", "OLD"]
+        # A number rather than the row order alone, so it survives the first
+        # thing anybody does to a CSV, which is sort it.
+        assert (rows[0]["First"], rows[1]["First"]) == ("1", "")
+
+    async def test_it_takes_a_signed_in_user(self, db, client):
+        assert (
+            await client.put("/api/production/priority", json={"items": []})
+        ).status_code == 401
+
+
+class TestFirstReachesTheMachines:
+    """A priority list that only reordered a screen would be worse than none.
+
+    The whole claim the tab makes is "this goes first". If the next plate off
+    the queue is still whatever was planned earliest, the shop has a control
+    that looks like it works, which is how people stop trusting a tool.
+    """
+
+    @pytest.fixture
+    def farm(self, monkeypatch):
+        from test_intake_pipeline import FakeBambuddy
+
+        fake = FakeBambuddy()
+
+        async def client_for(_session):
+            return fake
+
+        monkeypatch.setattr(
+            "app.services.printing.bambuddy_api.client_for", client_for
+        )
+        return fake
+
+    async def test_a_pinned_thing_jumps_the_queue_to_a_machine(self, db, farm):
+        from app.services import printing
+
+        old = await _product(db, sku="OLD")
+        rush = await _product(db, sku="RUSH")
+        await _file(db, old, archive=601)
+        await _file(db, rush, archive=602)
+        order = await _order(db)
+        # Planned in this order, so without a pin this is the order they go.
+        older = await _line(db, order, old, to_print=1)
+        await _job(db, older, status="pending", units=1, candidates=_plate(601))
+        await db.commit()
+        newer = await _line(db, order, rush, to_print=1)
+        await _job(db, newer, status="pending", units=1, candidates=_plate(602))
+        await db.commit()
+
+        await production.set_priority(db, [(rush.id, None)])
+        await db.commit()
+
+        assert await printing.dispatch_pending(db) == {"dispatched": 2, "failed": 0}
+        assert [sent["archive_id"] for sent in farm.enqueued] == [602, 601]
+
+    async def test_without_a_pin_the_oldest_plate_still_goes_first(self, db, farm):
+        """The default has to survive the feature: a shop that pins nothing
+        should see exactly what it saw before."""
+        from app.services import printing
+
+        old = await _product(db, sku="OLD")
+        other = await _product(db, sku="OTHER")
+        await _file(db, old, archive=601)
+        await _file(db, other, archive=602)
+        order = await _order(db)
+        older = await _line(db, order, old, to_print=1)
+        await _job(db, older, status="pending", units=1, candidates=_plate(601))
+        await db.commit()
+        newer = await _line(db, order, other, to_print=1)
+        await _job(db, newer, status="pending", units=1, candidates=_plate(602))
+        await db.commit()
+
+        await printing.dispatch_pending(db)
+        assert [sent["archive_id"] for sent in farm.enqueued] == [601, 602]

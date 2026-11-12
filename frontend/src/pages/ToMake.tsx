@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import type { ProductionList, ProductionRunning } from '../lib/types'
+import type { ProductionItem, ProductionList, ProductionRunning } from '../lib/types'
 import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
 
-/** What the shop still has to make, and what is being made right now.
+/** What the shop still has to make, what it has decided goes first, and what
+ *  is being made right now.
  *
  * A list of *things and quantities*, and nothing else. How the making
  * happens — which file, which machine, what was sent where — is the Printers
@@ -15,13 +16,16 @@ import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
  * it is a walk rather than a machine is a note on the row, written where it
  * changes what the person does, and not a second list to read.
  *
- * **Being made** sits above the list, because it is the only part of the
- * screen that changes on its own. It is drawn as a bar per thing rather than
- * as a row in the table, since "how far along is it" is a quantity a shape
- * answers faster than a number does.
+ * **First** is the exception, and it is the shop's own: the list sorts by how
+ * long an order has waited, which is right until the afternoon somebody is on
+ * the phone. Drag a row up there and it goes first — on this screen, on the
+ * printed sheet, and in what actually gets sent to a machine. Drag it back and
+ * it rejoins the queue where its wait puts it.
  *
- * **To make** is everything else: longest wait first, because the thing that
- * has kept an order waiting longest is the one to put on next.
+ * **Being made** sits between them, because it is the only part of the screen
+ * that changes on its own. It is drawn as a bar per thing rather than as a
+ * row in a table, since "how far along is it" is a quantity a shape answers
+ * faster than a number does.
  */
 
 /* The two colours the screen uses for quantities, and the only two. Emerald
@@ -32,6 +36,25 @@ import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
    its colour as well as by the number beside it. */
 const MADE_FILL = 'bg-emerald-700'
 const HAPPENING_FILL = 'bg-amber-600'
+
+/* Where a dragged row would land. An inset shadow rather than a border, so
+   nothing on the page moves a pixel while somebody is aiming at it. */
+const DROP_ABOVE = 'shadow-[inset_0_2px_0_0_#047857]'
+const DROP_BELOW = 'shadow-[inset_0_-2px_0_0_#047857]'
+
+type Section = 'priority' | 'rest'
+type DropAt = { section: Section; index: number }
+
+/** A thing, as one string. The pair is what every list here is keyed on, and
+ *  a drag has to carry it through a `dataTransfer` that only speaks text. */
+const keyOf = (item: { product_id: string; variation_id: string | null }) =>
+  `${item.product_id}:${item.variation_id ?? ''}`
+
+const unkey = (key: string) => {
+  const cut = key.indexOf(':')
+  const variation = key.slice(cut + 1)
+  return { product_id: key.slice(0, cut), variation_id: variation || null }
+}
 
 function Tile({
   label,
@@ -65,6 +88,67 @@ function since(iso: string | null): string {
   if (hours < 48) return `${hours}h`
   const days = Math.floor(hours / 24)
   return days === 1 ? '1 day' : `${days} days`
+}
+
+function Chevron({ down }: { down?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true">
+      <path
+        d={down ? 'M4 6l4 4 4-4' : 'M4 10l4-4 4 4'}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function Cross() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true">
+      <path
+        d="M4 4l8 8M12 4l-8 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+/** One of the small controls beside a row.
+ *
+ * They exist because dragging is a mouse, and a mouse is not the only way
+ * anybody works: everything a drag does here, these do too, from a keyboard,
+ * in the same order. Muted until the row is hovered or one of them is
+ * focused, so the table reads as a list and not as a control panel.
+ */
+function RowButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="rounded p-1 text-ink-400 opacity-0 transition hover:bg-ink-100 hover:text-ink-700 focus:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
+    >
+      {children}
+    </button>
+  )
 }
 
 /** One thing being made, as a bar.
@@ -125,11 +209,114 @@ function Running({ item }: { item: ProductionRunning }) {
   )
 }
 
+/** One row of the list, in either section.
+ *
+ * Deliberately the same component in both: a thing does not change when it is
+ * made first, and a row that redrew itself on the way up would make the drag
+ * feel like it had done something other than move it.
+ */
+function Row({
+  item,
+  place,
+  dragging,
+  drop,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  controls,
+}: {
+  item: ProductionItem
+  place: number | null
+  dragging: boolean
+  drop: 'above' | 'below' | null
+  onDragStart: () => void
+  onDragEnd: () => void
+  onDragOver: (event: React.DragEvent) => void
+  controls: React.ReactNode
+}) {
+  const nothingLeft = item.units === 0
+  return (
+    <tr
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      className={cx(
+        'group cursor-grab text-ink-700 active:cursor-grabbing',
+        dragging && 'opacity-40',
+        drop === 'above' && DROP_ABOVE,
+        drop === 'below' && DROP_BELOW,
+      )}
+    >
+      <td className="w-8 py-2 pl-3 pr-0 text-right text-xs tabular-nums text-ink-400">
+        {place ?? ''}
+      </td>
+      <td className="px-3 py-2">
+        <span className="font-mono text-xs text-ink-500">{item.sku}</span>
+        <span
+          className={cx(
+            'ml-2 font-medium',
+            nothingLeft ? 'text-ink-500' : 'text-ink-900',
+          )}
+        >
+          {item.name}
+        </span>
+        {item.variation_label ? (
+          <span className="ml-1.5 text-xs text-ink-500">· {item.variation_label}</span>
+        ) : null}
+        {item.bundles.length ? (
+          <span className="ml-1.5 text-xs text-ink-400">
+            → {item.bundles.join(', ')}
+          </span>
+        ) : null}
+      </td>
+      <td className="px-3 py-2 text-right">
+        {nothingLeft ? (
+          <span className="text-xs text-ink-400">nothing outstanding</span>
+        ) : (
+          <>
+            <span className="text-base font-semibold tabular-nums text-ink-900">
+              {item.units}
+            </span>
+            {/* Where it comes from, said only when it changes the walk. A row
+                that is entirely off a shelf does not need the number said
+                twice. */}
+            {item.units_from_stock > 0 ? (
+              <span className="ml-1 text-xs font-normal text-ink-500">
+                {item.units_from_stock === item.units
+                  ? 'off a shelf'
+                  : `${item.units_from_stock} off a shelf`}
+              </span>
+            ) : null}
+          </>
+        )}
+      </td>
+      <td className="px-3 py-2 text-right text-xs text-ink-600">
+        {since(item.waiting_since)}
+      </td>
+      <td className="py-2 pl-3 pr-1">
+        {!item.can_start ? (
+          <Badge className="bg-red-100 text-red-800 ring-red-300">
+            Cannot be made yet
+          </Badge>
+        ) : null}
+      </td>
+      <td className="whitespace-nowrap py-2 pl-0 pr-2 text-right">{controls}</td>
+    </tr>
+  )
+}
+
 export default function ToMake() {
   const [list, setList] = useState<ProductionList | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [dropAt, setDropAt] = useState<DropAt | null>(null)
+  // A drag in progress is a half-finished thought, and the minute refresh
+  // would throw it away mid-gesture.
+  const busy = useRef(false)
 
   const load = useCallback(async () => {
+    if (busy.current) return
     try {
       setList(await api.get<ProductionList>('/api/production'))
       setError(null)
@@ -149,7 +336,100 @@ export default function ToMake() {
     return () => window.clearInterval(timer)
   }, [load])
 
+  /** Put a thing somewhere, and tell the server the whole order.
+   *
+   * The screen moves first and the server confirms, because a drag that
+   * waits for a round trip feels broken even when it is not. If the server
+   * disagrees, its answer replaces the guess — it is the one that decides
+   * what prints first.
+   */
+  const place = useCallback(
+    async (key: string, section: Section, index: number) => {
+      if (!list) return
+      const was = list.priority.map(keyOf)
+      const order = was.filter((other) => other !== key)
+      if (section === 'priority') {
+        // `index` means "before whatever is at that place now". Taking the
+        // row out first shifts everything after it up one, so dropping a row
+        // further down the list has to come back a step or it lands one
+        // short of where the line was drawn.
+        const from = was.indexOf(key)
+        const at = from >= 0 && from < index ? index - 1 : index
+        order.splice(Math.max(0, Math.min(at, order.length)), 0, key)
+      }
+
+      const everything = [...list.priority, ...list.items]
+      const found = new Map(everything.map((item) => [keyOf(item), item]))
+      const priority = order
+        .map((pinned) => found.get(pinned))
+        .filter((item): item is ProductionItem => Boolean(item))
+      const pinned = new Set(order)
+      // Out of the priority list and back into the queue, where its wait
+      // puts it — the server sorts the rest, so this keeps their order.
+      const items = everything.filter((item) => !pinned.has(keyOf(item)))
+
+      setList({ ...list, priority, items })
+      busy.current = true
+      try {
+        setList(
+          await api.put<ProductionList>('/api/production/priority', {
+            items: order.map(unkey),
+          }),
+        )
+        setError(null)
+      } catch (err) {
+        setError(errorMessage(err))
+        busy.current = false
+        await load()
+        return
+      }
+      busy.current = false
+    },
+    [list, load],
+  )
+
+  /** Which side of a row the pointer is on, so a drop lands where it looks
+   *  like it will rather than always before or always after. */
+  const aimAt = useCallback(
+    (section: Section, index: number) => (event: React.DragEvent) => {
+      event.preventDefault()
+      const box = (event.currentTarget as HTMLElement).getBoundingClientRect()
+      const below = event.clientY > box.top + box.height / 2
+      setDropAt({ section, index: below ? index + 1 : index })
+    },
+    [],
+  )
+
+  const drop = useCallback(
+    (fallback: DropAt) => (event: React.DragEvent) => {
+      event.preventDefault()
+      const key = dragging ?? event.dataTransfer.getData('text/plain')
+      const target = dropAt ?? fallback
+      setDragging(null)
+      setDropAt(null)
+      if (key) place(key, target.section, target.index)
+    },
+    [dragging, dropAt, place],
+  )
+
+  const marker = (section: Section, index: number, last: boolean) => {
+    if (!dropAt || dropAt.section !== section) return null
+    if (dropAt.index === index) return 'above' as const
+    if (last && dropAt.index === index + 1) return 'below' as const
+    return null
+  }
+
   const totals = list?.totals
+  const header = (
+    <tr className="text-left text-xs uppercase tracking-wide text-ink-500">
+      <th className="w-8 py-2 pl-3 pr-0" />
+      <th className="px-3 py-2 font-medium">Item</th>
+      <th className="px-3 py-2 text-right font-medium">Quantity</th>
+      <th className="px-3 py-2 text-right font-medium">Waiting</th>
+      <th className="py-2 pl-3 pr-1 font-medium" />
+      <th className="py-2 pl-0 pr-2" />
+    </tr>
+  )
 
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
@@ -208,6 +488,92 @@ export default function ToMake() {
               />
             </div>
 
+            {/* First. Its own card, above everything, because that is what
+                "first" has to look like — and a drop target big enough to
+                aim at even when it is empty. */}
+            <Card
+              className={cx(
+                'overflow-hidden',
+                dropAt?.section === 'priority' && 'ring-2 ring-emerald-700',
+              )}
+              onDragOver={(event: React.DragEvent) => {
+                event.preventDefault()
+                if (!dropAt || dropAt.section !== 'priority') {
+                  setDropAt({ section: 'priority', index: list.priority.length })
+                }
+              }}
+              onDrop={drop({ section: 'priority', index: list.priority.length })}
+            >
+              <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
+                <h2 className="text-sm font-semibold text-ink-800">First</h2>
+                <span className="text-xs text-ink-500">
+                  Whatever the shop has decided goes before the queue — on this
+                  screen, on the printed sheet, and on the machines.
+                </span>
+              </div>
+
+              {list.priority.length === 0 ? (
+                <p className="m-2 rounded-lg border-2 border-dashed border-ink-200 px-3 py-6 text-center text-xs text-ink-500">
+                  Nothing goes first. Drag a row up here — or use the{' '}
+                  <span className="inline-flex align-text-bottom text-ink-400">
+                    <Chevron />
+                  </span>{' '}
+                  beside it — and it jumps the queue until somebody drags it back.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[32rem] text-sm">
+                    <thead>{header}</thead>
+                    <tbody className="divide-y divide-ink-200">
+                      {list.priority.map((item, index) => (
+                        <Row
+                          key={keyOf(item)}
+                          item={item}
+                          place={index + 1}
+                          dragging={dragging === keyOf(item)}
+                          drop={marker(
+                            'priority',
+                            index,
+                            index === list.priority.length - 1,
+                          )}
+                          onDragStart={() => setDragging(keyOf(item))}
+                          onDragEnd={() => {
+                            setDragging(null)
+                            setDropAt(null)
+                          }}
+                          onDragOver={aimAt('priority', index)}
+                          controls={
+                            <>
+                              <RowButton
+                                label="Move up"
+                                disabled={index === 0}
+                                onClick={() => place(keyOf(item), 'priority', index - 1)}
+                              >
+                                <Chevron />
+                              </RowButton>
+                              <RowButton
+                                label="Move down"
+                                disabled={index === list.priority.length - 1}
+                                onClick={() => place(keyOf(item), 'priority', index + 2)}
+                              >
+                                <Chevron down />
+                              </RowButton>
+                              <RowButton
+                                label="Back to the queue"
+                                onClick={() => place(keyOf(item), 'rest', 0)}
+                              >
+                                <Cross />
+                              </RowButton>
+                            </>
+                          }
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Card>
+
             {list.in_production.length ? (
               <Card className="overflow-hidden">
                 <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
@@ -226,18 +592,25 @@ export default function ToMake() {
                 </div>
                 <div className="grid gap-2 p-2 sm:grid-cols-2">
                   {list.in_production.map((item) => (
-                    <Running
-                      key={`${item.product_id}:${item.variation_id ?? ''}`}
-                      item={item}
-                    />
+                    <Running key={keyOf(item)} item={item} />
                   ))}
                 </div>
               </Card>
             ) : null}
 
-            <Card className="overflow-hidden">
+            <Card
+              className={cx(
+                'overflow-hidden',
+                dropAt?.section === 'rest' && 'ring-2 ring-emerald-700',
+              )}
+              onDragOver={(event: React.DragEvent) => {
+                event.preventDefault()
+                setDropAt({ section: 'rest', index: 0 })
+              }}
+              onDrop={drop({ section: 'rest', index: 0 })}
+            >
               <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-200 px-3 py-2">
-                <h2 className="text-sm font-semibold text-ink-800">To make</h2>
+                <h2 className="text-sm font-semibold text-ink-800">Then</h2>
                 <span className="text-xs text-ink-500">
                   Everything not in hand yet, however it is going to get here.
                   Longest wait first.
@@ -247,77 +620,46 @@ export default function ToMake() {
               {list.items.length === 0 ? (
                 <EmptyState
                   title={
-                    list.in_production.length
-                      ? 'Nothing waiting to be started'
+                    list.in_production.length || list.priority.length
+                      ? 'Nothing else waiting'
                       : 'Nothing to make'
                   }
                   description={
-                    list.in_production.length
-                      ? 'Everything open orders are short of is already being made.'
+                    list.in_production.length || list.priority.length
+                      ? 'Everything open orders are short of is above.'
                       : 'Every open order has what it needs. New orders appear here within minutes of arriving.'
                   }
                 />
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[30rem] text-sm">
-                    <thead>
-                      <tr className="text-left text-xs uppercase tracking-wide text-ink-500">
-                        <th className="px-3 py-2 font-medium">Item</th>
-                        <th className="px-3 py-2 text-right font-medium">Quantity</th>
-                        <th className="px-3 py-2 text-right font-medium">Waiting</th>
-                        <th className="px-3 py-2 font-medium" />
-                      </tr>
-                    </thead>
+                  <table className="w-full min-w-[32rem] text-sm">
+                    <thead>{header}</thead>
                     <tbody className="divide-y divide-ink-200">
-                      {list.items.map((item) => (
-                        <tr
-                          key={`${item.product_id}:${item.variation_id ?? ''}`}
-                          className="text-ink-700"
-                        >
-                          <td className="px-3 py-2">
-                            <span className="font-mono text-xs text-ink-500">
-                              {item.sku}
-                            </span>
-                            <span className="ml-2 font-medium text-ink-900">
-                              {item.name}
-                            </span>
-                            {item.variation_label ? (
-                              <span className="ml-1.5 text-xs text-ink-500">
-                                · {item.variation_label}
-                              </span>
-                            ) : null}
-                            {item.bundles.length ? (
-                              <span className="ml-1.5 text-xs text-ink-400">
-                                → {item.bundles.join(', ')}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <span className="text-base font-semibold tabular-nums text-ink-900">
-                              {item.units}
-                            </span>
-                            {/* Where it comes from, said only when it changes
-                                the walk. A row that is entirely off a shelf
-                                does not need the number said twice. */}
-                            {item.units_from_stock > 0 ? (
-                              <span className="ml-1 text-xs font-normal text-ink-500">
-                                {item.units_from_stock === item.units
-                                  ? 'off a shelf'
-                                  : `${item.units_from_stock} off a shelf`}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="px-3 py-2 text-right text-xs text-ink-600">
-                            {since(item.waiting_since)}
-                          </td>
-                          <td className="px-3 py-2">
-                            {!item.can_start ? (
-                              <Badge className="bg-red-100 text-red-800 ring-red-300">
-                                Cannot be made yet
-                              </Badge>
-                            ) : null}
-                          </td>
-                        </tr>
+                      {list.items.map((item, index) => (
+                        <Row
+                          key={keyOf(item)}
+                          item={item}
+                          place={null}
+                          dragging={dragging === keyOf(item)}
+                          drop={null}
+                          onDragStart={() => setDragging(keyOf(item))}
+                          onDragEnd={() => {
+                            setDragging(null)
+                            setDropAt(null)
+                          }}
+                          onDragOver={(event) => {
+                            event.preventDefault()
+                            setDropAt({ section: 'rest', index })
+                          }}
+                          controls={
+                            <RowButton
+                              label="Make this first"
+                              onClick={() => place(keyOf(item), 'priority', 0)}
+                            >
+                              <Chevron />
+                            </RowButton>
+                          }
+                        />
                       ))}
                     </tbody>
                   </table>

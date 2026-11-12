@@ -60,6 +60,7 @@ from ..models import (
     OrderLine,
     PrintFile,
     Product,
+    ProductionPriority,
     ProductVariation,
 )
 from . import variations as variation_rules
@@ -321,12 +322,16 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
     # What is closest to finished, first: it is the next thing off a machine.
     under_way.sort(key=lambda row: (-row["progress"], row["started_at"] is None))
 
+    first, rest = await _split_out_priority(session, to_do)
+    listed = first + rest
+
     return {
-        "items": to_do,
+        "priority": first,
+        "items": rest,
         "in_production": under_way,
-        "blocked": [row for row in to_do if not row["can_start"]],
+        "blocked": [row for row in listed if not row["can_start"]],
         "unmatched": _unmatched(lines),
-        "totals": _totals(to_do, under_way, len({line.order_id for line in wanted})),
+        "totals": _totals(listed, under_way, len({line.order_id for line in wanted})),
         "generated_at": datetime.now().astimezone(),
     }
 
@@ -344,6 +349,178 @@ def _from_stock(line: OrderLine) -> int:
     right up to the label, which is the moment that happened.
     """
     return line.qty_from_stock if line.state not in GONE else 0
+
+
+async def _split_out_priority(
+    session: AsyncSession, to_do: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lift the things the shop has pinned out of the list, in its order.
+
+    A pinned thing with nothing outstanding still comes back, as a row
+    reading zero. It is the only way "still first, nothing to do" is
+    visible — and a priority a person cannot see is one they cannot take
+    off, which is how a list like this silently rots.
+    """
+    pins = (
+        (
+            await session.execute(
+                select(ProductionPriority).order_by(
+                    ProductionPriority.position, ProductionPriority.created_at
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not pins:
+        return [], to_do
+
+    by_key = {(row["product_id"], row["variation_id"]): row for row in to_do}
+    first: list[dict[str, Any]] = []
+    taken: set[tuple[Any, Any]] = set()
+    for pin in pins:
+        key = (pin.product_id, pin.variation_id)
+        if key in taken:
+            continue
+        taken.add(key)
+        row = by_key.get(key)
+        first.append(row if row is not None else _quiet_pin(pin))
+
+    return first, [row for row in to_do if (row["product_id"], row["variation_id"]) not in taken]
+
+
+def _quiet_pin(pin: ProductionPriority) -> dict[str, Any]:
+    """A pinned thing that nothing is waiting for, as a row of zeroes.
+
+    Everything a real row has, so the screen needs no second shape for it —
+    the only difference a reader sees is that the quantity is nought.
+    """
+    product = pin.product
+    return {
+        "product_id": pin.product_id,
+        "variation_id": pin.variation_id,
+        "sku": product.sku if product else "?",
+        "name": product.name if product else "Unknown",
+        "variation_label": pin.variation.label if pin.variation else None,
+        "fulfillment": product.fulfillment if product else None,
+        "can_start": True,
+        "units_needed": 0,
+        "units_started": 0,
+        "units_made": 0,
+        "units_happening": 0,
+        "started_at": None,
+        "units_from_stock": 0,
+        "units_to_make": 0,
+        "units": 0,
+        "order_count": 0,
+        "waiting_since": None,
+        "for_bundle": False,
+        "bundles": [],
+    }
+
+
+async def priority_keys(session: AsyncSession) -> list[tuple[Any, Any]]:
+    """What is pinned, in order. The shop's answer to "what goes first"."""
+    pins = (
+        (
+            await session.execute(
+                select(ProductionPriority).order_by(
+                    ProductionPriority.position, ProductionPriority.created_at
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [(pin.product_id, pin.variation_id) for pin in pins]
+
+
+async def set_priority(
+    session: AsyncSession,
+    wanted: list[tuple[Any, Any]],
+    *,
+    by: str | None = None,
+) -> list[tuple[Any, Any]]:
+    """Replace the whole priority list with this one, in this order.
+
+    The whole list rather than one move, because that is what the screen
+    actually knows: somebody dragged a row and the order they can see is now
+    the order they mean. Sending "move X to 3" instead would have the server
+    reconstruct a list it was never shown, and two people dragging at once
+    would interleave into an order neither of them chose. Sending the list
+    makes the last drag win, whole, which is the only outcome either of them
+    would recognise.
+
+    Raises ValueError for a thing that does not exist, or a variation that
+    belongs to a different product — a pin on a thing nobody can make is a
+    row that can never be acted on or explained.
+    """
+    seen: list[tuple[Any, Any]] = []
+    for key in wanted:
+        if key not in seen:
+            seen.append(key)
+
+    if seen:
+        products = {
+            row.id
+            for row in (
+                (
+                    await session.execute(
+                        select(Product).where(
+                            Product.id.in_({key[0] for key in seen})
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        }
+        variations = {
+            row.id: row.product_id
+            for row in (
+                (
+                    await session.execute(
+                        select(ProductVariation).where(
+                            ProductVariation.id.in_(
+                                {key[1] for key in seen if key[1] is not None}
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        }
+        for product_id, variation_id in seen:
+            if product_id not in products:
+                raise ValueError(f"No such product: {product_id}")
+            if variation_id is not None and variations.get(variation_id) != product_id:
+                raise ValueError(
+                    f"Variation {variation_id} does not belong to product {product_id}"
+                )
+
+    existing = {
+        (pin.product_id, pin.variation_id): pin
+        for pin in (await session.execute(select(ProductionPriority))).scalars().all()
+    }
+    for position, key in enumerate(seen):
+        pin = existing.pop(key, None)
+        if pin is None:
+            session.add(
+                ProductionPriority(
+                    product_id=key[0],
+                    variation_id=key[1],
+                    position=position,
+                    pinned_by=by,
+                )
+            )
+        else:
+            pin.position = position
+    # Whatever is left was dragged back off the list.
+    for pin in existing.values():
+        await session.delete(pin)
+    await session.flush()
+    return seen
 
 
 def _being_made(row: dict[str, Any]) -> dict[str, Any]:
@@ -373,8 +550,12 @@ def _being_made(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _totals(
-    to_do: list[dict[str, Any]], under_way: list[dict[str, Any]], orders: int
+    listed: list[dict[str, Any]], under_way: list[dict[str, Any]], orders: int
 ) -> dict[str, int]:
+    # A pinned thing with nothing outstanding is on the screen but is not
+    # work, so it is not in the count. A tile that said four when three
+    # things needed doing would be the one number on the page nobody trusts.
+    to_do = [row for row in listed if row["units"] > 0]
     return {
         "items": len(to_do),
         # The headline, and the two halves of it. The halves are on the tile

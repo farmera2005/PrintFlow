@@ -586,6 +586,7 @@ async def _one_of_everything(db) -> dict[str, int]:
         OrderLine,
         PrintJob,
         PrintFile,
+        ProductionPriority,
         ProductOptionItem,
     ProductVariation,
         SyncLog,
@@ -696,6 +697,14 @@ async def _one_of_everything(db) -> dict[str, int]:
     # The maintenance book, which is PrintFlow's own and has to come back with
     # everything else — it is the one record about a machine that exists
     # nowhere but here.
+    # What the shop decided goes first. Its own record, and the sort of
+    # thing a restore quietly losing would be noticed weeks later by
+    # somebody wondering why the rush job never jumped the queue.
+    db.add(
+        ProductionPriority(product_id=component.id, position=0, pinned_by="adam")
+    )
+    await db.flush()
+
     machine = Machine(name="H2D-01", model="H2D", serial="03003A2C003")
     db.add(machine)
     await db.flush()

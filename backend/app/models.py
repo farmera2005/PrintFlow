@@ -1484,3 +1484,72 @@ class OAuthState(Base):
     code_verifier: Mapped[str | None] = mapped_column(Text)
     redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = _created_at()
+
+
+class ProductionPriority(Base):
+    """A thing the shop has decided goes first.
+
+    Not a field on the product, because it is not a fact about the product:
+    "this goes first" is true of a Tuesday afternoon and false by Thursday,
+    and the thing it belongs to is the shop's own ordering of its work. So it
+    is a list, and the list has a position.
+
+    The row is a *thing* — a product and a variation — for the same reason
+    the To Make list is: priority applies to what gets made, and two
+    variations of one product are two different things to make. A row with no
+    variation means the product unvaried, not the product in general; a shop
+    that wants every variation first says so once per variation, because the
+    alternative is a rule with an invisible scope.
+
+    Deliberately keyed on the thing and not on an order line. Priority
+    outlives the line that prompted it, and a line that has been made takes
+    its own row away with it — which would quietly un-prioritise something the
+    shop never said it had finished with. It stays until somebody takes it
+    off, and the To Make tab shows it even when nothing is outstanding so that
+    "still first, nothing to do" is a thing a person can see and undo.
+    """
+
+    __tablename__ = "production_priorities"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    variation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_variations.id", ondelete="CASCADE")
+    )
+    # Where it sits in the list. Dense and rewritten whole on every change:
+    # the list is a handful of rows that a person reorders by hand, so the
+    # cost of rewriting it is nothing next to the cost of reasoning about
+    # gaps, ties and half-applied moves.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Who put it there. A priority nobody will own is one nobody dares move.
+    pinned_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint("position >= 0", name="ck_production_priority_position"),
+        # Partial indexes rather than one UniqueConstraint: a plain unique
+        # over both columns would let the unvaried product appear twice,
+        # because NULLs never collide.
+        Index(
+            "uq_production_priority_product",
+            "product_id",
+            unique=True,
+            postgresql_where=text("variation_id is null"),
+            sqlite_where=text("variation_id is null"),
+        ),
+        Index(
+            "uq_production_priority_variation",
+            "product_id",
+            "variation_id",
+            unique=True,
+            postgresql_where=text("variation_id is not null"),
+            sqlite_where=text("variation_id is not null"),
+        ),
+        Index("ix_production_priorities_position", "position"),
+    )
+
+    product: Mapped[Product] = relationship(lazy="selectin")
+    variation: Mapped[ProductVariation | None] = relationship(lazy="selectin")

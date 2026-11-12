@@ -36,9 +36,23 @@ export function Button({
   )
 }
 
-export function Card({ className, children }: { className?: string; children: ReactNode }) {
+/** The surface everything on a page sits on.
+ *
+ * Takes the ordinary div props as well, so a card can be a drop target or
+ * carry a handler without anybody having to wrap it in another div purely to
+ * hang an event on — which is how a layout quietly grows a layer nobody can
+ * later explain.
+ */
+export function Card({
+  className,
+  children,
+  ...rest
+}: React.ComponentPropsWithoutRef<'div'>) {
   return (
-    <div className={cx('rounded-lg bg-white shadow-sm ring-1 ring-ink-200', className)}>
+    <div
+      {...rest}
+      className={cx('rounded-lg bg-white shadow-sm ring-1 ring-ink-200', className)}
+    >
       {children}
     </div>
   )

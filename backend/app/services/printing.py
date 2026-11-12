@@ -7,7 +7,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,17 +15,18 @@ from ..integrations import bambuddy as bambuddy_api
 from ..integrations.base import IntegrationError
 from ..models import (
     JOB_CANCELLED,
-    LINE_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
     JOB_PENDING,
     JOB_PRINTING,
     JOB_QUEUED,
+    LINE_CANCELLED,
     PROVIDER_BAMBUDDY,
     Order,
     OrderLine,
-    PrintJob,
     PrintFile,
+    PrintJob,
+    ProductionPriority,
     ProductVariation,
 )
 from ..services import books, credentials, variations
@@ -260,14 +261,34 @@ async def dispatch_pending(session: AsyncSession, *, limit: int = 100) -> dict[s
             await session.execute(
                 select(PrintJob)
                 .join(OrderLine, OrderLine.id == PrintJob.order_line_id)
+                # What the shop pinned on the To Make tab, if anything. An
+                # outer join: almost nothing is pinned, and a plate for an
+                # unpinned thing must still go out.
+                .outerjoin(
+                    ProductionPriority,
+                    and_(
+                        ProductionPriority.product_id == OrderLine.product_id,
+                        ProductionPriority.variation_id.is_not_distinct_from(
+                            OrderLine.variation_id
+                        ),
+                    ),
+                )
                 .where(
                     PrintJob.status == JOB_PENDING,
                     OrderLine.state != LINE_CANCELLED,
                 )
-                # Oldest first. Unordered, the queue went out in whatever order
-                # the database felt like, which is neither what an operator
+                # Pinned things first, in the order somebody put them in,
+                # then oldest first. Without the first key a priority list
+                # would reorder a screen and change nothing a machine does,
+                # which is the kind of control that is worse than none.
+                # Without the rest, the queue went out in whatever order the
+                # database felt like, which is neither what an operator
                 # expects nor stable enough to reason about.
-                .order_by(PrintJob.created_at, PrintJob.id)
+                .order_by(
+                    ProductionPriority.position.asc().nulls_last(),
+                    PrintJob.created_at,
+                    PrintJob.id,
+                )
                 .limit(limit)
             )
         )
