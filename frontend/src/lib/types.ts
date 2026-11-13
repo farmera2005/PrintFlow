@@ -1004,6 +1004,16 @@ export interface ProductionList {
     order_count: number
     waiting_since: string | null
   }[]
+  /** Every open board column the list can draw from, in the board's order,
+   *  with what the whole shop is holding there — counted unfiltered, so the
+   *  number is what pressing the chip would give you rather than what you
+   *  have already got. */
+  columns: {
+    key: OrderStatus
+    orders: number
+    units: number
+    showing: boolean
+  }[]
   totals: {
     items: number
     /** Everything on the list, and the two halves of it. */

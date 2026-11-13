@@ -684,6 +684,41 @@ missing, not what an order adds up to. A bundle whose parts all exist asks for
 nothing here — what is left is putting it together, and that is the board's
 Assembly column, not this screen.
 
+### Narrowing it to board columns
+
+The whole shop at once is the right list for planning the day and the wrong
+one for working an hour of it. A row of chips above the tiles — the board's
+own columns, in the board's own order — narrows everything below to the
+orders sitting in those columns: *what do the orders nobody has started
+need*, or *what is the assembly bench waiting for*. Everything narrows
+together: the list, the First section, Being made, Waiting on a product, the
+tiles, and the CSV.
+
+**Only the open columns are offered.** Shipped, Complete and Cancelled orders
+ask for nothing, so a chip for them could only ever return an empty list —
+and a filter that can only disappoint is a question the screen should not
+ask.
+
+**Each chip carries the number it would give you**, counted over the whole
+shop rather than over what is currently showing. A column switched off still
+says what it is holding, which is the only thing that would make anybody
+switch it back on; a count that fell to nought the moment you excluded it
+would leave no way back. It is counted the way the list is — per thing, with
+work already under way subtracted once — so pressing a chip that says 17
+gives you seventeen and not a number near it. An empty column still shows,
+reading nought: an empty Assembly is an answer, and a missing Assembly is a
+puzzle.
+
+Switching the last chip off shows everything again rather than nothing,
+because a screen with no rows and no explanation is not a state worth being
+able to reach. **Show all** does the same thing by name.
+
+The choice is remembered **in that browser**, not on the server: it is where
+somebody is standing rather than something the shop has decided, and two
+people at two benches want different answers to it. The Download CSV link
+carries whatever is on screen, and the file is named for the columns in it,
+so two downloads on one day do not overwrite each other.
+
 ### First — when the dates are the wrong answer
 
 Longest wait first is right until the afternoon somebody is on the phone, a
@@ -768,7 +803,10 @@ order anywhere else on the board still wants its parts.
 **Download CSV** is the same list for a clipboard — a `First` column holding
 the priority number, then code, item, variation, quantity, how much of it is
 off a shelf, what it is for, how long it has waited and what is happening to
-it, with nothing to expand. The priority number is a column of its own rather
+it, with nothing to expand. It takes the same `?columns=` the screen does and
+the link carries whatever is showing, because a sheet that silently held more
+than the list it was printed from is a sheet somebody works the wrong day
+from. The priority number is a column of its own rather
 than only the row order, so it survives the first thing anybody does to a CSV,
 which is sort it. The screen refreshes itself every minute, so it can be left
 open on a shop floor — except while somebody is mid-drag, which is a

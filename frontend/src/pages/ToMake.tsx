@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
-import type { ProductionItem, ProductionList, ProductionRunning } from '../lib/types'
+import { COLUMN_LABELS } from '../lib/format'
+import type {
+  OrderStatus,
+  ProductionItem,
+  ProductionList,
+  ProductionRunning,
+} from '../lib/types'
 import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
 
 /** What the shop still has to make, what it has decided goes first, and what
@@ -26,7 +32,42 @@ import { Alert, Badge, Card, EmptyState, Spinner, cx } from '../components/ui'
  * that changes on its own. It is drawn as a bar per thing rather than as a
  * row in a table, since "how far along is it" is a quantity a shape answers
  * faster than a number does.
+ *
+ * The whole thing can be narrowed to board columns, because "what do the
+ * orders nobody has started need" and "what is the assembly bench waiting
+ * for" are two different afternoons. The choice is remembered in this
+ * browser, not on the server: it is where somebody is standing, not what the
+ * shop has decided, and two people at two benches want different answers.
  */
+
+/* Where this browser remembers which columns it was last showing. Per
+   viewer on purpose — see above. */
+const COLUMNS_KEY = 'printflow.tomake.columns'
+
+function remembered(): OrderStatus[] | null {
+  try {
+    const saved = window.localStorage.getItem(COLUMNS_KEY)
+    if (!saved) return null
+    const parsed = JSON.parse(saved)
+    return Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')
+      ? (parsed as OrderStatus[])
+      : null
+  } catch {
+    // A browser with storage switched off still gets a working screen; it
+    // just starts from the whole shop every time.
+    return null
+  }
+}
+
+function remember(columns: OrderStatus[] | null) {
+  try {
+    if (columns === null) window.localStorage.removeItem(COLUMNS_KEY)
+    else window.localStorage.setItem(COLUMNS_KEY, JSON.stringify(columns))
+  } catch {
+    /* Not worth a word on screen: the filter still works, it just will not
+       be there tomorrow. */
+  }
+}
 
 /* The two colours the screen uses for quantities, and the only two. Emerald
    already means finished everywhere else in PrintFlow and amber already
@@ -147,6 +188,57 @@ function RowButton({
       className="rounded p-1 text-ink-400 opacity-0 transition hover:bg-ink-100 hover:text-ink-700 focus:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
     >
       {children}
+    </button>
+  )
+}
+
+/** One board column, as a switch.
+ *
+ * It carries its own count, taken over the whole shop rather than over what
+ * is currently showing — so a column you have switched off still says what
+ * it is holding, which is the only thing that would make you switch it back
+ * on. A column holding nothing says so rather than disappearing: an empty
+ * Assembly is an answer, and a missing one is a puzzle.
+ */
+function ColumnChip({
+  column,
+  showing,
+  orders,
+  units,
+  onToggle,
+}: {
+  column: OrderStatus
+  showing: boolean
+  orders: number
+  units: number
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={showing}
+      title={
+        orders
+          ? `${orders} order${orders === 1 ? '' : 's'} here, wanting ${units}`
+          : 'Nothing here'
+      }
+      className={cx(
+        'rounded-full border px-2.5 py-1 text-xs font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700',
+        showing
+          ? 'border-emerald-700 bg-emerald-50 text-emerald-900'
+          : 'border-ink-200 bg-white text-ink-500 hover:border-ink-300 hover:text-ink-700',
+      )}
+    >
+      {COLUMN_LABELS[column]}
+      <span
+        className={cx(
+          'ml-1.5 tabular-nums',
+          showing ? 'text-emerald-700' : 'text-ink-400',
+        )}
+      >
+        {units}
+      </span>
     </button>
   )
 }
@@ -311,19 +403,28 @@ export default function ToMake() {
   const [error, setError] = useState<string | null>(null)
   const [dragging, setDragging] = useState<string | null>(null)
   const [dropAt, setDropAt] = useState<DropAt | null>(null)
+  // Null is "every open column", which is not the same as a list that
+  // happens to name all four: the first stays right when a column is added,
+  // and is what a screen nobody has touched should ask for.
+  const [columns, setColumns] = useState<OrderStatus[] | null>(remembered)
   // A drag in progress is a half-finished thought, and the minute refresh
   // would throw it away mid-gesture.
   const busy = useRef(false)
 
+  const query = useMemo(
+    () => (columns === null ? '' : `?columns=${columns.join(',')}`),
+    [columns],
+  )
+
   const load = useCallback(async () => {
     if (busy.current) return
     try {
-      setList(await api.get<ProductionList>('/api/production'))
+      setList(await api.get<ProductionList>(`/api/production${query}`))
       setError(null)
     } catch (err) {
       setError(errorMessage(err))
     }
-  }, [])
+  }, [query])
 
   useEffect(() => {
     load()
@@ -335,6 +436,32 @@ export default function ToMake() {
     const timer = window.setInterval(load, 60_000)
     return () => window.clearInterval(timer)
   }, [load])
+
+  /** Switch one column on or off.
+   *
+   * Switching the last one off would leave a screen that says nothing and
+   * explains nothing, so it goes back to showing everything instead — the
+   * same place the "Show all" link goes, reached by the same gesture.
+   */
+  const toggle = useCallback(
+    (column: OrderStatus) => {
+      if (!list) return
+      const open = list.columns.map((row) => row.key)
+      const showing = new Set(columns ?? open)
+      if (showing.has(column)) showing.delete(column)
+      else showing.add(column)
+      const next = open.filter((key) => showing.has(key))
+      const all = next.length === open.length || next.length === 0
+      setColumns(all ? null : next)
+      remember(all ? null : next)
+    },
+    [columns, list],
+  )
+
+  const showAll = useCallback(() => {
+    setColumns(null)
+    remember(null)
+  }, [])
 
   /** Put a thing somewhere, and tell the server the whole order.
    *
@@ -372,7 +499,7 @@ export default function ToMake() {
       busy.current = true
       try {
         setList(
-          await api.put<ProductionList>('/api/production/priority', {
+          await api.put<ProductionList>(`/api/production/priority${query}`, {
             items: order.map(unkey),
           }),
         )
@@ -385,7 +512,7 @@ export default function ToMake() {
       }
       busy.current = false
     },
-    [list, load],
+    [list, load, query],
   )
 
   /** Which side of a row the pointer is on, so a drop lands where it looks
@@ -437,17 +564,51 @@ export default function ToMake() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold text-ink-900">To make</h1>
           <span className="text-sm text-ink-500">
-            Everything open orders are short of, added up by item.
+            {columns === null
+              ? 'Everything open orders are short of, added up by item.'
+              : 'What these board columns are short of, added up by item.'}
           </span>
           <a
             className="ml-auto rounded-md px-2.5 py-1 text-xs font-medium text-ink-600 underline"
-            href="/api/production.csv"
+            href={`/api/production.csv${query}`}
           >
             Download CSV
           </a>
         </div>
 
         {error ? <Alert tone="error">{error}</Alert> : null}
+
+        {/* The board's own columns, as switches. Above the tiles rather than
+            beside them, because every number below depends on which of these
+            are on and a filter found afterwards is a filter read too late. */}
+        {list ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-ink-500">
+              Columns
+            </span>
+            {list.columns.map((column) => (
+              <ColumnChip
+                key={column.key}
+                column={column.key}
+                showing={column.showing}
+                orders={column.orders}
+                units={column.units}
+                onToggle={() => toggle(column.key)}
+              />
+            ))}
+            {columns === null ? (
+              <span className="ml-1 text-xs text-ink-400">all of them</span>
+            ) : (
+              <button
+                type="button"
+                onClick={showAll}
+                className="ml-1 rounded px-1.5 py-1 text-xs font-medium text-ink-600 underline"
+              >
+                Show all
+              </button>
+            )}
+          </div>
+        ) : null}
 
         {!list ? (
           <div className="flex justify-center py-10">
@@ -622,12 +783,19 @@ export default function ToMake() {
                   title={
                     list.in_production.length || list.priority.length
                       ? 'Nothing else waiting'
-                      : 'Nothing to make'
+                      : columns === null
+                        ? 'Nothing to make'
+                        : 'Nothing in these columns'
                   }
                   description={
                     list.in_production.length || list.priority.length
-                      ? 'Everything open orders are short of is above.'
-                      : 'Every open order has what it needs. New orders appear here within minutes of arriving.'
+                      ? 'Everything these columns are short of is above.'
+                      : columns === null
+                        ? 'Every open order has what it needs. New orders appear here within minutes of arriving.'
+                        : // Never "nothing to make" under a filter: the
+                          // difference between an empty shop and an empty
+                          // corner of it is the whole reason to say which.
+                          'The columns you are showing have everything they need. Switch another one on to see the rest.'
                   }
                 />
               ) : (

@@ -13,7 +13,7 @@ import io
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,17 +44,39 @@ class PriorityOrder(BaseModel):
     items: list[PriorityKey] = Field(default_factory=list, max_length=200)
 
 
+def _columns(raw: str | None) -> list[str] | None:
+    """Board columns off the query string: `?columns=new,assembly`.
+
+    Comma-separated rather than repeated, because this also has to live in
+    the href of a download link, where one short parameter is easier to read
+    and to copy than four.
+    """
+    if raw is None:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 @router.get("/production")
 async def read_production(
+    columns: str | None = Query(
+        None,
+        description="Board columns to show, comma-separated. All open columns "
+        "when left out.",
+        max_length=200,
+    ),
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    return await production.to_make(session)
+    try:
+        return await production.to_make(session, columns=_columns(columns))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/production/priority")
 async def set_priority(
     body: PriorityOrder,
+    columns: str | None = Query(None, max_length=200),
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -62,9 +84,16 @@ async def set_priority(
 
     The whole list in, the whole screen out: a drag changes two sections at
     once, and re-rendering from what the server actually stored is the only
-    version of this that cannot drift from it.
+    version of this that cannot drift from it. It takes the screen's
+    `columns` so that what comes back is the screen the person is looking
+    at — answering a drag with an unfiltered list would silently undo a
+    filter they set a moment ago.
     """
     try:
+        # Both arguments checked before anything is written, so a mistyped
+        # filter cannot leave the priority list changed and the caller
+        # looking at an error.
+        showing = production.resolve_columns(_columns(columns))
         await production.set_priority(
             session,
             [(key.product_id, key.variation_id) for key in body.items],
@@ -73,11 +102,17 @@ async def set_priority(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await session.commit()
-    return await production.to_make(session)
+    return await production.to_make(session, columns=showing)
 
 
 @router.get("/production.csv")
 async def download_production(
+    columns: str | None = Query(
+        None,
+        description="Board columns to include, comma-separated. All open "
+        "columns when left out.",
+        max_length=200,
+    ),
     _: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
@@ -86,8 +121,15 @@ async def download_production(
     One line per thing and how many of it. `From stock` says how much of that
     quantity is a walk to a shelf rather than a machine — a note on the row,
     the same as on the screen, and not a second list.
+
+    It takes the same `columns` as the screen, and the download link carries
+    whatever is on screen at the time: a sheet that silently held more than
+    the list it was printed from is a sheet somebody works the wrong day from.
     """
-    found = await production.to_make(session)
+    try:
+        found = await production.to_make(session, columns=_columns(columns))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
@@ -169,7 +211,13 @@ async def download_production(
             ]
         )
 
+    # The columns in the name, when it is not the whole shop: two downloads
+    # on the same day are two different lists, and a Downloads folder that
+    # silently overwrote one with the other would be a nasty surprise.
+    narrowed = [row["key"] for row in found["columns"] if row["showing"]]
     stamp = found["generated_at"].strftime("%Y-%m-%d")
+    if len(narrowed) != len(found["columns"]):
+        stamp = f"{stamp}-{'-'.join(name.replace('_', '-') for name in narrowed)}"
     return Response(
         content=buffer.getvalue(),
         media_type="text/csv",

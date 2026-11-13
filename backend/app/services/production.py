@@ -35,6 +35,7 @@ screen is a list of things and quantities.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -53,6 +54,7 @@ from ..models import (
     LINE_READY,
     LINE_SHIPPED,
     LINE_UNMATCHED,
+    BOARD_COLUMNS,
     ORDER_CANCELLED,
     ORDER_COMPLETE,
     ORDER_SHIPPED,
@@ -70,6 +72,11 @@ log = logging.getLogger("printflow.production")
 # Orders that have stopped asking for anything to be made. A shipped order's
 # parts exist; a cancelled one's are not wanted.
 CLOSED_ORDERS = (ORDER_SHIPPED, ORDER_COMPLETE, ORDER_CANCELLED)
+
+# The board columns this screen can draw from, in the board's own order. The
+# closed ones are not offered rather than offered and always empty: a filter
+# that can only ever return nothing is a question the screen should not ask.
+OPEN_COLUMNS = tuple(name for name in BOARD_COLUMNS if name not in CLOSED_ORDERS)
 
 # Lines whose making is behind them, whatever the order is doing.
 MADE_STATES = (LINE_PRINTED, LINE_READY, LINE_LABELED, LINE_SHIPPED, LINE_CANCELLED)
@@ -178,14 +185,48 @@ def _when(order: Order) -> datetime | None:
     return order.placed_at or order.created_at
 
 
-async def to_make(session: AsyncSession) -> dict[str, Any]:
+def resolve_columns(columns: Sequence[str] | None) -> tuple[str, ...]:
+    """Which board columns to draw from, from whatever the caller asked for.
+
+    Nothing asked for means all of them, because the useful default is the
+    whole shop. A name this screen cannot show is an error rather than a
+    silent fallback to everything: a typo that quietly widens a filter is
+    the sort of thing somebody only notices after acting on the wrong list.
+    """
+    if not columns:
+        return OPEN_COLUMNS
+    chosen: list[str] = []
+    for name in columns:
+        key = (name or "").strip()
+        if not key:
+            continue
+        if key not in OPEN_COLUMNS:
+            raise ValueError(
+                f"{key!r} is not a column this list can show. "
+                f"Open columns are: {', '.join(OPEN_COLUMNS)}."
+            )
+        if key not in chosen:
+            chosen.append(key)
+    return tuple(chosen) if chosen else OPEN_COLUMNS
+
+
+async def to_make(
+    session: AsyncSession, *, columns: Sequence[str] | None = None
+) -> dict[str, Any]:
     """One list of things to make, what is already being made, and what is stuck.
+
+    `columns` narrows it to orders sitting in those board columns — "what do
+    the orders nobody has started on need", or "what is the assembly bench
+    waiting for". The default is every open column, which is the whole shop.
 
     One query for the lines and their products — the shop floor refreshes
     this screen, and a query per row would make a list of forty things forty
-    round trips.
+    round trips. The narrowing happens here rather than in the query, because
+    the column tallies have to count what the *unfiltered* shop holds: a chip
+    whose number changed as you pressed it would be no way back.
     """
-    lines = list(
+    chosen = resolve_columns(columns)
+    everything = list(
         (
             await session.execute(
                 select(OrderLine)
@@ -208,19 +249,29 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
     # lines with their own quantities, so they are already on the list — all
     # the bundle contributes is its name, as what its parts are for.
     children_of: dict[Any, list[OrderLine]] = {}
-    for line in lines:
+    for line in everything:
         if line.parent_line_id is not None:
             children_of.setdefault(line.parent_line_id, []).append(line)
 
     has_children = set(children_of)
     bundle_of: dict[Any, str] = {}
-    for line in lines:
+    for line in everything:
         kids = children_of.get(line.id)
         if not kids:
             continue
         name = line.product.name if line.product else (line.title or line.sku_raw)
         for child in kids:
             bundle_of[child.id] = name or "a bundle"
+
+    def asks_for_something(line: OrderLine) -> bool:
+        if line.id in has_children:
+            return False
+        if line.product_id is None:
+            return line.state == LINE_UNMATCHED
+        return _to_print(line) > 0 or _from_stock(line) > 0
+
+    tallies = _column_tallies(everything, asks_for_something, chosen)
+    lines = [line for line in everything if line.order.status in chosen]
 
     wanted = [
         line
@@ -331,9 +382,62 @@ async def to_make(session: AsyncSession) -> dict[str, Any]:
         "in_production": under_way,
         "blocked": [row for row in listed if not row["can_start"]],
         "unmatched": _unmatched(lines),
+        "columns": tallies,
         "totals": _totals(listed, under_way, len({line.order_id for line in wanted})),
         "generated_at": datetime.now().astimezone(),
     }
+
+
+def _column_tallies(
+    everything: list[OrderLine],
+    asks_for_something,
+    chosen: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Every open board column, what it is holding, and whether it is showing.
+
+    Counted over the whole shop and never over the filtered list, so the
+    numbers are what you would get by pressing the chip rather than what you
+    have got already. A count that fell to nothing the moment you excluded a
+    column would leave somebody no way of finding their way back to it.
+
+    Columns with nothing in them are still listed. A shop looking at an empty
+    screen needs to see that Assembly is empty, not wonder where it went.
+    """
+    orders: dict[str, set[Any]] = {name: set() for name in OPEN_COLUMNS}
+    # Grouped the same way the list itself is — per thing, within the
+    # column — because the subtraction of work already under way happens
+    # once per thing and not once per line. Counting the lines straight
+    # would have a chip promise more than pressing it delivers, which is
+    # the one thing a number on a filter must never do.
+    needed: dict[tuple[str, Any, Any], list[int]] = {}
+    for line in everything:
+        column = line.order.status
+        if column not in orders or not asks_for_something(line):
+            continue
+        orders[column].add(line.order_id)
+        if line.product_id is None:
+            # Nothing matched it, so nothing aggregates: it is its own row
+            # and its own quantity.
+            needed[(column, line.id, None)] = [line.quantity, 0, 0]
+            continue
+        tally = needed.setdefault((column, line.product_id, line.variation_id), [0, 0, 0])
+        tally[0] += _to_print(line)
+        tally[1] += _units(line, UNDER_WAY)
+        tally[2] += _from_stock(line)
+
+    units: dict[str, int] = {name: 0 for name in OPEN_COLUMNS}
+    for (column, _, _), (to_print, started, from_stock) in needed.items():
+        units[column] += max(to_print - started, 0) + from_stock
+
+    return [
+        {
+            "key": name,
+            "orders": len(orders[name]),
+            "units": units[name],
+            "showing": name in chosen,
+        }
+        for name in OPEN_COLUMNS
+    ]
 
 
 def _to_print(line: OrderLine) -> int:

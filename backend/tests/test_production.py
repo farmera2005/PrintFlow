@@ -1122,3 +1122,298 @@ class TestFirstReachesTheMachines:
 
         await printing.dispatch_pending(db)
         assert [sent["archive_id"] for sent in farm.enqueued] == [601, 602]
+
+
+class TestNarrowingToBoardColumns:
+    """"What do the orders nobody has started need" and "what is the
+    assembly bench waiting for" are two different afternoons.
+
+    The thing worth testing is not that a filter filters: it is that the
+    screen stays readable through one. The tallies have to count the whole
+    shop so there is a way back, the totals have to count what is actually
+    shown, and a column the list can never draw from must not be offered.
+    """
+
+    async def test_by_default_every_open_column_is_showing(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db, status="assembly"), part, to_print=1)
+        await db.commit()
+
+        found = await production.to_make(db)
+        assert [row["key"] for row in found["columns"]] == [
+            "new",
+            "in_production",
+            "assembly",
+            "ready_to_ship",
+        ]
+        assert all(row["showing"] for row in found["columns"])
+
+    async def test_only_the_named_columns_are_on_the_list(self, db):
+        bench = await _product(db, sku="BENCH")
+        fresh = await _product(db, sku="FRESH")
+        await _file(db, bench)
+        await _file(db, fresh)
+        await _line(db, await _order(db, "9001", status="assembly"), bench, to_print=2)
+        await _line(db, await _order(db, "9002", status="new"), fresh, to_print=3)
+        await db.commit()
+
+        found = await production.to_make(db, columns=["assembly"])
+        assert [row["sku"] for row in found["items"]] == ["BENCH"]
+        assert found["totals"]["units"] == 2
+        assert found["totals"]["orders"] == 1
+        assert [row["key"] for row in found["columns"] if row["showing"]] == [
+            "assembly"
+        ]
+
+    async def test_two_columns_are_added_together(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        for index, status in enumerate(("new", "in_production", "assembly")):
+            order = await _order(db, number=f"930{index}", status=status)
+            await _line(db, order, part, to_print=2)
+        await db.commit()
+
+        found = await production.to_make(db, columns=["new", "assembly"])
+        assert [(row["sku"], row["units"]) for row in found["items"]] == [("PART-X", 4)]
+        assert found["totals"]["orders"] == 2
+
+    async def test_the_tallies_count_the_whole_shop_not_the_filtered_list(self, db):
+        """Otherwise a column you switched off reads nought, and there is no
+        way of knowing it was worth switching back on."""
+        bench = await _product(db, sku="BENCH")
+        fresh = await _product(db, sku="FRESH")
+        await _file(db, bench)
+        await _file(db, fresh)
+        await _line(db, await _order(db, "9001", status="assembly"), bench, to_print=2)
+        await _line(db, await _order(db, "9002", status="new"), fresh, to_print=3)
+        await db.commit()
+
+        tallies = {
+            row["key"]: row
+            for row in (await production.to_make(db, columns=["assembly"]))["columns"]
+        }
+        assert (tallies["new"]["units"], tallies["new"]["orders"]) == (3, 1)
+        assert tallies["new"]["showing"] is False
+        assert (tallies["assembly"]["units"], tallies["assembly"]["orders"]) == (2, 1)
+        assert tallies["assembly"]["showing"] is True
+
+    async def test_an_empty_column_is_listed_rather_than_missing(self, db):
+        """A shop looking at an empty screen needs to see that Assembly is
+        empty, not wonder where the chip went."""
+        found = await production.to_make(db)
+        assert len(found["columns"]) == 4
+        assert all(row["units"] == 0 for row in found["columns"])
+
+    async def test_what_is_being_made_narrows_with_everything_else(self, db):
+        part = await _product(db)
+        other = await _product(db, sku="OTHER")
+        await _file(db, part)
+        await _file(db, other)
+        here = await _line(
+            db, await _order(db, "9001", status="in_production"), part,
+            to_print=2, state="printing",
+        )
+        await _job(db, here, status="printing", units=2)
+        elsewhere = await _line(
+            db, await _order(db, "9002", status="assembly"), other,
+            to_print=2, state="printing",
+        )
+        await _job(db, elsewhere, status="printing", units=2)
+        await db.commit()
+
+        found = await production.to_make(db, columns=["in_production"])
+        assert [row["sku"] for row in found["in_production"]] == ["PART-X"]
+
+    async def test_an_unmatched_line_narrows_too(self, db):
+        for index, status in enumerate(("new", "assembly")):
+            order = await _order(db, number=f"940{index}", status=status)
+            await _line(
+                db, order, None, to_print=0, state="unmatched",
+                sku_raw=f"MYSTERY-{index}", title="Unknown", quantity=1,
+            )
+        await db.commit()
+
+        found = await production.to_make(db, columns=["assembly"])
+        assert [row["sku"] for row in found["unmatched"]] == ["MYSTERY-1"]
+        # And it is counted in the column it is sitting in, so the chip says
+        # there is something there to go and look at.
+        tallies = {row["key"]: row["units"] for row in found["columns"]}
+        assert (tallies["new"], tallies["assembly"]) == (1, 1)
+
+    async def test_a_pinned_thing_hidden_by_the_filter_still_shows(self, db):
+        """It reads zero, the same as a pin whose work is finished: this
+        view has nothing for it, and the way to find out why is to put the
+        column back."""
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db, status="assembly"), part, to_print=4)
+        await db.commit()
+        await production.set_priority(db, [(part.id, None)])
+        await db.commit()
+
+        found = await production.to_make(db, columns=["new"])
+        assert [(row["sku"], row["units"]) for row in found["priority"]] == [
+            ("PART-X", 0)
+        ]
+        assert found["totals"]["units"] == 0
+
+    async def test_a_closed_column_is_not_on_offer(self, db):
+        """A filter that can only ever return nothing is a question the
+        screen should not ask."""
+        for closed in ("shipped", "complete", "cancelled"):
+            with pytest.raises(ValueError):
+                await production.to_make(db, columns=[closed])
+
+    async def test_a_column_that_does_not_exist_is_an_error(self, db):
+        """A typo that quietly widened the filter back to everything is the
+        sort of thing somebody notices after acting on the wrong list."""
+        with pytest.raises(ValueError):
+            await production.to_make(db, columns=["assemby"])
+
+    async def test_asking_for_nothing_means_asking_for_everything(self, db):
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db, status="assembly"), part, to_print=1)
+        await db.commit()
+
+        for empty in (None, [], ["", "  "]):
+            found = await production.to_make(db, columns=empty)
+            assert [row["sku"] for row in found["items"]] == ["PART-X"]
+            assert all(row["showing"] for row in found["columns"])
+
+    async def test_the_same_column_twice_is_one_column(self, db):
+        assert production.resolve_columns(["new", "new"]) == ("new",)
+
+
+class TestNarrowingOverTheWire:
+    async def test_the_query_string_narrows_the_list(self, db, signed_in):
+        bench = await _product(db, sku="BENCH")
+        fresh = await _product(db, sku="FRESH")
+        await _file(db, bench)
+        await _file(db, fresh)
+        await _line(db, await _order(db, "9001", status="assembly"), bench, to_print=2)
+        await _line(db, await _order(db, "9002", status="new"), fresh, to_print=3)
+        await db.commit()
+
+        body = (await signed_in.get("/api/production?columns=assembly")).json()
+        assert [row["sku"] for row in body["items"]] == ["BENCH"]
+        assert [row["key"] for row in body["columns"] if row["showing"]] == ["assembly"]
+
+        both = (
+            await signed_in.get("/api/production?columns=assembly,new")
+        ).json()
+        assert {row["sku"] for row in both["items"]} == {"BENCH", "FRESH"}
+
+    async def test_a_column_nobody_has_is_a_bad_request(self, db, signed_in):
+        response = await signed_in.get("/api/production?columns=shipped")
+        assert response.status_code == 400
+        assert "shipped" in response.json()["detail"]
+
+    async def test_the_csv_carries_the_same_filter(self, db, signed_in):
+        import csv
+        import io
+
+        bench = await _product(db, sku="BENCH")
+        fresh = await _product(db, sku="FRESH")
+        await _file(db, bench)
+        await _file(db, fresh)
+        await _line(db, await _order(db, "9001", status="assembly"), bench, to_print=2)
+        await _line(db, await _order(db, "9002", status="new"), fresh, to_print=3)
+        await db.commit()
+
+        response = await signed_in.get("/api/production.csv?columns=assembly")
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        assert [row["Code"] for row in rows] == ["BENCH"]
+        # Named for what it holds, so two downloads on one day do not
+        # overwrite each other in a Downloads folder.
+        assert "assembly.csv" in response.headers["content-disposition"]
+
+    async def test_the_unfiltered_csv_is_named_for_the_day_alone(self, db, signed_in):
+        response = await signed_in.get("/api/production.csv")
+        assert "assembly" not in response.headers["content-disposition"]
+
+    async def test_a_drag_answers_with_the_screen_the_filter_chose(self, db, signed_in):
+        """Answering with the whole shop would silently undo a filter the
+        person set a moment before."""
+        bench = await _product(db, sku="BENCH")
+        fresh = await _product(db, sku="FRESH")
+        await _file(db, bench)
+        await _file(db, fresh)
+        await _line(db, await _order(db, "9001", status="assembly"), bench, to_print=2)
+        await _line(db, await _order(db, "9002", status="new"), fresh, to_print=3)
+        await db.commit()
+
+        body = (
+            await signed_in.put(
+                "/api/production/priority?columns=assembly",
+                json={"items": [{"product_id": str(bench.id)}]},
+            )
+        ).json()
+        assert [row["sku"] for row in body["priority"]] == ["BENCH"]
+        assert body["items"] == []
+        assert [row["key"] for row in body["columns"] if row["showing"]] == ["assembly"]
+
+    async def test_a_bad_filter_on_a_drag_changes_nothing(self, db, signed_in):
+        """Both arguments are checked before anything is written, so a
+        mistyped filter cannot leave the priority list quietly rearranged."""
+        part = await _product(db)
+        await _file(db, part)
+        await _line(db, await _order(db), part, to_print=1)
+        await db.commit()
+
+        response = await signed_in.put(
+            "/api/production/priority?columns=shipped",
+            json={"items": [{"product_id": str(part.id)}]},
+        )
+        assert response.status_code == 400
+        assert (await signed_in.get("/api/production")).json()["priority"] == []
+
+
+class TestTheChipNumbersAreTheTruth:
+    async def test_a_chip_promises_exactly_what_pressing_it_gives(self, db):
+        """The one thing a number on a filter must never do is overpromise.
+        So: take the whole shop's tallies, then press each chip in turn and
+        check the list adds up to what the chip said."""
+        part = await _product(db)
+        other = await _product(db, sku="OTHER")
+        shelf = await _product(db, sku="TRINKET", fulfillment="stocked")
+        await _file(db, part)
+        await _file(db, other)
+
+        # New: four wanted, two already under way — the chip must say two.
+        started = await _line(
+            db, await _order(db, "9001", status="new"), part, to_print=4
+        )
+        await _job(db, started, status="printing", units=2)
+        # In production: a thing off a shelf, which no machine is doing.
+        await _line(
+            db, await _order(db, "9002", status="in_production"), shelf,
+            to_print=0, state="allocated", quantity=3, qty_from_stock=3,
+        )
+        # Assembly: an ordinary three, plus a line nothing matched.
+        assembly = await _order(db, "9003", status="assembly")
+        await _line(db, assembly, other, to_print=3)
+        await _line(
+            db, assembly, None, to_print=0, state="unmatched",
+            sku_raw="MYSTERY-9", title="Unknown", quantity=1,
+        )
+        await db.commit()
+
+        promised = {
+            row["key"]: row["units"]
+            for row in (await production.to_make(db))["columns"]
+        }
+        assert promised == {
+            "new": 2,
+            "in_production": 3,
+            "assembly": 4,
+            "ready_to_ship": 0,
+        }
+
+        for column, said in promised.items():
+            found = await production.to_make(db, columns=[column])
+            delivered = sum(
+                row["units"] for row in found["priority"] + found["items"]
+            ) + sum(row["units"] for row in found["unmatched"])
+            assert delivered == said, f"{column} promised {said}, gave {delivered}"
