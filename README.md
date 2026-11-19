@@ -604,10 +604,51 @@ hide it. Each row opens the same order drawer as everywhere else.
 
 The board draws the five live columns, so a cancelled order is not on it and a
 shipped one scrolls away. **Orders** lists every order whatever its status, with
-a filter per status and a search over order number and buyer, and opens the same
-drawer.
+a filter per status and a search box, and opens the same drawer.
 
-Two ways back from a wrong match:
+### The search box
+
+One box, and it looks in every place somebody might know an order from: the
+**order number**, the **buyer**, the **items** on it — by listing name or by
+code, matched product or not — the **tracking number**, the **invoice number**
+and the **note**. The old search read two of those, which is fine right up
+until somebody is holding a parcel with a number printed on it, has been asked
+whether the shop ever made a cable bracket for a trade customer, or wrote a
+note last Tuesday and remembers three words of it. In each case the order
+exists, the search says nothing matched, and somebody scrolls two hundred rows
+instead.
+
+**Every word has to match something, but not the same something.** Typing
+`dana bracket` finds Dana's order containing a bracket; neither word has to
+appear beside the other, and adding a word always narrows. Six words is as
+many as it honours, which is more than anybody types with a plan.
+
+**A result says why it is there** when the reason is not already on the row —
+*matched the note*, *matched item "Cable bracket"*. A row whose match is
+invisible reads as the search being broken, and the fix for that is a
+sentence rather than a narrower search. A match on the number or the buyer
+explains nothing, because both are already drawn right there.
+
+**What you type is text, not a pattern.** `%` and `_` are wildcards to SQL and
+ordinary characters to a person, so a search for `50%` means fifty per cent.
+Finding nothing says what was looked for and where, rather than leaving
+somebody wondering whether the thing they typed is even a field the search
+reads.
+
+Press **/** to put the cursor in the box from anywhere on the page, and
+**Escape** to empty it. Typing does not fire a request per keystroke — it
+waits a quarter of a second, which is below what anybody reads as a delay and
+above the gap between two letters.
+
+The shipping address is deliberately not searched. It is a JSON column, and
+reaching into it means either a containment operator that degrades to a text
+match on anything but Postgres, or matching the word `city` in every order
+because it is a key. The buyer's name is the identity people actually search
+by, and that is already in.
+
+### Changing a match
+
+Two ways back from a wrong one:
 
 * **Change product** on a line hands it back to the picker. Anything queued for
   it that has not reached Bambuddy is dropped; anything already on a printer is

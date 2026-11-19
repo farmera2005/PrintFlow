@@ -42,6 +42,7 @@ from ..services import (
     finance,
     intake,
     manual_orders,
+    order_search,
     settings_store,
     shipping,
 )
@@ -104,11 +105,10 @@ async def list_orders(
         selectinload(Order.lines).selectinload(OrderLine.print_jobs),
         selectinload(Order.lines).selectinload(OrderLine.product),
     )
-    if q.strip():
-        needle = f"%{q.strip().lower()}%"
-        stmt = stmt.where(
-            Order.order_number.ilike(needle) | Order.buyer_name.ilike(needle)
-        )
+    # Every word has to match something, but not the same something — see the
+    # order_search service for what "something" covers and what it leaves out.
+    for condition in order_search.conditions(q):
+        stmt = stmt.where(condition)
     if status_filter:
         if status_filter not in ORDER_STATUSES:
             raise HTTPException(
@@ -124,8 +124,19 @@ async def list_orders(
             await session.execute(select(Order.status, func.count()).group_by(Order.status))
         ).all()
     )
+    cards = []
+    for order in orders:
+        card = board.order_card(order)
+        # Why this one is here, when the reason is not already drawn on the
+        # row. A result whose match is invisible reads as a bug.
+        matched = order_search.explain(order, q)
+        if matched:
+            card["matched_on"] = matched
+        cards.append(card)
+
     return {
-        "orders": [board.order_card(order) for order in orders],
+        "orders": cards,
+        "search": order_search.describe(len(cards), q),
         "counts": {name: counts.get(name, 0) for name in ORDER_STATUSES},
         "total": sum(counts.values()),
         # The same list the board gets, for the same reason: a card carries

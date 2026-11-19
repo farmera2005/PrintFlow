@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, errorMessage } from '../lib/api'
 import {
   COLUMN_LABELS,
@@ -44,18 +44,39 @@ const FILTERS: { key: OrderStatus | 'all'; label: string }[] = [
 ]
 
 interface OrdersResponse {
-  orders: Order[]
+  orders: (Order & {
+    /** Why this one is in the results, when the reason is not already on
+     *  the row — a match on a note or on a line nobody can see from here.
+     *  Absent when the match is self-evident. */
+    matched_on?: string[]
+  })[]
+  /** What the search understood: the words, how many matched, and whether
+   *  the query was longer than it is willing to honour. */
+  search: { terms: string[]; results: number; trimmed: boolean }
   counts: Record<string, number>
   total: number
 }
 
 export default function Orders() {
   const [data, setData] = useState<OrdersResponse | null>(null)
+  // What is in the box, and what has actually been asked for. Two states
+  // rather than one so the box never lags a keystroke behind the person
+  // typing into it — see the debounce below.
+  const [typed, setTyped] = useState('')
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<OrderStatus | 'all'>('all')
   const [error, setError] = useState<string | null>(null)
   const [openOrderId, setOpenOrderId] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const searchBox = useRef<HTMLInputElement>(null)
+
+  // A search that now reads six fields and the lines of every order is not
+  // one to run per keystroke. A quarter of a second is below what anybody
+  // reads as a delay and above the gap between two letters.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(typed), 250)
+    return () => window.clearTimeout(timer)
+  }, [typed])
 
   const load = useCallback(async () => {
     try {
@@ -72,19 +93,76 @@ export default function Orders() {
     load()
   }, [load])
 
+  // "/" puts the cursor in the box, the way every list people already use
+  // does. Ignored while they are typing into something else, which is the
+  // one thing that makes the shortcut a nuisance rather than a help.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const typingElsewhere =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable
+      if (event.key === '/' && !typingElsewhere) {
+        event.preventDefault()
+        searchBox.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   return (
     <div className="h-full overflow-y-auto p-3 sm:p-6">
       <div className="mx-auto max-w-5xl space-y-4">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold text-ink-900">Orders</h1>
-          <input
-            className={`${inputClass} max-w-xs`}
-            placeholder="Search by order number or buyer…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <div className="relative max-w-sm flex-1">
+            <input
+              ref={searchBox}
+              className={`${inputClass} pr-16`}
+              placeholder="Search orders…"
+              aria-label="Search orders"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={(event) => {
+                // Escape clears rather than blurs: the thing somebody wants
+                // back is the whole list, and reaching for the X with a
+                // hand already on the keyboard is the slower way to it.
+                if (event.key === 'Escape' && typed) {
+                  event.preventDefault()
+                  setTyped('')
+                }
+              }}
+            />
+            {typed ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setTyped('')
+                  searchBox.current?.focus()
+                }}
+                aria-label="Clear the search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-xs text-ink-400 hover:bg-ink-100 hover:text-ink-700"
+              >
+                Clear
+              </button>
+            ) : (
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-ink-200 px-1 text-[10px] font-medium text-ink-400">
+                /
+              </span>
+            )}
+          </div>
           {data ? (
-            <span className="text-sm text-ink-500">{data.total} in total</span>
+            <span className="text-sm text-ink-500">
+              {/* What was actually asked, and what came back. A count of
+                  everything is the wrong number to show beside a search. */}
+              {data.search.terms.length
+                ? `${data.search.results}${
+                    data.search.results === 200 ? '+' : ''
+                  } of ${data.total}`
+                : `${data.total} in total`}
+            </span>
           ) : null}
           {/* Here rather than on the board: the board is for orders that
               already exist, and this is the list that owns every order
@@ -125,9 +203,18 @@ export default function Orders() {
           <EmptyState
             title="No orders match"
             description={
-              query || filter !== 'all'
-                ? 'Try a different search, or clear the filter.'
-                : 'Orders appear here within a few minutes of arriving on a connected shop.'
+              // Say what was looked for and where, because "no match" on
+              // its own leaves somebody wondering whether the thing they
+              // typed is even a thing the search reads.
+              data.search.terms.length
+                ? `Nothing has ${
+                    data.search.terms.length > 1 ? 'all of ' : ''
+                  }${data.search.terms.map((term) => `“${term}”`).join(' and ')} in its ` +
+                  'number, buyer, items, tracking number, invoice number or note' +
+                  (filter !== 'all' ? ` — and this is only ${COLUMN_LABELS[filter]}.` : '.')
+                : filter !== 'all'
+                  ? 'Nothing is in this column. Try All.'
+                  : 'Orders appear here within a few minutes of arriving on a connected shop.'
             }
           />
         ) : (
@@ -161,6 +248,14 @@ export default function Orders() {
                 ) : null}
                 <span className="min-w-0 flex-1 truncate text-sm text-ink-600">
                   {order.buyer_name ?? 'Unknown buyer'}
+                  {/* Why it is here, when the reason is not visible on the
+                      row. Without it a result matched on a note or on one
+                      of its lines reads as the search being broken. */}
+                  {order.matched_on?.length ? (
+                    <span className="ml-1.5 text-xs text-ink-400">
+                      — matched {order.matched_on.join(', ')}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="text-xs text-ink-400">
                   {order.placed_at ? formatDateTime(order.placed_at) : '—'}
