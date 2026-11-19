@@ -742,6 +742,24 @@ class Order(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default=ORDER_NEW)
     # Why it was moved, when somebody bothered to say.
     status_note: Mapped[str | None] = mapped_column(Text)
+    # What the shop wants to remember about this order — "buyer asked for it
+    # by the 20th", "second attempt, first one warped". Free text and the
+    # shop's own, which is the point: everything else on an order is a fact
+    # some system reported, and none of those have anywhere to put the
+    # sentence somebody would otherwise write on a sticky note.
+    #
+    # Not `status_note`, which answers a different question ("why is this card
+    # here") and is written when a card is moved. A note that disappeared the
+    # next time somebody dragged the card would be a note nobody trusted.
+    notes: Mapped[str | None] = mapped_column(Text)
+    # Which of the shop's own flags this order carries, as a list of flag ids.
+    #
+    # Ids and not labels, so renaming "Rush" to "Priority" in Settings renames
+    # it on nine hundred orders rather than on none. The labels and colours
+    # live in one place — the order_flags setting — and an id this order holds
+    # that no longer exists there is simply not drawn: deleting a flag is
+    # allowed to be a decision about the shop, not a migration.
+    flags: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
 
     shipstation_order_id: Mapped[int | None] = mapped_column(BigInteger)
     shipstation_last_attempt_at: Mapped[datetime | None] = mapped_column(

@@ -5,6 +5,7 @@ import type { IntegrationStatus } from '../lib/types'
 import { PANELS } from '../components/IntegrationPanels'
 import SecurityPanel from '../components/SecurityPanel'
 import BackupPanel from '../components/BackupPanel'
+import OrderFlagSettings from '../components/OrderFlagSettings'
 import { Alert, Badge, Button, Card, Field, inputClass } from '../components/ui'
 
 interface SettingsResponse {
@@ -116,6 +117,8 @@ export default function Settings({ onChange }: { onChange: () => Promise<void> }
             </Card>
           )
         })}
+
+        <OrderFlagSettings />
 
         <IntervalsCard data={data} onSaved={load} />
         <PasswordCard />

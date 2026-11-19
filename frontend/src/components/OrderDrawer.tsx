@@ -22,6 +22,7 @@ import type {
 } from '../lib/types'
 import LabelDialog from './LabelDialog'
 import OrderFiles from './OrderFiles'
+import OrderNoteFlagsDialog, { OrderFlagPills } from './OrderFlags'
 import { Alert, Badge, Button, Field, Modal, Spinner, cx, inputClass } from './ui'
 
 /** The drawer's three views of one order.
@@ -562,6 +563,8 @@ export default function OrderDrawer({
   const [notice, setNotice] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('lines')
   const [pickerLine, setPickerLine] = useState<OrderLine | null>(null)
+  // Which half of the note-and-flags dialog to focus, or null for shut.
+  const [annotating, setAnnotating] = useState<'note' | 'flags' | null>(null)
   const [labelOpen, setLabelOpen] = useState(false)
   const [matching, setMatching] = useState(false)
 
@@ -791,6 +794,39 @@ export default function OrderDrawer({
               </div>
             ) : (
               <>
+                {/* Outside the tabs, because it is the shop's own writing
+                    about this order rather than one aspect of it, and
+                    because somebody who opened the drawer to read the note
+                    should not have to guess which tab it is filed under. */}
+                <section className="rounded-lg bg-white p-3 ring-1 ring-ink-200">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+                      Note &amp; flags
+                    </h3>
+                    <OrderFlagPills
+                      flags={order.flags}
+                      options={order.flag_options ?? []}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="ml-auto"
+                      onClick={() => setAnnotating(order.notes ? 'note' : 'flags')}
+                    >
+                      {order.notes || order.flags.length ? 'Edit' : 'Add'}
+                    </Button>
+                  </div>
+                  {order.notes ? (
+                    <p className="mt-2 whitespace-pre-wrap border-l-2 border-amber-300 bg-amber-50/60 py-1 pl-2 text-sm text-ink-700">
+                      {order.notes}
+                    </p>
+                  ) : order.flags.length ? null : (
+                    <p className="mt-1 text-xs text-ink-500">
+                      Nothing written on this one yet.
+                    </p>
+                  )}
+                </section>
+
                 <section className={tab === 'lines' ? undefined : 'hidden'}>
                   <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
                     Lines
@@ -1030,6 +1066,20 @@ export default function OrderDrawer({
           )
         }}
       />
+
+      {order && annotating ? (
+        <OrderNoteFlagsDialog
+          order={order}
+          options={order.flag_options ?? []}
+          focus={annotating}
+          onClose={() => setAnnotating(null)}
+          onSaved={async () => {
+            await load()
+            // The card behind this drawer carries both of them too.
+            onChanged()
+          }}
+        />
+      ) : null}
 
       {order && labelOpen ? (
         <LabelDialog

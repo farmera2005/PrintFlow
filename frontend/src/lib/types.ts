@@ -141,6 +141,14 @@ export interface Order {
   /** The column this card sits in. Only ever set by a person. */
   status: OrderStatus
   status_note: string | null
+  /** The shop's own sentence about this order. Nothing upstream owns it, so
+   *  no poll overwrites it and no status change clears it. */
+  notes: string | null
+  /** Which of the shop's flags this order carries, as ids. What each one is
+   *  called and how it draws comes with the board, not with the card — so a
+   *  flag renamed in Settings is renamed on every order at once. An id with
+   *  no matching option is simply not drawn. */
+  flags: string[]
   /** Where the roll-up would put it, when it has anything useful to say. Shown
    *  only when it disagrees, and never acted on. Null for an order whose lines
    *  are all cancelled: cancelling is decided, not observed. */
@@ -214,6 +222,9 @@ export interface Order {
   /** Files somebody attached. Drawer only, and loaded with the order so the
    *  tab can show a count without a second request. */
   files?: OrderFile[]
+  /** The shop's flags as the drawer needs them: a list it can draw from and
+   *  offer, without a second request for something it needs every time. */
+  flag_options?: OrderFlag[]
   bambuddy_base_url?: string | null
   /** Where it is going, as Etsy sent it. Drawer only. */
   ship_to?: {
@@ -248,6 +259,26 @@ export interface IntegrationStatus {
   detail: Record<string, any>
 }
 
+/** One of the shop's flags: what it is called, and what colour it draws in.
+ *
+ * The colour is a name from a fixed list and not a hex code, because the
+ * screen turns it into Tailwind classes and Tailwind only builds classes it
+ * can see written down somewhere. */
+export interface OrderFlag {
+  id: string
+  label: string
+  color: FlagColor
+}
+
+export type FlagColor =
+  | 'slate'
+  | 'red'
+  | 'amber'
+  | 'emerald'
+  | 'sky'
+  | 'violet'
+  | 'pink'
+
 export interface BoardResponse {
   columns: { key: OrderStatus; orders: Order[]; count: number }[]
   /** Delivered orders the board has stopped drawing. They are still in the
@@ -255,6 +286,8 @@ export interface BoardResponse {
   retired_from_board: number
   complete_board_hours: number
   integrations: IntegrationStatus[]
+  /** The shop's flags, sent once rather than resolved onto every card. */
+  flag_options: OrderFlag[]
 }
 
 export interface BomEntry {

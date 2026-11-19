@@ -293,6 +293,59 @@ decided rather than observed.
 
 Every move is written to the audit log with the note you gave it.
 
+### Notes and flags — the shop's own marks on an order
+
+Everything else an order carries is a fact some system reported: what Etsy
+sold, what QuickBooks was told, what the carrier last said. Two things on a
+card are the shop's own, and they are the only two a person writes.
+
+**A note** is free text, and it is yours. Nothing upstream owns it, so no poll
+overwrites it, no status change clears it, and re-running intake leaves it
+alone — which is exactly the difference between it and the status note, that
+being the sentence about *why a card moved*, written when somebody moves one.
+A note that vanished the next time a card was dragged would be a note nobody
+trusted. The first two lines show on the card; the whole thing is in the
+drawer and in the tooltip.
+
+**A flag** is a word the shop chose — *Rush*, *Fragile*, *Waiting on buyer* —
+and an order can carry several, because "rush" and "fragile" are both true of
+the same parcel. They draw as coloured pills at the top of the card, above
+everything the systems have to say, because they are the reason anybody picks
+this card out of a column of forty.
+
+Both are edited from the card itself, in one small dialog with the flags above
+the note: the moment somebody knows "this is the rush one" is the moment they
+are looking at the board, not three clicks into a drawer. The drawer has the
+same dialog for anybody who is already in there. Only what changed is sent, so
+two people working the same board do not overwrite each other's sentences by
+opening a dialog and closing it.
+
+#### Customising the flags
+
+A shop's vocabulary is its own, so **Settings → Order flags** is where they are
+set up: add, rename, recolour, reorder, delete. PrintFlow ships four as a
+starting point — an empty list reads as a feature that failed to load — and
+every one of them can go.
+
+An order stores a flag's **id**, not its label. Rename *Rush* to *Priority* and
+it is renamed on nine hundred orders at once rather than on none, because the
+word lives in one place and the card only ever carried a key to it. The id is
+minted from the first name you give it and never re-derived, so later renames
+cost the orders nothing: `reprint-second-go` stays readable in a backup where
+`f7c21a` would not.
+
+The colours are a fixed list of seven rather than a colour picker. The screen
+turns a colour into CSS classes, and a hex code typed into a box arrives as a
+class nobody built and a flag that draws as nothing at all — which looks
+exactly like a flag that failed to save.
+
+**Deleting a flag does not go and edit the orders that carry it.** Settings
+says how many there are before it lets you ("3 orders carry *Rush*"), because
+that number is what makes it a decision rather than a click. Afterwards those
+orders still hold it, it simply stops being drawn, and the count of them is
+reported at the bottom of the card so it is never silent. Add the flag back and
+they light up again — which is the forgiving direction for this to be wrong in.
+
 ### Delivery, and the Complete column
 
 Shipped is not finished — the parcel is in a van. The column used to hold the

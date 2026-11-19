@@ -42,6 +42,7 @@ from ..services import (
     finance,
     intake,
     manual_orders,
+    settings_store,
     shipping,
 )
 from ..services.attachments import AttachmentError
@@ -127,6 +128,9 @@ async def list_orders(
         "orders": [board.order_card(order) for order in orders],
         "counts": {name: counts.get(name, 0) for name in ORDER_STATUSES},
         "total": sum(counts.values()),
+        # The same list the board gets, for the same reason: a card carries
+        # flag ids, and what those are called lives in one place.
+        "flag_options": await settings_store.get_order_flags(session),
     }
 
 
@@ -862,6 +866,112 @@ class ShipToRequest(BaseModel):
     zip: str | None = Field(default=None, max_length=40)
     country: str | None = Field(default=None, max_length=60)
     email: str | None = Field(default=None, max_length=200)
+
+
+class OrderNotesRequest(BaseModel):
+    """What the shop wants to remember about this order.
+
+    Long enough for a paragraph somebody actually needs — a buyer's two
+    sentences about a colour, the history of a reprint — and bounded because
+    this arrives from a browser and a note is not a document.
+    """
+
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+@router.patch("/orders/{order_id}/notes")
+async def set_order_notes(
+    order_id: uuid.UUID,
+    body: OrderNotesRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Write, change or clear the note on an order.
+
+    Any order, from any channel, in any column. Unlike the address, nothing
+    upstream owns this: it is the shop's own sentence, so no poll can
+    overwrite it and no state change can clear it.
+    """
+    order = await _get_order(session, order_id)
+    was = bool(order.notes)
+    # Empty and whitespace both mean "no note", so clearing the box clears
+    # the note rather than storing a space that draws as an empty bubble.
+    order.notes = (body.notes or "").strip() or None
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="note_cleared" if was and not order.notes else "note_written",
+        # The note itself is not in the audit log. It is already on the
+        # order, and a log that copied every edit of it would be a second
+        # place to go looking for the current one.
+        detail={"length": len(order.notes or "")},
+        actor=user.username,
+    )
+    await session.commit()
+    return {"notes": order.notes}
+
+
+class OrderFlagsRequest(BaseModel):
+    """Which flags this order carries, as the whole list.
+
+    The whole list rather than add-this or remove-that, for the same reason
+    the priority list is sent whole: it is what the screen knows after
+    somebody has finished clicking, and it makes the last edit win rather
+    than two people interleaving into a set neither chose.
+    """
+
+    flags: list[str] = Field(default_factory=list, max_length=20)
+
+
+@router.put("/orders/{order_id}/flags")
+async def set_order_flags(
+    order_id: uuid.UUID,
+    body: OrderFlagsRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Set the flags on an order, from the shop's own list.
+
+    A flag the shop does not have is refused rather than stored. The one
+    direction this is lenient in is the other: an order already carrying a
+    flag that Settings has since deleted keeps it, because deleting a flag
+    is a decision about the shop's vocabulary and not an instruction to go
+    and edit history. It simply stops being drawn, and the next edit of this
+    order drops it.
+    """
+    order = await _get_order(session, order_id)
+    known = {flag["id"] for flag in await settings_store.get_order_flags(session)}
+    wanted: list[str] = []
+    for flag_id in body.flags:
+        key = (flag_id or "").strip()
+        if not key or key in wanted:
+            continue
+        if key not in known:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"There is no “{key}” flag. Flags are set up in Settings.",
+            )
+        wanted.append(key)
+
+    before = set(order.flags or [])
+    order.flags = wanted
+    await audit.record(
+        session,
+        entity_type="order",
+        entity_id=order.id,
+        action="flags_set",
+        # What changed rather than what it now is: a log entry reading
+        # "rush, gift" tells you nothing about whether this was the edit
+        # that added the rush.
+        detail={
+            "added": sorted(set(wanted) - before),
+            "removed": sorted(before - set(wanted)),
+        },
+        actor=user.username,
+    )
+    await session.commit()
+    return {"flags": order.flags}
 
 
 @router.patch("/orders/{order_id}/ship-to")

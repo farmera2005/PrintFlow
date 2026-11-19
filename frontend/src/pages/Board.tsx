@@ -12,9 +12,20 @@ import {
   formatMoney,
   sourcesWorthShowing,
 } from '../lib/format'
-import type { BoardResponse, Order, OrderLine, OrderStatus } from '../lib/types'
+import type {
+  BoardResponse,
+  Order,
+  OrderFlag,
+  OrderLine,
+  OrderStatus,
+} from '../lib/types'
 import InvoiceAction from '../components/InvoiceAction'
 import OrderDrawer from '../components/OrderDrawer'
+import OrderNoteFlagsDialog, {
+  NoteAndFlagsButtons,
+  NotePreview,
+  OrderFlagPills,
+} from '../components/OrderFlags'
 import { Alert, Badge, EmptyState, Spinner, cx } from '../components/ui'
 
 const REFRESH_MS = 20_000
@@ -67,9 +78,11 @@ function OrderCard({
   onDragStart,
   onDragEnd,
   onInvoiced,
+  onAnnotate,
   dragging,
   completeHours,
   showSource,
+  flagOptions,
 }: {
   order: Order
   onOpen: () => void
@@ -77,12 +90,16 @@ function OrderCard({
   onDragEnd: () => void
   /** Reload the board — an invoice changes what this card says about itself. */
   onInvoiced: () => void
+  /** Open the note-and-flags dialog on this order. */
+  onAnnotate: (tab: 'note' | 'flags') => void
   dragging: boolean
   /** How long a delivered card stays drawn, as the server sets it. */
   completeHours: number
   /** Whether to say which channel sold it. Off for a shop selling in one
    *  place, where the same badge on every card says nothing. */
   showSource: boolean
+  /** What the shop's flags are called, so an id on this card can be drawn. */
+  flagOptions: OrderFlag[]
 }) {
   const rows = leaves(order.lines).filter(
     (leaf) => !leaf.line.is_bundle && leaf.line.state !== 'cancelled',
@@ -133,6 +150,16 @@ function OrderCard({
         <span className="ml-auto text-xs text-ink-400">{formatAge(order.placed_at)}</span>
       </div>
       <p className="truncate text-sm text-ink-600">{order.buyer_name ?? 'Unknown buyer'}</p>
+
+      {/* The shop's own flags, above everything the systems have to say
+          about this order. They are up here because they are the one thing
+          on the card a person put there on purpose, and the reason anybody
+          would single this card out of a column of forty. */}
+      <OrderFlagPills
+        flags={order.flags}
+        options={flagOptions}
+        className="mt-1.5"
+      />
 
       <div className="mt-2 flex flex-wrap gap-1">
         {order.summary.unmatched_count > 0 ? (
@@ -233,12 +260,21 @@ function OrderCard({
         ) : null}
       </ul>
 
+      <NotePreview notes={order.notes} />
+
       {order.summary.units_to_print > 0 || order.summary.units_from_stock > 0 ? (
         <p className="mt-2 text-[11px] text-ink-500">
           {order.summary.units_from_stock} from stock · {order.summary.units_to_print} to
           print
         </p>
       ) : null}
+
+      {/* Quiet until wanted. An order nobody has written on should look like
+          an order rather than like a form, so these sit at the bottom in the
+          same grey as the figures above them. */}
+      <div className="-mb-1 mt-1.5 flex flex-wrap items-center gap-1">
+        <NoteAndFlagsButtons order={order} onOpen={onAnnotate} />
+      </div>
     </div>
   )
 }
@@ -247,6 +283,14 @@ export default function Board() {
   const [board, setBoard] = useState<BoardResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openOrderId, setOpenOrderId] = useState<string | null>(null)
+  // Which order's note and flags are being edited, and which half was
+  // reached for. The order itself is read back out of the board each
+  // render, so a refresh behind the dialog does not leave it editing a
+  // copy of something that has since moved on.
+  const [annotating, setAnnotating] = useState<{
+    id: string
+    tab: 'note' | 'flags'
+  } | null>(null)
   const [dragging, setDragging] = useState<string | null>(null)
   const [over, setOver] = useState<OrderStatus | null>(null)
 
@@ -318,6 +362,11 @@ export default function Board() {
   // Decided across the whole board, not per column, so a card does not gain
   // and lose its badge as it is dragged from one column to the next.
   const showSource = sourcesWorthShowing(board.columns.flatMap((column) => column.orders))
+  const annotatingOrder = annotating
+    ? board.columns
+        .flatMap((column) => column.orders)
+        .find((order) => order.id === annotating.id) ?? null
+    : null
 
   return (
     <div className="flex h-full flex-col">
@@ -407,8 +456,10 @@ export default function Board() {
                       }}
                       onOpen={() => setOpenOrderId(order.id)}
                       onInvoiced={load}
+                      onAnnotate={(tab) => setAnnotating({ id: order.id, tab })}
                       completeHours={board.complete_board_hours}
                       showSource={showSource}
+                      flagOptions={board.flag_options}
                     />
                   ))
                 )}
@@ -423,6 +474,20 @@ export default function Board() {
           orderId={openOrderId}
           onClose={() => setOpenOrderId(null)}
           onChanged={load}
+        />
+      ) : null}
+
+      {/* Looked up rather than captured: the board refreshes every twenty
+          seconds, and a dialog editing a snapshot would quietly save over
+          whatever changed underneath it. If the card goes — dragged to
+          Complete elsewhere, say — the dialog goes with it. */}
+      {annotatingOrder ? (
+        <OrderNoteFlagsDialog
+          order={annotatingOrder}
+          options={board.flag_options}
+          focus={annotating!.tab}
+          onClose={() => setAnnotating(null)}
+          onSaved={load}
         />
       ) : null}
     </div>

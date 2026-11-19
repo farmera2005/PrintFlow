@@ -21,7 +21,7 @@ from ..models import (
     OrderLine,
     PrintJob,
 )
-from ..services import attachments, credentials, finance, tracking
+from ..services import attachments, credentials, finance, settings_store, tracking
 from ..services.manufacturing import money
 from ..services.state import suggested_status
 
@@ -169,6 +169,12 @@ def order_card(order: Order) -> dict[str, Any]:
         "placed_at": order.placed_at,
         "status": order.status,
         "status_note": order.status_note,
+        # The shop's own two marks on the order. Ids rather than labels for
+        # the flags: what each one is called and what colour it draws in
+        # comes down once with the board, not once per card, so renaming a
+        # flag renames every card drawing it.
+        "notes": order.notes,
+        "flags": list(order.flags or []),
         # Where the rules would put it. Nothing acts on this — the board shows
         # it only when it disagrees with where the card actually is.
         "suggested_status": suggested_status(order, list(order.lines)),
@@ -259,6 +265,12 @@ async def build_board(
         "retired_from_board": retired,
         "complete_board_hours": COMPLETE_BOARD_HOURS,
         "integrations": await credentials.status_summary(session),
+        # What the shop's flags are called and how they draw. Sent once with
+        # the board rather than resolved onto every card: four hundred cards
+        # carrying the word "Rush" is four hundred copies of a word that can
+        # be renamed in one place, and the card that carries an id nobody
+        # recognises simply does not draw it.
+        "flag_options": await settings_store.get_order_flags(session),
     }
 
 
@@ -290,6 +302,9 @@ async def load_order_detail(session: AsyncSession, order_id) -> dict[str, Any] |
     # count before anybody opens it, and a second request to find out whether
     # there is anything to count is a request for nothing most of the time.
     payload["files"] = [attachments.serialize(row) for row in order.attachments]
+    # So the drawer can draw and offer the shop's flags without a second
+    # request for a list it is going to need every time it opens.
+    payload["flag_options"] = await settings_store.get_order_flags(session)
     bambuddy = await credentials.load(session, "bambuddy")
     base_url = (bambuddy.get("base_url") or "").rstrip("/") if bambuddy else ""
     payload["bambuddy_base_url"] = base_url or None
